@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DGX Spark Monitor</title>
+<script src="chart.umd.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --card2: #1c2330;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --blue: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 14px;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+header h1 { font-size: 17px; margin: 0; }
+header #clock { color: var(--muted); font-size: 13px; }
+main { padding: 16px 20px 32px; max-width: 1400px; margin: 0 auto; }
+section { margin-bottom: 22px; }
+section > h2 {
+  font-size: 14px;
+  color: var(--muted);
+  border-left: 3px solid var(--blue);
+  padding-left: 8px;
+  margin: 0 0 10px;
+}
+/* ---- Tier 1 ---- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.card .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.card .value { font-size: 22px; font-weight: 600; }
+.card .value .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+.card .sub { color: var(--muted); font-size: 11px; margin-top: 3px; min-height: 14px; }
+.ok { color: var(--green); }
+.warn { color: var(--yellow); }
+.hot { color: var(--red); }
+/* ---- Tier 2 ---- */
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 10px;
+}
+.chart-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px 6px;
+}
+.chart-card h3 { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.chart-card .cwrap { position: relative; height: 170px; }
+/* ---- Tier 3 ---- */
+#vllm-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+#vllm-headline { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 8px; }
+#vllm-headline .item .k { color: var(--muted); font-size: 11px; display: block; }
+#vllm-headline .item .v { font-size: 15px; font-weight: 600; }
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+}
+.badge.up { color: var(--green); border-color: var(--green); }
+.badge.down { color: var(--red); border-color: var(--red); }
+.btns { margin-top: 10px; display: flex; gap: 10px; }
+button {
+  background: var(--card2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--blue); }
+button.primary { background: #1f6feb; border-color: #1f6feb; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+/* ---- モーダル ---- */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.modal.hidden { display: none; }
+.modal-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(680px, 92vw);
+  max-height: 84vh;
+  overflow: auto;
+  padding: 18px 20px;
+}
+.modal-box h3 { margin: 0 0 12px; font-size: 15px; }
+.model-list { display: grid; gap: 6px; }
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.model-item.selected { border-color: var(--blue); background: rgba(88,166,255,.08); }
+.model-item .name { font-weight: 600; }
+.model-item .meta { color: var(--muted); font-size: 12px; }
+.model-item.current .meta { color: var(--green); }
+.job-log {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 12px;
+  display: none;
+}
+table.params { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.params th, table.params td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+}
+table.params th { color: var(--muted); font-weight: 500; font-size: 12px; }
+table.params td input {
+  width: 160px;
+  background: #010409;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: Consolas, monospace;
+}
+table.params td input[readonly] { color: var(--muted); }
+.modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DGX Spark Monitor</h1>
+  <span id="clock"></span>
+</header>
+<main>
+  <!-- Tier 1: 現在値カード -->
+  <section>
+    <h2>現在値 (ホスト)</h2>
+    <div class="grid" id="host-cards"></div>
+  </section>
+
+  <!-- Tier 2: 時系列グラフ -->
+  <section>
+    <h2>時系列 (直近10分・2秒間隔)</h2>
+    <div class="charts">
+      <div class="chart-card"><h3>CPU 負荷 [%] / CPU 温度 [°C]</h3><div class="cwrap"><canvas id="ch-cpu"></canvas></div></div>
+      <div class="chart-card"><h3>System Memory 使用率 [%]</h3><div class="cwrap"><canvas id="ch-mem"></canvas></div></div>
+      <div class="chart-card"><h3>GPU 負荷 [%] / GPU 温度 [°C] / 電力 [W]</h3><div class="cwrap"><canvas id="ch-gpu"></canvas></div></div>
+      <div class="chart-card"><h3>ストレージ使用率 [%]</h3><div class="cwrap"><canvas id="ch-disk"></canvas></div></div>
+      <div class="chart-card"><h3>ストレージ負荷 [MB/s / IOPS / ms]</h3><div class="cwrap"><canvas id="ch-diskio"></canvas></div></div>
+    </div>
+  </section>
+
+  <!-- Tier 3: vLLM -->
+  <section>
+    <h2>vLLM / モデル</h2>
+    <div id="vllm-panel">
+      <div id="vllm-headline">
+        <div class="item"><span class="k">稼働モデル</span><span class="v" id="v-model">-</span></div>
+        <div class="item"><span class="k">コンテナ状態</span><span class="v" id="v-status">-</span></div>
+        <div class="item"><span class="k">稼働時間</span><span class="v" id="v-uptime">-</span></div>
+        <div class="item"><span class="k">実行中リクエスト</span><span class="v" id="v-running">-</span></div>
+        <div class="item"><span class="k">待機リクエスト</span><span class="v" id="v-waiting">-</span></div>
+        <div class="item"><span class="k">KVキャッシュ使用率</span><span class="v" id="v-kv">-</span></div>
+        <div class="item"><span class="k">E2Eレイテンシ (平均)</span><span class="v" id="v-e2e">-</span></div>
+        <div class="item"><span class="k">TTFT (平均)</span><span class="v" id="v-ttft">-</span></div>
+        <div class="item"><span class="k">スループット</span><span class="v" id="v-tps">-</span></div>
+      </div>
+      <div class="btns">
+        <button class="primary" id="btn-switch">モデル切替</button>
+        <button id="btn-params">パラメータ表示・編集</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- モーダル: モデル切替 -->
+<div class="modal hidden" id="modal-switch">
+  <div class="modal-box">
+    <h3>モデル切替</h3>
+    <div class="model-list" id="model-list"></div>
+    <div class="job-log" id="switch-log"></div>
+    <div class="modal-actions">
+      <button id="switch-close">閉じる</button>
+      <button class="primary" id="switch-go">切り替え実行</button>
+    </div>
+  </div>
+</div>
+
+<!-- モーダル: パラメータ表示・編集 -->
+<div class="modal hidden" id="modal-params">
+  <div class="modal-box">
+    <h3 id="params-title">パラメータ表示・編集</h3>
+    <table class="params">
+      <thead><tr><th>引数</th><th>値</th></tr></thead>
+      <tbody id="params-body"></tbody>
+    </table>
+    <div class="job-log" id="recreate-log"></div>
+    <div class="modal-actions">
+      <button id="params-close">閉じる</button>
+      <button class="primary" id="params-save">保存してコンテナを再作成</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const API = "";  // 同一オリジン (FastAPI が front/ を配信)
+const WINDOW_POINTS = 300;   // 10分 / 2秒
+const POLL_MS = 2000;
+
+Chart.defaults.color = "#8b949e";
+Chart.defaults.borderColor = "rgba(48,54,61,.6)";
+Chart.defaults.font.family = '"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif';
+
+// ------------------------------------------------------------- 時系列データ
+const series = {
+  labels: [],
+  cpuLoad: [], cpuTemp: [],
+  memUsed: [],
+  gpuLoad: [], gpuTemp: [], gpuPower: [],
+  diskUsed: [],
+  diskRead: [], diskWrite: [], diskIops: [], diskAwait: [],
+};
+
+function pushPoint(ts, m) {
+  const label = new Date(ts * 1000).toLocaleTimeString("ja-JP", { hour12: false });
+  series.labels.push(label);
+  series.cpuLoad.push(m.cpu_load_pct);
+  series.cpuTemp.push(m.cpu_temp_c);
+  series.memUsed.push(m.mem_used_pct);
+  series.gpuLoad.push(m.gpu_load_pct);
+  series.gpuTemp.push(m.gpu_temp_c);
+  series.gpuPower.push(m.gpu_power_w);
+  series.diskUsed.push(m.disk_used_pct);
+  series.diskRead.push(m.disk_read_mbps);
+  series.diskWrite.push(m.disk_write_mbps);
+  series.diskIops.push(m.disk_iops);
+  series.diskAwait.push(m.disk_await_ms);
+  if (series.labels.length > WINDOW_POINTS) {
+    for (const k of Object.keys(series)) series[k].shift();
+  }
+}
+
+function baseOpts(yAxes) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
+    scales: yAxes,
+  };
+}
+
+function pctAxis() {
+  return { min: 0, max: 100, ticks: { callback: (v) => v + "%" } };
+}
+
+const charts = {};
+
+function makeChart(id, datasets, yAxes) {
+  charts[id] = new Chart(document.getElementById(id), {
+    type: "line",
+    data: { labels: series.labels, datasets },
+    options: baseOpts(yAxes),
+  });
+}
+
+makeChart("ch-cpu", [
+  { label: "CPU負荷 %", data: series.cpuLoad, yAxisID: "y", borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "CPU温度 °C", data: series.cpuTemp, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+], {
+  y: pctAxis(),
+  y1: { position: "right", min: 0, max: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "°C" } },
+});
+
+makeChart("ch-mem", [
+  { label: "使用率 %", data: series.memUsed, borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+], { y: pctAxis() });
+
+makeChart("ch-gpu", [
+  { label: "GPU負荷 %", data: series.gpuLoad, yAxisID: "y", borderColor: "#bc8cff", backgroundColor: "rgba(188,140,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "GPU温度 °C", data: series.gpuTemp, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "電力 W", data: series.gpuPower, yAxisID: "y2", borderColor: "#d29922", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+], {
+  y: pctAxis(),
+  y1: { position: "right", min: 0, max: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "°C" } },
+  y2: { position: "right", min: 0, suggestedMax: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "W" } },
+});
+
+makeChart("ch-disk", [
+  { label: "使用率 %", data: series.diskUsed, borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+], { y: pctAxis() });
+
+makeChart("ch-diskio", [
+  { label: "読込 MB/s", data: series.diskRead, yAxisID: "y", borderColor: "#3fb950", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "書込 MB/s", data: series.diskWrite, yAxisID: "y", borderColor: "#d29922", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "IOPS", data: series.diskIops, yAxisID: "y1", borderColor: "#bc8cff", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+  { label: "待機 ms", data: series.diskAwait, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
+], {
+  y: { min: 0 },
+  y1: { position: "right", min: 0, grid: { drawOnChartArea: false } },
+});
+</script>
+<script>
+// ------------------------------------------------------------- 現在値カード
+const CARD_DEFS = [
+  { id: "cpu-load", label: "CPU 負荷", unit: "%", get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1) },
+  { id: "cpu-temp", label: "CPU 温度", unit: "°C", get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), warnAt: 75, hotAt: 85 },
+  { id: "mem-used", label: "System Memory 使用率", unit: "%", get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(0)} GiB` },
+  { id: "gpu-load", label: "GPU 負荷", unit: "%", get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0) },
+  { id: "gpu-temp", label: "GPU 温度", unit: "°C", get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), warnAt: 75, hotAt: 85 },
+  { id: "gpu-power", label: "GPU 電力", unit: "W", get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1) },
+  { id: "gpu-clock", label: "GPU クロック", unit: "MHz", get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0) },
+  { id: "disk-used", label: "ストレージ使用率", unit: "%", get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.disk_used_gib.toFixed(0)} / ${m.disk_total_gib.toFixed(0)} GiB` },
+  { id: "disk-io", label: "ストレージ負荷", unit: "", get: (m) => m.disk_iops, fmt: (v) => (v == null ? "-" : v.toFixed(0) + " IOPS"), sub: (m) => (m.disk_read_mbps == null ? "" : `R ${m.disk_read_mbps.toFixed(2)} / W ${m.disk_write_mbps.toFixed(2)} MB/s`) },
+];
+
+function tempClass(v, def) {
+  if (v == null) return "";
+  if (def.hotAt && v >= def.hotAt) return "hot";
+  if (def.warnAt && v >= def.warnAt) return "warn";
+  return "ok";
+}
+
+function renderHostCards(m) {
+  const el = document.getElementById("host-cards");
+  if (!el.children.length) {
+    el.innerHTML = CARD_DEFS.map((d) =>
+      `<div class="card" id="${d.id}">
+         <div class="label">${d.label}</div>
+         <div class="value"><span class="num">-</span><span class="unit">${d.unit}</span></div>
+         <div class="sub"></div>
+       </div>`
+    ).join("");
+  }
+  for (const d of CARD_DEFS) {
+    const v = d.get(m);
+    const card = document.getElementById(d.id);
+    const num = card.querySelector(".num");
+    const sub = card.querySelector(".sub");
+    if (v == null) {
+      num.textContent = "-";
+      num.className = "num";
+    } else {
+      num.textContent = d.fmt(v);
+      num.className = "num " + tempClass(v, d);
+    }
+    sub.textContent = d.sub ? d.sub(m) : "";
+  }
+}
+
+// ------------------------------------------------------------- Tier 3 (vLLM)
+function setV(id, text, cls) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "v" + (cls ? " " + cls : "");
+}
+
+function renderVllm(st) {
+  const a = st.active;
+  if (!a) {
+    setV("v-model", "稼働中のモデルなし");
+    setV("v-status", "停止中", "down");
+    return;
+  }
+  setV("v-model", a.model_name || a.profile);
+  setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
+  setV("v-uptime", a.uptime_str || "-");
+  const mt = a.metrics || {};
+  setV("v-running", mt.requests_running != null ? Math.round(mt.requests_running) : "-");
+  setV("v-waiting", mt.requests_waiting != null ? Math.round(mt.requests_waiting) : "-");
+  setV("v-kv", mt.kv_cache_usage_pct != null ? mt.kv_cache_usage_pct.toFixed(1) + " %" : "-");
+  setV("v-e2e", mt.e2e_latency_s != null ? mt.e2e_latency_s.toFixed(1) + " s" : "-");
+  setV("v-ttft", mt.ttft_s != null ? mt.ttft_s.toFixed(2) + " s" : "-");
+  setV("v-tps", mt.tokens_per_s != null ? mt.tokens_per_s.toFixed(1) + " tok/s" : "-");
+}
+
+// ------------------------------------------------------------- ポーリング
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+
+async function poll() {
+  try {
+    const m = await fetchJson(API + "/api/metrics");
+    pushPoint(m.timestamp, m);
+    for (const c of Object.values(charts)) c.update();
+    renderHostCards(m);
+  } catch (e) {
+    console.error("metrics poll failed", e);
+  }
+  try {
+    const st = await fetchJson(API + "/api/vllm/status");
+    renderVllm(st);
+    currentStatus = st;
+  } catch (e) {
+    console.error("vllm poll failed", e);
+  }
+  pollJob();
+}
+
+let currentStatus = null;
+</script>
+
+<script>
+// ------------------------------------------------------------- モデル切替モーダル
+let selectedProfile = null;
+
+function openModal(id) { document.getElementById(id).classList.remove("hidden"); }
+function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+
+function renderModelList() {
+  const st = currentStatus || { containers: [], active: null };
+  const list = document.getElementById("model-list");
+  list.innerHTML = "";
+  for (const c of st.containers) {
+    const isCurrent = st.active && st.active.profile === c.profile;
+    const div = document.createElement("div");
+    div.className = "model-item" + (isCurrent ? " current" : "") + (c.profile === selectedProfile ? " selected" : "");
+    const meta = isCurrent
+      ? "現在稼働中"
+      : (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
+    div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
+    div.onclick = () => { selectedProfile = c.profile; renderModelList(); };
+    list.appendChild(div);
+  }
+}
+
+document.getElementById("btn-switch").onclick = async () => {
+  selectedProfile = null;
+  try {
+    currentStatus = await fetchJson(API + "/api/vllm/status");
+  } catch (e) { /* 表示のみ続行 */ }
+  if (currentStatus && currentStatus.active) selectedProfile = currentStatus.active.profile;
+  document.getElementById("switch-log").style.display = "none";
+  renderModelList();
+  openModal("modal-switch");
+};
+
+document.getElementById("switch-close").onclick = () => closeModal("modal-switch");
+
+document.getElementById("switch-go").onclick = async () => {
+  if (!selectedProfile) return;
+  const btn = document.getElementById("switch-go");
+  btn.disabled = true;
+  const logEl = document.getElementById("switch-log");
+  logEl.style.display = "block";
+  logEl.textContent = `切り替え開始: ${selectedProfile} ...\n`;
+  try {
+    const r = await fetch(API + "/api/vllm/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: selectedProfile }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      logEl.textContent += "エラー: " + (err.detail || r.status) + "\n";
+      btn.disabled = false;
+      return;
+    }
+    logEl.textContent += "バックグラウンド実行中。進捗は自動更新されます。\n";
+  } catch (e) {
+    logEl.textContent += "リクエスト失敗: " + e + "\n";
+    btn.disabled = false;
+  }
+};
+</script>
+
+<script>
+// ------------------------------------------------------------- パラメータモーダル
+let paramsProfile = null;
+
+document.getElementById("btn-params").onclick = async () => {
+  const st = currentStatus;
+  if (!st || !st.active) {
+    alert("稼働中のモデルがありません");
+    return;
+  }
+  paramsProfile = st.active.profile;
+  document.getElementById("params-title").textContent =
+    "パラメータ表示・編集 (" + paramsProfile + ")";
+  const body = document.getElementById("params-body");
+  body.innerHTML = "<tr><td colspan='2' class='meta'>読み込み中...</td></tr>";
+  document.getElementById("recreate-log").style.display = "none";
+  openModal("modal-params");
+  try {
+    const p = await fetchJson(API + "/api/vllm/params?profile=" + encodeURIComponent(paramsProfile));
+    body.innerHTML = "";
+    for (const row of p.params) {
+      const tr = document.createElement("tr");
+      const tdFlag = document.createElement("td");
+      tdFlag.textContent = row.flag;
+      const tdVal = document.createElement("td");
+      const inp = document.createElement("input");
+      inp.value = row.value ?? "";
+      inp.readOnly = !row.editable;
+      inp.dataset.flag = row.flag;
+      tdVal.appendChild(inp);
+      tr.appendChild(tdFlag);
+      tr.appendChild(tdVal);
+      body.appendChild(tr);
+    }
+  } catch (e) {
+    body.innerHTML = "<tr><td colspan='2'>読み込み失敗: " + e + "</td></tr>";
+  }
+};
+
+document.getElementById("params-close").onclick = () => closeModal("modal-params");
+
+document.getElementById("params-save").onclick = async () => {
+  const inputs = Array.from(document.querySelectorAll("#params-body input"))
+    .filter((i) => !i.readOnly);
+  const p = await fetchJson(API + "/api/vllm/params?profile=" + encodeURIComponent(paramsProfile));
+  const updates = {};
+  for (const inp of inputs) {
+    const cur = (p.params.find((x) => x.flag === inp.dataset.flag) || {}).value;
+    if (inp.value !== (cur ?? "")) updates[inp.dataset.flag] = inp.value;
+  }
+  if (!Object.keys(updates).length) {
+    alert("変更がありません");
+    return;
+  }
+  if (!confirm("変更内容でコンテナを再作成しますか?\n" +
+    Object.entries(updates).map(([k, v]) => k + " = " + v).join("\n"))) return;
+
+  const btn = document.getElementById("params-save");
+  btn.disabled = true;
+  const logEl = document.getElementById("recreate-log");
+  logEl.style.display = "block";
+  logEl.textContent = "compose 更新 + コンテナ再作成を開始...\n";
+  try {
+    const r = await fetch(API + "/api/vllm/params", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: paramsProfile, updates }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      logEl.textContent += "エラー: " + (err.detail || r.status) + "\n";
+      btn.disabled = false;
+      return;
+    }
+    logEl.textContent += "再作成中。進捗は自動更新されます。\n";
+  } catch (e) {
+    logEl.textContent += "リクエスト失敗: " + e + "\n";
+    btn.disabled = false;
+  }
+};
+
+// ------------------------------------------------------------- ジョブ進捗ポーリング
+async function pollJob() {
+  let job;
+  try {
+    job = await fetchJson(API + "/api/vllm/job");
+  } catch (e) {
+    return;
+  }
+  if (!job.running) return;
+  const isSwitch = job.kind === "switch";
+  const logEl = document.getElementById(isSwitch ? "switch-log" : "recreate-log");
+  logEl.style.display = "block";
+  const lines = (job.log_tail || []).join("\n");
+  logEl.textContent = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ------------------------------------------------------------- クロック
+setInterval(() => {
+  document.getElementById("clock").textContent =
+    new Date().toLocaleString("ja-JP", { hour12: false });
+}, 1000);
+
+// ------------------------------------------------------------- 起動
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
