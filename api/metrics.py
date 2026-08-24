@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -120,6 +121,7 @@ def collect() -> dict:
 
     # --- CPU温度 ---
     out["cpu_temp_c"] = _read_cpu_temp_c()
+    out["cpu_cores"] = os.cpu_count() or 0
 
     # --- System Memory(統合メモリ使用率) ---
     info: dict[str, int] = {}

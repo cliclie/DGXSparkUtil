@@ -49,39 +49,59 @@ section > h2 {
   padding-left: 8px;
   margin: 0 0 10px;
 }
-/* ---- Tier 1 ---- */
+/* ---- Tier 1 (半円ゲージ) ---- */
 .grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
-.card {
+.gauge {
+  flex: 1 1 200px;
+  min-width: 190px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 10px 12px 8px;
+  text-align: center;
 }
-.card .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-.card .value { font-size: 22px; font-weight: 600; }
-.card .value .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
-.card .sub { color: var(--muted); font-size: 11px; margin-top: 3px; min-height: 14px; }
+.gauge .gtitle { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.gauge .gcanvas { position: relative; height: 96px; }
+.gauge .gcanvas canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+.gauge .gval {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 22px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.gauge .gval .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+.gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 4px; min-height: 14px; }
 .ok { color: var(--green); }
 .warn { color: var(--yellow); }
 .hot { color: var(--red); }
 /* ---- Tier 2 ---- */
-.charts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  gap: 10px;
+.charts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
 }
+.charts-head h3 { margin: 0; font-size: 12px; color: var(--muted); font-weight: 500; }
+.range-btns { display: flex; gap: 6px; }
+.range-btns button { padding: 4px 12px; font-size: 12px; border-radius: 14px; }
+.range-btns button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
 .chart-card {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px 6px;
 }
-.chart-card h3 { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
-.chart-card .cwrap { position: relative; height: 170px; }
+.chart-card .cwrap { position: relative; height: 360px; }
 /* ---- Tier 3 ---- */
 #vllm-panel {
   background: var(--card);
@@ -197,13 +217,17 @@ table.params td input[readonly] { color: var(--muted); }
 
   <!-- Tier 2: 時系列グラフ -->
   <section>
-    <h2>時系列 (直近10分・2秒間隔)</h2>
-    <div class="charts">
-      <div class="chart-card"><h3>CPU 負荷 [%] / CPU 温度 [°C]</h3><div class="cwrap"><canvas id="ch-cpu"></canvas></div></div>
-      <div class="chart-card"><h3>System Memory 使用率 [%]</h3><div class="cwrap"><canvas id="ch-mem"></canvas></div></div>
-      <div class="chart-card"><h3>GPU 負荷 [%] / GPU 温度 [°C] / 電力 [W]</h3><div class="cwrap"><canvas id="ch-gpu"></canvas></div></div>
-      <div class="chart-card"><h3>ストレージ使用率 [%]</h3><div class="cwrap"><canvas id="ch-disk"></canvas></div></div>
-      <div class="chart-card"><h3>ストレージ負荷 [MB/s / IOPS / ms]</h3><div class="cwrap"><canvas id="ch-diskio"></canvas></div></div>
+    <h2>時系列 (全項目・2秒間隔)</h2>
+    <div class="charts-head">
+      <h3>CPU / メモリ / GPU / ストレージ (全項目 100% 換算)</h3>
+      <div class="range-btns" id="range-btns">
+        <button data-range="30m">直近30分</button>
+        <button data-range="3h">直近3時間</button>
+        <button data-range="all" class="active">すべて</button>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="cwrap"><canvas id="ch-main"></canvas></div>
     </div>
   </section>
 
@@ -263,8 +287,9 @@ table.params td input[readonly] { color: var(--muted); }
 "use strict";
 
 const API = "";  // 同一オリジン (FastAPI が front/ を配信)
-const WINDOW_POINTS = 300;   // 10分 / 2秒
+const MAX_POINTS = 4500;   // 3時間 / 2秒
 const POLL_MS = 2000;
+const RANGE_SECS = { "30m": 1800, "3h": 10800, all: Infinity };
 
 Chart.defaults.color = "#8b949e";
 Chart.defaults.borderColor = "rgba(48,54,61,.6)";
@@ -272,17 +297,18 @@ Chart.defaults.font.family = '"Segoe UI","Hiragino Sans","Noto Sans JP",sans-ser
 
 // ------------------------------------------------------------- 時系列データ
 const series = {
+  ts: [],
   labels: [],
   cpuLoad: [], cpuTemp: [],
   memUsed: [],
   gpuLoad: [], gpuTemp: [], gpuPower: [],
   diskUsed: [],
-  diskRead: [], diskWrite: [], diskIops: [], diskAwait: [],
+  diskRead: [], diskWrite: [],
 };
 
 function pushPoint(ts, m) {
-  const label = new Date(ts * 1000).toLocaleTimeString("ja-JP", { hour12: false });
-  series.labels.push(label);
+  series.ts.push(ts);
+  series.labels.push(new Date(ts * 1000).toLocaleTimeString("ja-JP", { hour12: false }));
   series.cpuLoad.push(m.cpu_load_pct);
   series.cpuTemp.push(m.cpu_temp_c);
   series.memUsed.push(m.mem_used_pct);
@@ -292,122 +318,222 @@ function pushPoint(ts, m) {
   series.diskUsed.push(m.disk_used_pct);
   series.diskRead.push(m.disk_read_mbps);
   series.diskWrite.push(m.disk_write_mbps);
-  series.diskIops.push(m.disk_iops);
-  series.diskAwait.push(m.disk_await_ms);
-  if (series.labels.length > WINDOW_POINTS) {
+  if (series.ts.length > MAX_POINTS) {
     for (const k of Object.keys(series)) series[k].shift();
   }
 }
 
-function baseOpts(yAxes) {
+// 範囲切替用のフィルタ (ts 基準で先頭を切る)
+let rangeKey = "all";
+function rangeStartIdx() {
+  if (rangeKey === "all" || !series.ts.length) return 0;
+  const cutoff = series.ts[series.ts.length - 1] - RANGE_SECS[rangeKey];
+  for (let i = 0; i < series.ts.length; i++) {
+    if (series.ts[i] >= cutoff) return i;
+  }
+  return series.ts.length - 1;
+}
+
+function viewArrays() {
+  const i = rangeStartIdx();
+  const n = series.ts.length;
+  const sl = (a) => (i === 0 ? a : a.slice(i, n));
   return {
+    labels: sl(series.labels),
+    cpuLoad: sl(series.cpuLoad), cpuTemp: sl(series.cpuTemp),
+    memUsed: sl(series.memUsed),
+    gpuLoad: sl(series.gpuLoad), gpuTemp: sl(series.gpuTemp), gpuPower: sl(series.gpuPower),
+    diskUsed: sl(series.diskUsed),
+    diskRead: sl(series.diskRead), diskWrite: sl(series.diskWrite),
+  };
+}
+
+// ------------------------------------------------------------- 半円ゲージ
+const ZONE_GREEN = "#3fb950";
+const ZONE_ORANGE = "#d29922";
+const ZONE_RED = "#f85149";
+const ARC_BG = "rgba(48,54,61,.55)";
+// README 仕様のゾーン閾値: 緑 < 60%、オレンジ 60〜85%、赤 > 85%
+const ZONE_STOPS = [0.6, 0.85];
+
+function fmtGiB(gib) {
+  if (gib >= 1024) return (gib / 1024).toFixed(2) + " TiB";
+  return Math.round(gib) + " GiB";
+}
+
+class Gauge {
+  constructor(id, def) {
+    this.def = def;
+    this.ctx = document.getElementById(id).getContext("2d");
+    const wrap = document.getElementById(id).parentElement; // .gcanvas
+    const card = wrap.parentElement; // .gauge
+    this.valEl = document.createElement("div");
+    this.valEl.className = "gval";
+    wrap.appendChild(this.valEl);
+    this.subEl = card.querySelector(".gsub");
+    this._last = null;
+  }
+  set(v, m) {
+    if (v === this._last) return;
+    this._last = v;
+    this.render(v);
+    this.valEl.innerHTML =
+      (v == null ? "-" : this.def.fmt(v)) +
+      (this.def.unit ? `<span class="unit">${this.def.unit}</span>` : "");
+    this.subEl.textContent = this.def.sub ? this.def.sub(m) : "";
+  }
+  render(v) {
+    const cv = this.ctx.canvas;
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (w === 0 || h === 0) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    const ctx = this.ctx;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const cx = w / 2;
+    const cy = h - 2;
+    const R = Math.min(w / 2, h) - 6;   // ゾーン帯の外半径 (コンテナ内に収まる)
+    const lw = Math.max(8, R * 0.16);   // 値アーチの厚み
+    const r = R - lw / 2 - 4;           // 値アーチの半径
+    // 背景アーチ
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, Math.PI, 2 * Math.PI);
+    ctx.strokeStyle = ARC_BG;
+    ctx.lineWidth = lw;
+    ctx.stroke();
+    if (v == null) return;
+    const frac = Math.max(0, Math.min(1, v / this.def.max));
+    // ゾーン色 (緑→橙→赤)
+    let color = ZONE_GREEN;
+    if (frac > ZONE_STOPS[1]) color = ZONE_RED;
+    else if (frac > ZONE_STOPS[0]) color = ZONE_ORANGE;
+    // 色ゾーン帯 (細い外側リング)
+    const zr = R - 1.5;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = ZONE_GREEN;
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI, Math.PI * (1 + ZONE_STOPS[0])); ctx.stroke();
+    ctx.strokeStyle = ZONE_ORANGE;
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + ZONE_STOPS[0]), Math.PI * (1 + ZONE_STOPS[1])); ctx.stroke();
+    ctx.strokeStyle = ZONE_RED;
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + ZONE_STOPS[1]), 2 * Math.PI); ctx.stroke();
+    // 値アーチ
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, Math.PI, Math.PI * (1 + frac));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.stroke();
+  }
+}
+
+const GAUGE_DEFS = [
+  { id: "g-cpu-load", title: "CPU 負荷", max: 100, unit: "%",
+    get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1), sub: (m) => (m.cpu_cores ? m.cpu_cores + " cores" : "") },
+  { id: "g-cpu-temp", title: "CPU 温度", max: 100, unit: "°C",
+    get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
+  { id: "g-mem", title: "System Memory", max: 100, unit: "",
+    get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
+  { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%",
+    get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0), sub: () => "" },
+  { id: "g-gpu-temp", title: "GPU 温度", max: 100, unit: "°C",
+    get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
+  { id: "g-gpu-power", title: "GPU 電力", max: 140, unit: "W",
+    get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1), sub: () => "上限 140 W (GB10 TDP)" },
+  { id: "g-gpu-clock", title: "GPU クロック", max: 3003, unit: "MHz",
+    get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0), sub: () => "最大 3003 MHz" },
+  { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%",
+    get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
+  { id: "g-disk-read", title: "ストレージ負荷 (読込)", max: 12000, unit: "MB/s",
+    get: (m) => m.disk_read_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 12 GB/s" },
+  { id: "g-disk-write", title: "ストレージ負荷 (書込)", max: 12000, unit: "MB/s",
+    get: (m) => m.disk_write_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 12 GB/s" },
+];
+
+// 半円ゲージ DOM 生成
+document.getElementById("host-cards").innerHTML = GAUGE_DEFS.map((d) =>
+  `<div class="gauge">
+     <div class="gtitle">${d.title}</div>
+     <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
+     <div class="gsub"></div>
+   </div>`
+).join("");
+
+const gages = GAUGE_DEFS.map((d) => new Gauge(d.id, d));
+
+function renderGauges(m) {
+  for (const g of gages) g.set(g.def.get(m), m);
+}
+
+// ------------------------------------------------------------- 統合時系列グラフ
+// 100% 換算: CPU温度=100°C / ストレージI/O=12GB/s / GPU電力=140W (GB10 TDP)
+const NORM = { cpuTemp: 100, gpuPower: 140, diskIO: 12000 };
+const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
+
+const lineDS = (label, data, color, fill) => ({
+  label, data, borderColor: color,
+  backgroundColor: fill || "transparent",
+  tension: 0.35, pointRadius: 0, borderWidth: 2,
+  spanGaps: true,
+});
+
+const mainChart = new Chart(document.getElementById("ch-main"), {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [
+      lineDS("CPU負荷 %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
+      lineDS("CPU温度 %", toPct(series.cpuTemp, NORM.cpuTemp), "#f85149"),
+      lineDS("メモリ使用率 %", series.memUsed, "#3fb950"),
+      lineDS("GPU負荷 %", series.gpuLoad, "#bc8cff", "rgba(188,140,255,.10)"),
+      lineDS("GPU温度 %", toPct(series.gpuTemp, NORM.cpuTemp), "#ff7b72"),
+      lineDS("GPU電力 %", toPct(series.gpuPower, NORM.gpuPower), "#d29922"),
+      lineDS("ストレージ使用率 %", series.diskUsed, "#79c0ff"),
+      lineDS("ストレージ読込 %", toPct(series.diskRead, NORM.diskIO), "#56d364"),
+      lineDS("ストレージ書込 %", toPct(series.diskWrite, NORM.diskIO), "#e3b341"),
+    ],
+  },
+  options: {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     interaction: { mode: "index", intersect: false },
     plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
-    scales: yAxes,
+    scales: {
+      x: { ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } } },
+      y: { min: 0, max: 100, ticks: { callback: (v) => v + "%" } },
+    },
+  },
+});
+
+function refreshMainChart() {
+  const v = viewArrays();
+  mainChart.data.labels = v.labels;
+  const ds = mainChart.data.datasets;
+  ds[0].data = v.cpuLoad;
+  ds[1].data = toPct(v.cpuTemp, NORM.cpuTemp);
+  ds[2].data = v.memUsed;
+  ds[3].data = v.gpuLoad;
+  ds[4].data = toPct(v.gpuTemp, NORM.cpuTemp);
+  ds[5].data = toPct(v.gpuPower, NORM.gpuPower);
+  ds[6].data = v.diskUsed;
+  ds[7].data = toPct(v.diskRead, NORM.diskIO);
+  ds[8].data = toPct(v.diskWrite, NORM.diskIO);
+  mainChart.update("none");
+}
+
+// 横軸範囲切替 (直近30分 / 直近3時間 / すべて)
+document.querySelectorAll("#range-btns button").forEach((btn) => {
+  btn.onclick = () => {
+    rangeKey = btn.dataset.range;
+    document.querySelectorAll("#range-btns button").forEach((b) => b.classList.toggle("active", b === btn));
+    refreshMainChart();
   };
-}
-
-function pctAxis() {
-  return { min: 0, max: 100, ticks: { callback: (v) => v + "%" } };
-}
-
-const charts = {};
-
-function makeChart(id, datasets, yAxes) {
-  charts[id] = new Chart(document.getElementById(id), {
-    type: "line",
-    data: { labels: series.labels, datasets },
-    options: baseOpts(yAxes),
-  });
-}
-
-makeChart("ch-cpu", [
-  { label: "CPU負荷 %", data: series.cpuLoad, yAxisID: "y", borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "CPU温度 °C", data: series.cpuTemp, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-], {
-  y: pctAxis(),
-  y1: { position: "right", min: 0, max: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "°C" } },
-});
-
-makeChart("ch-mem", [
-  { label: "使用率 %", data: series.memUsed, borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-], { y: pctAxis() });
-
-makeChart("ch-gpu", [
-  { label: "GPU負荷 %", data: series.gpuLoad, yAxisID: "y", borderColor: "#bc8cff", backgroundColor: "rgba(188,140,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "GPU温度 °C", data: series.gpuTemp, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "電力 W", data: series.gpuPower, yAxisID: "y2", borderColor: "#d29922", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-], {
-  y: pctAxis(),
-  y1: { position: "right", min: 0, max: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "°C" } },
-  y2: { position: "right", min: 0, suggestedMax: 100, grid: { drawOnChartArea: false }, ticks: { callback: (v) => v + "W" } },
-});
-
-makeChart("ch-disk", [
-  { label: "使用率 %", data: series.diskUsed, borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.15)", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-], { y: pctAxis() });
-
-makeChart("ch-diskio", [
-  { label: "読込 MB/s", data: series.diskRead, yAxisID: "y", borderColor: "#3fb950", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "書込 MB/s", data: series.diskWrite, yAxisID: "y", borderColor: "#d29922", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "IOPS", data: series.diskIops, yAxisID: "y1", borderColor: "#bc8cff", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-  { label: "待機 ms", data: series.diskAwait, yAxisID: "y1", borderColor: "#f85149", tension: 0.35, pointRadius: 0, borderWidth: 2 },
-], {
-  y: { min: 0 },
-  y1: { position: "right", min: 0, grid: { drawOnChartArea: false } },
 });
 </script>
 <script>
-// ------------------------------------------------------------- 現在値カード
-const CARD_DEFS = [
-  { id: "cpu-load", label: "CPU 負荷", unit: "%", get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1) },
-  { id: "cpu-temp", label: "CPU 温度", unit: "°C", get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), warnAt: 75, hotAt: 85 },
-  { id: "mem-used", label: "System Memory 使用率", unit: "%", get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(0)} GiB` },
-  { id: "gpu-load", label: "GPU 負荷", unit: "%", get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0) },
-  { id: "gpu-temp", label: "GPU 温度", unit: "°C", get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), warnAt: 75, hotAt: 85 },
-  { id: "gpu-power", label: "GPU 電力", unit: "W", get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1) },
-  { id: "gpu-clock", label: "GPU クロック", unit: "MHz", get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0) },
-  { id: "disk-used", label: "ストレージ使用率", unit: "%", get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.disk_used_gib.toFixed(0)} / ${m.disk_total_gib.toFixed(0)} GiB` },
-  { id: "disk-io", label: "ストレージ負荷", unit: "", get: (m) => m.disk_iops, fmt: (v) => (v == null ? "-" : v.toFixed(0) + " IOPS"), sub: (m) => (m.disk_read_mbps == null ? "" : `R ${m.disk_read_mbps.toFixed(2)} / W ${m.disk_write_mbps.toFixed(2)} MB/s`) },
-];
-
-function tempClass(v, def) {
-  if (v == null) return "";
-  if (def.hotAt && v >= def.hotAt) return "hot";
-  if (def.warnAt && v >= def.warnAt) return "warn";
-  return "ok";
-}
-
-function renderHostCards(m) {
-  const el = document.getElementById("host-cards");
-  if (!el.children.length) {
-    el.innerHTML = CARD_DEFS.map((d) =>
-      `<div class="card" id="${d.id}">
-         <div class="label">${d.label}</div>
-         <div class="value"><span class="num">-</span><span class="unit">${d.unit}</span></div>
-         <div class="sub"></div>
-       </div>`
-    ).join("");
-  }
-  for (const d of CARD_DEFS) {
-    const v = d.get(m);
-    const card = document.getElementById(d.id);
-    const num = card.querySelector(".num");
-    const sub = card.querySelector(".sub");
-    if (v == null) {
-      num.textContent = "-";
-      num.className = "num";
-    } else {
-      num.textContent = d.fmt(v);
-      num.className = "num " + tempClass(v, d);
-    }
-    sub.textContent = d.sub ? d.sub(m) : "";
-  }
-}
-
 // ------------------------------------------------------------- Tier 3 (vLLM)
 function setV(id, text, cls) {
   const el = document.getElementById(id);
@@ -445,8 +571,8 @@ async function poll() {
   try {
     const m = await fetchJson(API + "/api/metrics");
     pushPoint(m.timestamp, m);
-    for (const c of Object.values(charts)) c.update();
-    renderHostCards(m);
+    renderGauges(m);
+    refreshMainChart();
   } catch (e) {
     console.error("metrics poll failed", e);
   }
