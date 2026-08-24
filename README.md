@@ -277,3 +277,10 @@ cd /home/cliclie/DGXSparkUtil/api
 - モデル切替・パラメータ編集はバックグラウンドジョブとして実行し、`GET /api/vllm/job` で進捗(ログ末尾)を取得。同時実行は 1 件
 - パラメータ編集は `/home/cliclie/llm/compose/docker-compose.yml` の対象サービス command の値部分を書き換えた後 `docker compose up -d --force-recreate`
 - 動作検証時は稼働中の qwen38bf16 への影響を避けるため、切替・コンテナ再作成は実行していない(読み取り系 API のみ検証済み)
+- 一段目は半円ゲージ 10 種(Canvas 自前描画)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 12 GB/s)
+- ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz。調整は `index.html` の `GAUGE_DEFS[].max` と `NORM` のみ
+- 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=12 GB/s で割って倍率 100)。横軸は「直近30分 / 直近3時間 / すべて」で切替可能
+- 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
+- `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
+- タブの favicon は `front/meter-dgx.ico`(`/static/` マウント経由で配信)
+- 一段目ゲージのタイトルには二段目グラフの凡例色と同じ色のマーカー(■)を付与し、系列と対応付けやすくしている(GPU クロックはグラフに系列がないためグレー)
