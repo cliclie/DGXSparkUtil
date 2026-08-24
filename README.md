@@ -254,3 +254,26 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - LAN 外に公開する場合のみ Basic 認証/リバースプロキシを追加
 - vLLM のモデル API ポート(8000〜8007)とは別に、監視UIは独立ポート(例: 8080)を使用
 - 調査フェーズでは、本 README 以外のファイル変更・docker の起動停止・切替スクリプトの実行は行っていない
+
+## 実行
+
+```
+cd /home/cliclie/DGXSparkUtil/api
+./run.sh          # フォアグラウンド起動
+./run.sh -d       # バックグラウンド起動 (ログ: api/server.log)
+```
+
+- 初回実行時に venv を自動作成し依存(fastapi, uvicorn)を導入する
+- アクセス: 同 LAN 内クライアントから `http://192.168.0.110:8080` (ローカルは `http://localhost:8080`)
+- ポート変更: `PORT=8090 ./run.sh`
+- 常駐は `run.sh -d` (nohup) で運用。systemd 化は必要になったら別途
+
+## 実装メモ(2026-08-24)
+
+- 本 README の設計どおり `api/` (FastAPI) + `front/` (単一 index.html + Chart.js) で実装
+- vLLM 26.07 の `/metrics` は全系列がラベル付き(`engine=`, `model_name=`)のため、ラベルを除去して系列名で集約してパースする
+- vLLM の `/health` は本文が空 → 健全性は HTTP ステータス(200 系)で判定
+- e2e レイテンシは `vllm:request_inference_time_seconds` の sum/count 平均、KV キャッシュは `vllm:kv_cache_usage_perc`
+- モデル切替・パラメータ編集はバックグラウンドジョブとして実行し、`GET /api/vllm/job` で進捗(ログ末尾)を取得。同時実行は 1 件
+- パラメータ編集は `/home/cliclie/llm/compose/docker-compose.yml` の対象サービス command の値部分を書き換えた後 `docker compose up -d --force-recreate`
+- 動作検証時は稼働中の qwen38bf16 への影響を避けるため、切替・コンテナ再作成は実行していない(読み取り系 API のみ検証済み)

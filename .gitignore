@@ -1,0 +1,7 @@
+# Python
+api/venv/
+__pycache__/
+*.pyc
+
+# サーバーログ
+api/server.log
