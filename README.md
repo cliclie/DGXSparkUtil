@@ -257,7 +257,32 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 
 ## 実行
 
+### systemd サービス（本番・ブート時自動起動）
+
+初回導入（1回だけ sudo 実行）:
+
+```bash
+sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh
 ```
+
+導入後の管理:
+
+```bash
+sudo systemctl status dgx-spark-api    # 状態確認
+sudo systemctl restart dgx-spark-api  # 再起動（コード変更後）
+sudo systemctl stop dgx-spark-api     # 停止
+sudo systemctl disable --now dgx-spark-api  # 自動起動解除＋停止
+tail -f /home/cliclie/DGXSparkUtil/api/server.log  # ログ確認
+```
+
+- ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
+- 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
+- venv が存在しない場合は `ExecStartPre` で自動作成する
+- ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード）
+
+### 手動起動（開発・デバッグ用）
+
+```bash
 cd /home/cliclie/DGXSparkUtil/api
 ./run.sh          # フォアグラウンド起動
 ./run.sh -d       # バックグラウンド起動 (ログ: api/server.log)
@@ -266,7 +291,6 @@ cd /home/cliclie/DGXSparkUtil/api
 - 初回実行時に venv を自動作成し依存(fastapi, uvicorn)を導入する
 - アクセス: 同 LAN 内クライアントから `http://192.168.0.110:8080` (ローカルは `http://localhost:8080`)
 - ポート変更: `PORT=8090 ./run.sh`
-- 常駐は `run.sh -d` (nohup) で運用。systemd 化は必要になったら別途
 
 ## 実装メモ(2026-08-24)
 
@@ -284,3 +308,10 @@ cd /home/cliclie/DGXSparkUtil/api
 - `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
 - タブの favicon は `front/meter-dgx.ico`(`/static/` マウント経由で配信)
 - 一段目ゲージのタイトルには二段目グラフの凡例色と同じ色のマーカー(■)を付与し、系列と対応付けやすくしている(GPU クロックはグラフに系列がないためグレー)
+
+## 実装メモ(2026-08-26)
+
+- API サーバを systemd サービス(`dgx-spark-api.service`)として本番運用に移行。電源投入時の自動起動とクラッシュ時自動再起動(`Restart=always`)を実現した
+- 初回導入は `sudo bash api/install_service.sh` でユニットファイル設置・enable・起動を一元実行。以降は `sudo systemctl restart dgx-spark-api` でコード変更を反映
+- サービスは `User=cliclie`・`WorkingDirectory=api/`・venv 内 python で uvicorn を起動し、8080 へバインド。起動前(`ExecStartPre`)に venv が無い場合は自動作成
+- 既存の vLLM(8010)・SGLang(8008, ローカル LLM)とはポートが異なるため衝突しない
