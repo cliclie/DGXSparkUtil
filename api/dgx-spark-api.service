@@ -1,0 +1,19 @@
+[Unit]
+Description=DGXSparkUtil Monitor API (FastAPI on port 8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cliclie
+Group=cliclie
+WorkingDirectory=/home/cliclie/DGXSparkUtil/api
+ExecStartPre=/bin/sh -c 'test -x /home/cliclie/DGXSparkUtil/api/venv/bin/python || (cd /home/cliclie/DGXSparkUtil/api && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
+ExecStart=/home/cliclie/DGXSparkUtil/api/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/cliclie/DGXSparkUtil/api/server.log
+StandardError=append:/home/cliclie/DGXSparkUtil/api/server.log
+
+[Install]
+WantedBy=multi-user.target
