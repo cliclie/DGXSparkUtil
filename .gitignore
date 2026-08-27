@@ -5,3 +5,4 @@ __pycache__/
 
 # サーバーログ
 api/server.log
+.clinerules/01-always.md
