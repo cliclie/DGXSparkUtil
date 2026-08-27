@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -38,6 +41,30 @@ app.add_middleware(
 
 class SwitchBody(BaseModel):
     profile: str
+
+
+# ---------------------------------------------------------------- 時系列履歴
+# フロントのページリロード後に線グラフを最大30分だけ遡って表示するためのバックフィル用。
+# サーバー側で5秒間隔・30分(360点)だけ保持する(ブラウザが開いていなくても蓄積される)。
+HISTORY_INTERVAL_S = 5
+_history: deque[dict] = deque(maxlen=1800 // HISTORY_INTERVAL_S)
+
+
+def _history_sampler() -> None:
+    while True:
+        try:
+            _history.append(host_metrics.collect())
+        except Exception:
+            pass
+        time.sleep(HISTORY_INTERVAL_S)
+
+
+threading.Thread(target=_history_sampler, daemon=True).start()
+
+
+@app.get("/api/history")
+def api_history() -> list[dict]:
+    return list(_history)
 
 
 class ParamsBody(BaseModel):
