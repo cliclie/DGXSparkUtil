@@ -27,6 +27,7 @@ body {
   color: var(--text);
   font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
   font-size: 14px;
+  font-variant-numeric: tabular-nums;
 }
 header {
   display: flex;
@@ -66,7 +67,7 @@ section > h2 {
   text-align: center;
 }
 .gauge .gtitle { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-.gauge .gtitle .gdot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+.gauge .gtitle .gdot { display: inline-block; width: 12px; height: 12px; margin-right: 6px; }
 .gauge .gcanvas { position: relative; height: 96px; }
 .gauge .gcanvas canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
 .gauge .gval {
@@ -114,6 +115,16 @@ section > h2 {
 #vllm-headline { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 8px; }
 #vllm-headline .item .k { color: var(--muted); font-size: 11px; display: block; }
 #vllm-headline .item .v { font-size: 15px; font-weight: 600; }
+#v-model { display: block; min-width: 10ch; }
+#v-port { display: block; min-width: 5ch; text-align: center; }
+#v-status { display: block; min-width: 18ch; text-align: left; }
+#v-uptime { display: block; min-width: 7ch; text-align: center; }
+#v-running { display: block; min-width: 10ch; text-align: right; }
+#v-waiting { display: block; min-width: 9ch; text-align: right; }
+#v-kv { display: block; min-width: 12ch; text-align: right; }
+#v-e2e { display: block; min-width: 12ch; text-align: right; }
+#v-ttft { display: block; min-width: 6ch; text-align: right; }
+#v-tps { display: block; min-width: 12ch; text-align: right; }
 .badge {
   display: inline-block;
   padding: 1px 8px;
@@ -157,8 +168,10 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   padding: 18px 20px;
 }
 .modal-box h3 { margin: 0 0 12px; font-size: 15px; }
-.model-list { display: grid; gap: 6px; }
+.model-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .model-item {
+  width: fit-content;
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -171,6 +184,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .model-item .name { font-weight: 600; }
 .model-item .meta { color: var(--muted); font-size: 12px; }
 .model-item.current .meta { color: var(--green); }
+.model-item.stopping .meta,
+.model-item.switching .meta { color: var(--red); }
 .job-log {
   background: #010409;
   border: 1px solid var(--border);
@@ -178,8 +193,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   padding: 8px 10px;
   font-family: Consolas, monospace;
   font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
   max-height: 220px;
   overflow: auto;
   margin-top: 12px;
@@ -239,6 +253,7 @@ table.params td input[readonly] { color: var(--muted); }
     <div id="vllm-panel">
       <div id="vllm-headline">
         <div class="item"><span class="k">稼働モデル</span><span class="v" id="v-model">-</span></div>
+        <div class="item"><span class="k">ポート</span><span class="v" id="v-port">-</span></div>
         <div class="item"><span class="k">コンテナ状態</span><span class="v" id="v-status">-</span></div>
         <div class="item"><span class="k">稼働時間</span><span class="v" id="v-uptime">-</span></div>
         <div class="item"><span class="k">実行中リクエスト</span><span class="v" id="v-running">-</span></div>
@@ -303,7 +318,7 @@ const series = {
   labels: [],
   cpuLoad: [], cpuTemp: [],
   memUsed: [],
-  gpuLoad: [], gpuTemp: [], gpuPower: [],
+  gpuLoad: [], gpuTemp: [], gpuPower: [], gpuClock: [],
   diskUsed: [],
   diskRead: [], diskWrite: [],
 };
@@ -317,6 +332,7 @@ function pushPoint(ts, m) {
   series.gpuLoad.push(m.gpu_load_pct);
   series.gpuTemp.push(m.gpu_temp_c);
   series.gpuPower.push(m.gpu_power_w);
+  series.gpuClock.push(m.gpu_clock_mhz);
   series.diskUsed.push(m.disk_used_pct);
   series.diskRead.push(m.disk_read_mbps);
   series.diskWrite.push(m.disk_write_mbps);
@@ -345,6 +361,7 @@ function viewArrays() {
     cpuLoad: sl(series.cpuLoad), cpuTemp: sl(series.cpuTemp),
     memUsed: sl(series.memUsed),
     gpuLoad: sl(series.gpuLoad), gpuTemp: sl(series.gpuTemp), gpuPower: sl(series.gpuPower),
+    gpuClock: sl(series.gpuClock),
     diskUsed: sl(series.diskUsed),
     diskRead: sl(series.diskRead), diskWrite: sl(series.diskWrite),
   };
@@ -409,19 +426,20 @@ class Gauge {
     ctx.stroke();
     if (v == null) return;
     const frac = Math.max(0, Math.min(1, v / this.def.max));
-    // ゾーン色 (緑→橙→赤)
+    // ゾーン色 (緑→橙→赤)。閾値は def.zoneStops でゲージ単位に上書き可能
+    const stops = this.def.zoneStops || ZONE_STOPS;
     let color = ZONE_GREEN;
-    if (frac > ZONE_STOPS[1]) color = ZONE_RED;
-    else if (frac > ZONE_STOPS[0]) color = ZONE_ORANGE;
+    if (frac > stops[1]) color = ZONE_RED;
+    else if (frac > stops[0]) color = ZONE_ORANGE;
     // 色ゾーン帯 (細い外側リング)
     const zr = R - 1.5;
     ctx.lineWidth = 3;
     ctx.strokeStyle = ZONE_GREEN;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI, Math.PI * (1 + ZONE_STOPS[0])); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI, Math.PI * (1 + stops[0])); ctx.stroke();
     ctx.strokeStyle = ZONE_ORANGE;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + ZONE_STOPS[0]), Math.PI * (1 + ZONE_STOPS[1])); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[0]), Math.PI * (1 + stops[1])); ctx.stroke();
     ctx.strokeStyle = ZONE_RED;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + ZONE_STOPS[1]), 2 * Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[1]), 2 * Math.PI); ctx.stroke();
     // 値アーチ
     ctx.beginPath();
     ctx.arc(cx, cy, r, Math.PI, Math.PI * (1 + frac));
@@ -433,18 +451,24 @@ class Gauge {
 
 const GAUGE_DEFS = [
   { id: "g-cpu-load", title: "CPU 負荷", max: 100, unit: "%", color: "#58a6ff",
+    dotBg: "rgba(88,166,255,.10)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
     get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1), sub: (m) => (m.cpu_cores ? m.cpu_cores + " cores" : "") },
   { id: "g-cpu-temp", title: "CPU 温度", max: 100, unit: "°C", color: "#f85149",
     get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
   { id: "g-mem", title: "System Memory", max: 100, unit: "", color: "#3fb950",
+    bg: "rgba(63,185,80,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
+    dotBg: "rgba(63,185,80,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
     get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
   { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#bc8cff",
+    bg: "rgba(188,140,255,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
+    dotBg: "rgba(188,140,255,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
     get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0), sub: () => "" },
   { id: "g-gpu-temp", title: "GPU 温度", max: 100, unit: "°C", color: "#ff7b72",
     get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
   { id: "g-gpu-power", title: "GPU 電力", max: 140, unit: "W", color: "#d29922",
     get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1), sub: () => "上限 140 W (GB10 TDP)" },
   { id: "g-gpu-clock", title: "GPU クロック", max: 3003, unit: "MHz", color: "#8b949e",
+    zoneStops: [2520 / 3003, 2700 / 3003], // 緑≤2520 / 黄≤2700 / 赤>2700 MHz (運用実測値)
     get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0), sub: () => "最大 3003 MHz" },
   { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
     get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
@@ -456,8 +480,8 @@ const GAUGE_DEFS = [
 
 // 半円ゲージ DOM 生成
 document.getElementById("host-cards").innerHTML = GAUGE_DEFS.map((d) =>
-  `<div class="gauge">
-     <div class="gtitle"><span class="gdot" style="background:${d.color}"></span>${d.title}</div>
+  `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
+     <div class="gtitle"><span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>${d.title}</div>
      <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
      <div class="gsub"></div>
    </div>`
@@ -470,8 +494,8 @@ function renderGauges(m) {
 }
 
 // ------------------------------------------------------------- 統合時系列グラフ
-// 100% 換算: CPU温度=100°C / ストレージI/O=12GB/s / GPU電力=140W (GB10 TDP)
-const NORM = { cpuTemp: 100, gpuPower: 140, diskIO: 12000 };
+// 100% 換算: CPU温度=100°C / ストレージI/O=12GB/s / GPU電力=140W (GB10 TDP) / GPUクロック=3003MHz (HW上限)
+const NORM = { cpuTemp: 100, gpuPower: 140, gpuClock: 3003, diskIO: 12000 };
 const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
 
 const lineDS = (label, data, color, fill) => ({
@@ -488,10 +512,11 @@ const mainChart = new Chart(document.getElementById("ch-main"), {
     datasets: [
       lineDS("CPU負荷 %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
       lineDS("CPU温度 %", toPct(series.cpuTemp, NORM.cpuTemp), "#f85149"),
-      lineDS("メモリ使用率 %", series.memUsed, "#3fb950"),
-      lineDS("GPU負荷 %", series.gpuLoad, "#bc8cff", "rgba(188,140,255,.10)"),
+      { ...lineDS("メモリ使用率 %", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
+      { ...lineDS("GPU負荷 %", series.gpuLoad, "#bc8cff", "rgba(188,140,255,.30)"), fill: true },
       lineDS("GPU温度 %", toPct(series.gpuTemp, NORM.cpuTemp), "#ff7b72"),
       lineDS("GPU電力 %", toPct(series.gpuPower, NORM.gpuPower), "#d29922"),
+      lineDS("GPUクロック %", toPct(series.gpuClock, NORM.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
       lineDS("ストレージ使用率 %", series.diskUsed, "#79c0ff"),
       lineDS("ストレージ読込 %", toPct(series.diskRead, NORM.diskIO), "#56d364"),
       lineDS("ストレージ書込 %", toPct(series.diskWrite, NORM.diskIO), "#e3b341"),
@@ -520,9 +545,10 @@ function refreshMainChart() {
   ds[3].data = v.gpuLoad;
   ds[4].data = toPct(v.gpuTemp, NORM.cpuTemp);
   ds[5].data = toPct(v.gpuPower, NORM.gpuPower);
-  ds[6].data = v.diskUsed;
-  ds[7].data = toPct(v.diskRead, NORM.diskIO);
-  ds[8].data = toPct(v.diskWrite, NORM.diskIO);
+  ds[6].data = toPct(v.gpuClock, NORM.gpuClock);
+  ds[7].data = v.diskUsed;
+  ds[8].data = toPct(v.diskRead, NORM.diskIO);
+  ds[9].data = toPct(v.diskWrite, NORM.diskIO);
   mainChart.update("none");
 }
 
@@ -551,6 +577,7 @@ function renderVllm(st) {
     return;
   }
   setV("v-model", a.model_name || a.profile);
+  setV("v-port", a.port != null ? String(a.port) : "-");
   setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
   setV("v-uptime", a.uptime_str || "-");
   const mt = a.metrics || {};
@@ -582,6 +609,10 @@ async function poll() {
     const st = await fetchJson(API + "/api/vllm/status");
     renderVllm(st);
     currentStatus = st;
+    // モデル切替モーダルが開いている間は状態表示をライブ更新する
+    if (!document.getElementById("modal-switch").classList.contains("hidden")) {
+      renderModelList();
+    }
   } catch (e) {
     console.error("vllm poll failed", e);
   }
@@ -600,15 +631,31 @@ function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 
 function renderModelList() {
   const st = currentStatus || { containers: [], active: null };
+  // 切替ジョブ実行中なら kind=switch の情報のみ状態表示に使う
+  const sw = st.switching && st.switching.kind === "switch" ? st.switching : null;
   const list = document.getElementById("model-list");
   list.innerHTML = "";
   for (const c of st.containers) {
     const isCurrent = st.active && st.active.profile === c.profile;
+    const isTarget = sw && sw.profile === c.profile;
+    let cls = "", meta;
+    if (isTarget) {
+      // 切替対象 B: 未起動=停止中(灰) / 起動中かつAPI未応答=切替中…(赤) / API応答=現在稼働中(緑)
+      if (!c.running) meta = "停止中";
+      else if (!sw.ready) { cls = "switching"; meta = "切替中…"; }
+      else { cls = "current"; meta = "現在稼働中"; }
+    } else if (isCurrent) {
+      cls = "current";
+      meta = "現在稼働中";
+    } else if (c.running && sw) {
+      // 停止処理中の旧モデル A
+      cls = "stopping";
+      meta = "停止中…";
+    } else {
+      meta = (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
+    }
     const div = document.createElement("div");
-    div.className = "model-item" + (isCurrent ? " current" : "") + (c.profile === selectedProfile ? " selected" : "");
-    const meta = isCurrent
-      ? "現在稼働中"
-      : (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
+    div.className = "model-item" + (cls ? " " + cls : "") + (c.profile === selectedProfile ? " selected" : "");
     div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
     div.onclick = () => { selectedProfile = c.profile; renderModelList(); };
     list.appendChild(div);
@@ -622,6 +669,8 @@ document.getElementById("btn-switch").onclick = async () => {
   } catch (e) { /* 表示のみ続行 */ }
   if (currentStatus && currentStatus.active) selectedProfile = currentStatus.active.profile;
   document.getElementById("switch-log").style.display = "none";
+  // ジョブ実行中の場合は実行ボタンを無効化(完了時は pollJob が復元する)
+  document.getElementById("switch-go").disabled = !!(currentStatus && currentStatus.switching);
   renderModelList();
   openModal("modal-switch");
 };
@@ -744,13 +793,28 @@ async function pollJob() {
   } catch (e) {
     return;
   }
-  if (!job.running) return;
+  if (!job.running) {
+    // ジョブ終了(切替/再作成): ログを非表示にし、ボタンを復元する
+    if (job.kind) onJobDone(job);
+    return;
+  }
   const isSwitch = job.kind === "switch";
   const logEl = document.getElementById(isSwitch ? "switch-log" : "recreate-log");
   logEl.style.display = "block";
-  const lines = (job.log_tail || []).join("\n");
+  // 空行を詰めて表示する(スクリプトの上書き表示用の空行が多い)
+  const lines = (job.log_tail || []).filter((l) => l.trim()).join("\n");
   logEl.textContent = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function onJobDone(job) {
+  const isSwitch = job.kind === "switch";
+  const logEl = document.getElementById(isSwitch ? "switch-log" : "recreate-log");
+  if (logEl.style.display !== "none") logEl.style.display = "none";
+  document.getElementById(isSwitch ? "switch-go" : "params-save").disabled = false;
+  if (!document.getElementById("modal-switch").classList.contains("hidden")) {
+    renderModelList();
+  }
 }
 
 // ------------------------------------------------------------- クロック
@@ -760,6 +824,16 @@ setInterval(() => {
 }, 1000);
 
 // ------------------------------------------------------------- 起動
+(async () => {
+  // ページリロード後、サーバー側が保持する直近30分の履歴で時系列グラフをバックフィルする
+  try {
+    const hist = await fetchJson(API + "/api/history");
+    for (const m of hist) pushPoint(m.timestamp, m);
+    refreshMainChart();
+  } catch (e) {
+    console.error("history backfill failed", e);
+  }
+})();
 poll();
 setInterval(poll, POLL_MS);
 </script>

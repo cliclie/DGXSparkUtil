@@ -307,7 +307,6 @@ cd /home/cliclie/DGXSparkUtil/api
 - 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
 - `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
 - タブの favicon は `front/meter-dgx.ico`(`/static/` マウント経由で配信)
-- 一段目ゲージのタイトルには二段目グラフの凡例色と同じ色のマーカー(■)を付与し、系列と対応付けやすくしている(GPU クロックはグラフに系列がないためグレー)
 
 ## 実装メモ(2026-08-26)
 
@@ -315,3 +314,61 @@ cd /home/cliclie/DGXSparkUtil/api
 - 初回導入は `sudo bash api/install_service.sh` でユニットファイル設置・enable・起動を一元実行。以降は `sudo systemctl restart dgx-spark-api` でコード変更を反映
 - サービスは `User=cliclie`・`WorkingDirectory=api/`・venv 内 python で uvicorn を起動し、8080 へバインド。起動前(`ExecStartPre`)に venv が無い場合は自動作成
 - 既存の vLLM(8010)・SGLang(8008, ローカル LLM)とはポートが異なるため衝突しない
+
+## 実装メモ(2026-08-27)
+
+- モデル切替・モニタリングのプロファイル対応表をハードコード(`PROFILES` 辞書)から廃止し、
+  `api/vllm.py` の `_load_profiles()` が **docker-compose.yml を動的にパース**して構築するようにした(モデル追加に自動追従)
+- パース対象は各サービスブロックの `profiles:` / `container_name:` / `ports:`(ホスト側ポート)のみで、
+  **両方を持つサービスのみに限定**。regex 解析のため新規依存ゼロ(PyYAML 不使用・`<<: *vllm-common` の YAML アンカーにも依存しない)。
+  ファイルの mtime が変わったときのみ再パースするキャッシュ付き(2 秒ポーリングでも低コスト)
+- これにより compose に追加済みの **SGLang 4 種**(qwen38sglang / eagle / dflash / dspark、ポート 8008 共有)も
+  モデル一覧に表示され切替可能になった。修正前は SGLang が稼働中でも `active` が検出されず三段目が空表示になる不具合があった(検証で確認)
+- トークンスループットは `/metrics` にトークンカウンタが存在する場合のみ算出する(vLLM、または `--enable-metrics` 有効の SGLang)。
+  取得できない項目(llama.cpp 等)は null → フロントで "-" 表示
+- **制約**: `switch_models.sh` は case 文で profile をハードコードしたまま(今回は変更しない方針)。
+  compose に新規モデルを追加した場合、モニタリング・UI 表示は自動追従するが、**切替を実行するには switch_models.sh 側にも
+  該当 profile の case を手動追加する必要がある**(未定義の場合ジョブログに usage エラーが出る)
+- 検証: `_load_profiles()` で 12 profile(旧 8 + SGLang 4)の抽出確認、`GET /api/vllm/status` で全コンテナ表示確認、
+  無効 profile への切替要求は既知プロファイル一覧付きエラーで拒否されることを確認。モデル切替・コンテナ再作成は実行していない
+
+- 二段目の時系列グラフに **GPU クロック** を追加(10 系列目)。3003 MHz(HW 上限)を 100%、0 MHz を 0% とする
+  `NORM.gpuClock = 3003` で換算。線色はグレー `#8b949e`(一段目の GPU クロックゲージのラベル左マーカーと同色)
+- GPU クロックゲージのゾーン閾値を運用実測値に合わせて変更: **緑 ≤2520 MHz / 黄 ≤2700 MHz / 赤 >2700 MHz**。
+  ゲージ共通の `ZONE_STOPS` に加え、ゲージ定義に `zoneStops` を上書き可能にし(`g-gpu-clock` のみ `[2520/3003, 2700/3003]`)、
+  他ゲージは従来どおり 60/85% のまま。API は `gpu_clock_mhz` を既に返していたためフロント(`front/index.html`)のみ変更(再起動不要)
+- **SGLang メトリクス対応**: SGLang はデフォルトで `/metrics` を公開しない(`enable_metrics` デフォルト False、server_args.py で確認)ため、
+  docker-compose.yml の SGLang 4 サービス全てに `--enable-metrics` を追加した。**コンテナ再作成後に有効化される**(性能への影響は CPU 側の
+  Prometheus 集計のみで無視できるレベル)。有効化後は `api/vllm.py` の `_sglang_metrics()` が
+  `sglang:num_running_reqs` / `num_queue_reqs` / `token_usage`(0-1 比率)×100 / `e2e_request_latency_seconds`・`time_to_first_token_seconds`
+  (sum/count 平均) / トークンカウンタ差分を vLLM と同じ構造にマッピングし、三段目の全項目が取得可能になる。
+  系列名はイメージ内の `sglang/srt/observability/metrics_collector.py` を直接確認して検証済み
+- **`/get_load` フォールバック**: `/metrics` が無い場合(再作成前の SGLang・llama.cpp 等)は `_sglang_get_load()` が
+  SGLang の `/get_load` から実行中・待機リクエスト数を取得(dp_rank 毎のリストを合計)。これもない場合は従来どおり `metrics: null` → "-"。
+  llama.cpp(muse)は両方無いため全項目 "-" のまま
+- 注意: 稼働中の SGLang コンテナは再作成まで `--enable-metrics` なしのままなので、**再作成までは三段目が実行中/待機リクエストのみ表示**になる
+- **SGLang スループットが常に 0.0 tok/s になる不具合の修正**: `sglang:prompt_tokens_total` /
+  `generation_tokens_total` はラベル `is_streaming=true/false` で2系列に分かれる(実機 `/metrics` で確認)が、
+  `_parse_vllm_metrics()` が同名系列を初出のみ採用していたため差分計算が false 側(非ストリーミング=稀)だけを使い常に 0 になっていた。
+  **カウンタ(名前の末尾が `_total`)のみラベル違いの系列を合計**し、ゲージは従来どおり初出採用に変更した(vLLM の単一エンジン構成では挙動不変)。
+  カウンタはリクエスト**完了時**にのみ増加するため(`observe_one_finished_request` 参照)、実行中の1件のみで長期生成中は 0 になるのは仕様通り。
+  検証: ストリーミング短リクエスト3件を流し `GET /api/vllm/status` をポーリングしたところ約 290 tok/s を正しく返却(修正前は常に 0.0)
+- **スループットの前回値保持**: トークンカウンタはリクエスト完了時のみ増加するため、完了が無い間差分が 0 になり表示が 0.0 に落ちる問題に対し、
+  `api/vllm.py` の `_apply_tps()` が**直近の非ゼロ tok/s をモジュール変数に保持**し、差分が 0/None の間は前回値を返すようにした(vLLM・SGLang 両パス共通)。
+  メトリクス無効のエンジンに切替えたときは `_reset_token_state()` で保持値も初期化し、旧モデルの値が残らないようにしている
+- **線グラフの30分バックフィル**: ページリロードで時系列グラフがクリアされる問題に対し、`api/main.py` がサーバー側で5秒間隔・最大30分(360点)の
+  ホストメトリクス履歴を保持し `GET /api/history` を公開。フロントは初回ロード時にこれを取得してリングバッファにシードするため、
+  モデル稼働中ならリロード直後に最大30分まで遡ったグラフが表示される(ブラウザ未開の間もサーバー側で蓄積される)
+
+## 実装メモ(2026-08-28)
+
+- モニターの数値を等幅数字(tabular figures)化: `body` に `font-variant-numeric: tabular-nums` を適用。
+  現在のフォントスタック(Segoe UI / Hiragino Sans / Noto Sans JP)はすべて tabular figures に対応しており、
+  全箇所(ゲージ・vLLM 指標・時計・テーブル)の数値が更新時に横ブレしなくなった。
+  Chart.js のグラフ目盛りは canvas 描画のためこの CSS の対象外
+- vLLM/モデル行の値を項目ごとに揃えた: 各値要素(`#v-*`)に `ch` 単位の `min-width`(表示サイズ 15px での半角「0」幅が基準)を指定し、
+  揃えも項目ごとに設定(稼働モデル=左寄せ fit-content・最小 10ch / ポート・稼働時間=中央寄せ / その他=右寄せ)。
+  ラベルが値ボックスより広い項目でも値は常に項目の右端に揃う
+- vLLM 行に「ポート」表示を追加。モデル切替リストを横方向ラップレイアウト(fit-content)に変更し、
+  停止中・切替中のメタ情報を赤字表示。ジョブログは折り返しなし(`white-space: pre`)に変更
+

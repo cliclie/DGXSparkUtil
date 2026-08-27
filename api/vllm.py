@@ -1,6 +1,7 @@
 """vLLM 状態モニタリング / モデル切替 / パラメータ編集。
 
 - 状態: docker ps/inspect + vLLM /health, /v1/models, /metrics + docker logs
+- プロファイル対応表: docker-compose.yml を動的にパース(モデル追加に自動追従)
 - 切替: 既存スクリプト switch_models.sh をバックグラウンド実行
 - パラメータ編集: docker-compose.yml の command を書き換えて --force-recreate
 """
@@ -16,17 +17,101 @@ COMPOSE_DIR = Path("/home/cliclie/llm/compose")
 COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yml"
 SWITCH_SCRIPT = COMPOSE_DIR / "switch_models.sh"
 
-# switch_models.sh と同じ対応表 (profile -> service/container/port)
-PROFILES: dict[str, dict] = {
-    "nemotron": {"service": "nemotron120b", "container": "vllm-nemotron120b", "port": 8000},
-    "qwen": {"service": "qwen72b", "container": "vllm-qwen72b", "port": 8001},
-    "laguna": {"service": "laguna72b", "container": "vllm-laguna72b", "port": 8002},
-    "qwen36": {"service": "qwen36_35b", "container": "vllm-qwen36-35b", "port": 8003},
-    "muse": {"service": "muse_glimmer", "container": "llama-muse-glimmer", "port": 8004},
-    "qwen38": {"service": "qwen38_27b", "container": "vllm-qwen38-27b", "port": 8005},
-    "qwen38bf16": {"service": "qwen38_27b_bf16", "container": "vllm-qwen38-27b-bf16", "port": 8006},
-    "qwen38nvfp4": {"service": "qwen38_27b_nvfp4", "container": "vllm-qwen38-27b-nvfp4", "port": 8007},
-}
+# プロファイル対応表 (profile -> service/container/port) は docker-compose.yml から
+# 動的に読み込む(モデル追加に自動追従。_load_profiles 参照)。
+# 切替実行のため switch_models.sh 側でも該当 profile が定義されている必要がある。
+_profiles_cache: dict[str, dict] = {}
+_profiles_mtime: float | None = None
+
+
+def _unquote(s: str) -> str:
+    """YAML スカラーの両端の一致する引用符を除去する。"""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+def _load_profiles() -> dict[str, dict]:
+    """docker-compose.yml をパースして {profile: {service, container, port}} を構築する。
+
+    profiles と container_name の両方を持つサービス(モデルサービス)のみを対象とする。
+    ファイルの mtime が変わったときのみ再パース(2 秒ポーリングでも低コスト)。
+    YAML パーサではなく regex で解析するため、<<: *vllm-common のような
+    アンカー参照に依存しない(新規依存ゼロ)。
+    """
+    global _profiles_cache, _profiles_mtime
+    try:
+        mtime = COMPOSE_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    if _profiles_cache and _profiles_mtime == mtime:
+        return _profiles_cache
+
+    profiles: dict[str, dict] = {}
+    try:
+        lines = COMPOSE_FILE.read_text().splitlines()
+    except OSError:
+        return {}
+
+    in_services = False
+    service: str | None = None
+    sub_key: str | None = None  # 現在のリストキー (profiles / ports)
+    cur_profile: str | None = None
+    cur_container: str | None = None
+    cur_port: int | None = None
+
+    def flush() -> None:
+        nonlocal cur_profile, cur_container, cur_port
+        if service and cur_profile and cur_container:
+            profiles[cur_profile] = {
+                "service": service,
+                "container": cur_container,
+                "port": cur_port,
+            }
+        cur_profile = cur_container = None
+        cur_port = None
+
+    for ln in lines:
+        if not in_services:
+            if re.match(r"^services:\s*$", ln):
+                in_services = True
+            continue
+        if re.match(r"^\S", ln):  # services 以外のトップレベルキーでセクション終了
+            break
+        sm = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", ln)
+        if sm:  # サービス定義 (2スペースインデント)
+            flush()
+            service = sm.group(1)
+            sub_key = None
+            continue
+        if service is None:
+            continue
+        km = re.match(r"^    ([A-Za-z0-9_-]+):(.*)$", ln)
+        if km:  # サービスキー (4スペースインデント)
+            key, rest = km.group(1), km.group(2).strip()
+            if key == "container_name":
+                cur_container = _unquote(rest) or None
+            elif key in ("profiles", "ports"):
+                sub_key = key
+            else:
+                sub_key = None
+            continue
+        im = re.match(r"^      - (.+)$", ln)
+        if im and sub_key:  # リスト項目 (6スペースインデント)
+            val = _unquote(im.group(1))
+            if sub_key == "profiles" and cur_profile is None:
+                cur_profile = val
+            elif sub_key == "ports" and cur_port is None:
+                try:
+                    cur_port = int(val.split(":")[0])  # ホスト側ポート
+                except ValueError:
+                    pass
+
+    flush()
+    _profiles_cache = profiles
+    _profiles_mtime = mtime
+    return profiles
 
 # 編集を許可する起動引数 (README「パラメータ表示・編集」参照)
 EDITABLE_FLAGS = [
@@ -45,6 +130,25 @@ _job: dict | None = None
 
 # /metrics のトークンカウンタ差分(スループット算出用)
 _prev_metrics: dict = {"ts": None, "tokens": None}
+
+# 直近の非ゼロスループットを保持。SGLang/vLLM のトークンカウンタはリクエスト完了時のみ
+#増加するため、完了が無い間差分が 0 になる → 運用要求により前回値を維持表示する。
+_last_tokens_per_s: float | None = None
+
+
+def _apply_tps(tokens_per_s: float | None) -> float | None:
+    """算出スループットが非ゼロなら保持値を更新し、それ以外は保持値を返す。"""
+    global _last_tokens_per_s
+    if tokens_per_s and tokens_per_s > 0:
+        _last_tokens_per_s = tokens_per_s
+    return tokens_per_s or _last_tokens_per_s
+
+
+def _reset_token_state() -> None:
+    """カウンタ差分・保持スループットを初期化(メトリクス無効/エンジン切替時)。"""
+    global _last_tokens_per_s
+    _prev_metrics["ts"], _prev_metrics["tokens"] = None, None
+    _last_tokens_per_s = None
 
 
 # ---------------------------------------------------------------- 基本ユーティリティ
@@ -96,8 +200,11 @@ def _parse_vllm_metrics(text: str) -> dict:
     """vLLM の Prometheus 形式メトリクスを dict に変換する。
 
     vLLM 26.x では全系列がラベル付き(engine=..., model_name=...)のため、
-    ラベルを除去して系列名のみで集約する(同一系列の複数ラベルは加算しない、
-    単一エンジン構成のため初出を採用)。
+    ラベルを除去して系列名のみで集約する。
+    ゲージは同一系列の複数ラベルに依存せず初出を採用(単一エンジン構成)。
+    カウンタ(_total 末尾)のみラベル違いの系列を合計する(SGLang の
+    prompt_tokens_total / generation_tokens_total は is_streaming=true/false
+    で2系列に分かれるため、false 側だけ採用すると差分が常に 0 になる)。
     """
     m: dict[str, float] = {}
     for line in text.splitlines():
@@ -112,9 +219,74 @@ def _parse_vllm_metrics(text: str) -> dict:
             v = float(val)
         except ValueError:
             continue
-        if name not in m:
+        if name.endswith("_total"):
+            m[name] = m.get(name, 0.0) + v
+        elif name not in m:
             m[name] = v
     return m
+
+
+def _hist_avg(pm: dict, name: str) -> float | None:
+    """ヒストグラムの sum/count 平均(片方が欠けていれば None)。"""
+    s, c = pm.get(f"{name}_sum"), pm.get(f"{name}_count")
+    if s is not None and c:
+        return s / c
+    return None
+
+
+def _sglang_metrics(pm: dict) -> dict:
+    """SGLang の Prometheus 系列を vLLM と同じ構造にマッピング(2026-08-27)。
+
+    系列名はイメージ lmsysorg/sglang:dev-qwen38-27b-dflash2 内の
+    sglang/srt/observability/metrics_collector.py で検証済み
+    (--enable-metrics 指定時。README 実装メモ参照)。
+    """
+    m = {
+        "requests_running": pm.get("sglang:num_running_reqs"),
+        "requests_waiting": pm.get("sglang:num_queue_reqs"),
+        # token_usage は KV キャッシュプール使用率の 0-1 比率
+        "kv_cache_usage_pct": (
+            pm["sglang:token_usage"] * 100.0 if "sglang:token_usage" in pm else None
+        ),
+        "e2e_latency_s": _hist_avg(pm, "sglang:e2e_request_latency_seconds"),
+        "ttft_s": _hist_avg(pm, "sglang:time_to_first_token_seconds"),
+    }
+    if "sglang:prompt_tokens_total" in pm or "sglang:generation_tokens_total" in pm:
+        tokens = (
+            pm.get("sglang:prompt_tokens_total", 0.0)
+            + pm.get("sglang:generation_tokens_total", 0.0)
+        )
+        now = time.time()
+        if _prev_metrics["tokens"] is not None:
+            dt = max(now - _prev_metrics["ts"], 1e-9)
+            m["tokens_per_s"] = _apply_tps(max(0.0, (tokens - _prev_metrics["tokens"]) / dt))
+        _prev_metrics["ts"], _prev_metrics["tokens"] = now, tokens
+    return m
+
+
+def _sglang_get_load(base: str) -> dict | None:
+    """/metrics が無い場合のフォールバック: SGLang の /get_load から
+    実行中・待機リクエスト数を取得。これも無い場合は None(llama.cpp 等)。
+
+    応答は dp_rank 毎のリストのため合計する(現在 DP=1 だが将来対応)。
+    """
+    txt = _http_get(f"{base}/get_load", timeout=3)
+    if not txt:
+        return None
+    try:
+        import json
+
+        data = json.loads(txt)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        return None
+    return {
+        "requests_running": sum(e.get("num_reqs", 0) for e in data),
+        "requests_waiting": sum(e.get("num_waiting_reqs", 0) for e in data),
+    }
 
 
 def _container_state(name: str) -> dict:
@@ -148,22 +320,42 @@ def _container_state(name: str) -> dict:
         return {}
 
 
+def _switching_info() -> dict | None:
+    """実行中ジョブがある場合、対象プロファイルと起動準備完了フラグを返す。
+
+    フロントのモデル一覧で「停止中…/切替中…」の状態表示に使う。
+    ready は対象ポートの /health が応答するか(switch_models.sh の完了判定と同じ)。
+    """
+    if _job is None or _job["proc"].poll() is not None:
+        return None
+    info = _load_profiles().get(_job["profile"])
+    ready = False
+    if info and info.get("port"):
+        ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
+    return {"kind": _job["kind"], "profile": _job["profile"], "ready": ready}
+
+
 def get_status() -> dict:
     """稼働中モデルの状態 + vLLM メトリクスを返す。"""
     out: dict = {"containers": [], "active": None}
 
-    # 各コンテナの稼働状態
+    # 各コンテナの稼働状態 (対応表は docker-compose.yml から動的取得)
+    profiles = _load_profiles()
     running_profile = None
-    for profile, info in PROFILES.items():
+    for profile, info in profiles.items():
         st = _container_state(info["container"])
         if st.get("running"):
             running_profile = profile
         out["containers"].append({"profile": profile, "container": info["container"], **st})
 
+    # 切替/再作成ジョブ実行中の状態表示用(停止処理中は稼働コンテナが無いため、
+    # 早期 return より前に付与する)
+    out["switching"] = _switching_info()
+
     if running_profile is None:
         return out
 
-    info = PROFILES[running_profile]
+    info = profiles[running_profile]
     port = info["port"]
     base = f"http://localhost:{port}"
 
@@ -187,13 +379,12 @@ def get_status() -> dict:
         if mm:
             active["model_name"] = mm.group(1)
 
-    # vLLM 組み込みメトリクス (llama.cpp は無い)
+    # 組み込みメトリクス (/metrics): vLLM は常時公開、SGLang は --enable-metrics 指定時のみ
     # vLLM 26.x の系列名: e2e 相当は request_inference_time_seconds、
     # KV キャッシュは kv_cache_usage_perc
     mt = _http_get(f"{base}/metrics", timeout=5)
-    if mt:
-        pm = _parse_vllm_metrics(mt)
-
+    pm = _parse_vllm_metrics(mt) if mt else {}
+    if any(k.startswith("vllm:") for k in pm):
         def g(name: str) -> float | None:
             return pm.get(name)
 
@@ -222,18 +413,26 @@ def get_status() -> dict:
             "num_preemptions": g("vllm:num_preemptions_total"),
         }
 
-        # トークンスループット(カウンター差分)
-        tokens = (
-            pm.get("vllm:prompt_tokens_total", 0.0)
-            + pm.get("vllm:generation_tokens_total", 0.0)
-        )
-        now = time.time()
-        if _prev_metrics["tokens"] is not None:
-            dt = max(now - _prev_metrics["ts"], 1e-9)
-            active["metrics"]["tokens_per_s"] = max(0.0, (tokens - _prev_metrics["tokens"]) / dt)
-        _prev_metrics["ts"], _prev_metrics["tokens"] = now, tokens
+        # トークンスループット(カウンター差分)。系列が存在する場合のみ算出
+        # (vLLM、または --enable-metrics 有効の SGLang)
+        if "vllm:prompt_tokens_total" in pm or "vllm:generation_tokens_total" in pm:
+            tokens = (
+                pm.get("vllm:prompt_tokens_total", 0.0)
+                + pm.get("vllm:generation_tokens_total", 0.0)
+            )
+            now = time.time()
+            if _prev_metrics["tokens"] is not None:
+                dt = max(now - _prev_metrics["ts"], 1e-9)
+                active["metrics"]["tokens_per_s"] = _apply_tps(max(0.0, (tokens - _prev_metrics["tokens"]) / dt))
+            _prev_metrics["ts"], _prev_metrics["tokens"] = now, tokens
+    elif any(k.startswith("sglang:") for k in pm):
+        # SGLang (--enable-metrics 有効)。系列名マッピングは _sglang_metrics 参照
+        active["metrics"] = _sglang_metrics(pm)
     else:
-        active["metrics"] = None
+        # /metrics が無い(SGLang の --enable-metrics 未導入時・llama.cpp 等) →
+        # SGLang の /get_load で実行中・待機リクエスト数を取得。これもない場合は None
+        _reset_token_state()
+        active["metrics"] = _sglang_get_load(base)
 
     # 直近ログ
     logs = _run(["docker", "logs", "--tail", "30", info["container"]], timeout=10)
@@ -280,10 +479,12 @@ def job_status() -> dict:
     tail: list[str] = []
     try:
         with open(_job["log_file"], errors="replace") as f:
-            tail = [
+            raw = [
                 re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\r", "", ln).rstrip()
-                for ln in f.readlines()[-12:]
+                for ln in f.readlines()[-60:]
             ]
+        # 空行を詰めて表示する(切替スクリプトの上書き表示用に空行が多い)
+        tail = [ln for ln in raw if ln.strip()][-12:]
     except OSError:
         pass
 
@@ -309,8 +510,12 @@ def job_status() -> dict:
 
 def switch_model(profile: str) -> dict:
     """モデル切替をバックグラウンド実行する。"""
-    if profile not in PROFILES:
-        raise ValueError(f"不明なプロファイル: {profile}")
+    profiles = _load_profiles()
+    if not profiles:
+        raise ValueError(f"{COMPOSE_FILE} からプロファイル付きサービスを読み込めません")
+    if profile not in profiles:
+        known = ", ".join(sorted(profiles))
+        raise ValueError(f"不明なプロファイル: {profile} (既知: {known})")
     return _start_job("switch", profile, ["bash", str(SWITCH_SCRIPT), profile])
 
 
@@ -347,9 +552,10 @@ def _service_command_lines(service: str) -> list[str] | None:
 
 def get_params(profile: str) -> dict:
     """稼働モデルのパラメータ(起動引数)を表示する。"""
-    if profile not in PROFILES:
+    profiles = _load_profiles()
+    if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
-    service = PROFILES[profile]["service"]
+    service = profiles[profile]["service"]
     block = _service_command_lines(service)
     if block is None:
         raise ValueError(f"compose にサービス {service} の command が見つかりません")
@@ -404,9 +610,10 @@ def edit_params(profile: str, updates: dict[str, str]) -> dict:
     vLLM / llama.cpp のパラメータは起動時に確定するため、
     compose の command を書き換えた後に --force-recreate する。
     """
-    if profile not in PROFILES:
+    profiles = _load_profiles()
+    if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
-    service = PROFILES[profile]["service"]
+    service = profiles[profile]["service"]
 
     for flag, value in updates.items():
         if flag not in EDITABLE_FLAGS:
