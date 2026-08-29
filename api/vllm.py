@@ -485,6 +485,13 @@ def job_status() -> dict:
             ]
         # 空行を詰めて表示する(切替スクリプトの上書き表示用に空行が多い)
         tail = [ln for ln in raw if ln.strip()][-12:]
+        # 切替スクリプトの上書き表示フレーム(ヘッダー+ログ4行)はファイル上では
+        # 毎秒追記されるため、末尾に複数コピーが残る。最後の === ヘッダー行以降の
+        # 1フレーム分のみを保持して、ヘッダーが1行だけになるようにする。
+        for i in range(len(tail) - 1, -1, -1):
+            if tail[i].startswith("===") and tail[i].endswith("==="):
+                tail = tail[i : i + 5]
+                break
     except OSError:
         pass
 
