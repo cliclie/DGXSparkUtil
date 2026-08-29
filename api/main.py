@@ -4,8 +4,9 @@
 - GET  /api/vllm/status   コンテナ状態/健全性/モデル名/metrics/ログ
 - GET  /api/vllm/params   現在のパラメータ値
 - POST /api/vllm/switch   モデル切替 (バックグラウンド)
+- POST /api/vllm/stop     モデル停止 (バックグラウンド)
 - POST /api/vllm/params   パラメータ編集 + コンテナ再作成 (バックグラウンド)
-- GET  /api/vllm/job      切替/再作成ジョブの進捗
+- GET  /api/vllm/job      切替/再作成/停止ジョブの進捗
 - GET  /                  front/ の静的ファイル
 """
 
@@ -94,6 +95,14 @@ def api_vllm_params(profile: str) -> dict:
 def api_vllm_switch(body: SwitchBody) -> dict:
     try:
         return vllm.switch_model(body.profile)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/vllm/stop")
+def api_vllm_stop(body: SwitchBody) -> dict:
+    try:
+        return vllm.stop_model(body.profile)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(409, str(e))
 

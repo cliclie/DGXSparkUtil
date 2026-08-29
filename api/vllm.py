@@ -526,6 +526,21 @@ def switch_model(profile: str) -> dict:
     return _start_job("switch", profile, ["bash", str(SWITCH_SCRIPT), profile])
 
 
+def stop_model(profile: str) -> dict:
+    """稼働中モデルを停止する(バックグラウンド)。"""
+    profiles = _load_profiles()
+    if not profiles:
+        raise ValueError(f"{COMPOSE_FILE} からプロファイル付きサービスを読み込めません")
+    if profile not in profiles:
+        known = ", ".join(sorted(profiles))
+        raise ValueError(f"不明なプロファイル: {profile} (既知: {known})")
+    container = profiles[profile]["container"]
+    st = _container_state(container)
+    if not st.get("running"):
+        raise ValueError(f"{profile} は稼働していません")
+    return _start_job("stop", profile, ["docker", "stop", "--time", "30", container])
+
+
 # ---------------------------------------------------------------- パラメータ表示・編集
 
 def _service_command_lines(service: str) -> list[str] | None:

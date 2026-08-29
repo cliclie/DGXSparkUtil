@@ -84,6 +84,7 @@ section > h2 {
 .ok { color: var(--green); }
 .warn { color: var(--yellow); }
 .hot { color: var(--red); }
+.v.down { color: var(--muted); } /* vLLM 行の「停止中」は灰色 */
 /* ---- Tier 2 ---- */
 .charts-head {
   display: flex;
@@ -145,6 +146,8 @@ button {
 }
 button:hover { border-color: var(--blue); }
 button.primary { background: #1f6feb; border-color: #1f6feb; }
+#btn-stop { background: #33161a; border-color: #5c2b30; color: #e5534b; }
+#btn-stop:hover { border-color: var(--red); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 /* ---- モーダル ---- */
 .modal {
@@ -265,6 +268,7 @@ table.params td input[readonly] { color: var(--muted); }
       <div class="btns">
         <button class="primary" id="btn-switch">モデル切替</button>
         <button id="btn-params">パラメータ表示・編集</button>
+        <button id="btn-stop" disabled>停止</button>
       </div>
     </div>
   </section>
@@ -295,6 +299,19 @@ table.params td input[readonly] { color: var(--muted); }
     <div class="modal-actions">
       <button id="params-close">閉じる</button>
       <button class="primary" id="params-save">保存してコンテナを再作成</button>
+    </div>
+  </div>
+</div>
+
+<!-- モーダル: モデル停止 -->
+<div class="modal hidden" id="modal-stop">
+  <div class="modal-box">
+    <h3>モデル停止</h3>
+    <p id="stop-msg"></p>
+    <div class="job-log" id="stop-log"></div>
+    <div class="modal-actions">
+      <button id="stop-cancel">キャンセル</button>
+      <button class="primary" id="stop-go">停止する</button>
     </div>
   </div>
 </div>
@@ -570,14 +587,22 @@ function setV(id, text, cls) {
 
 function renderVllm(st) {
   const a = st.active;
+  // 停止ボタン: 稼働中モデルがあり、かつジョブ実行中でないときのみ有効
+  document.getElementById("btn-stop").disabled = !a || !!(st.switching);
   if (!a) {
     setV("v-model", "稼働中のモデルなし");
     setV("v-status", "停止中", "down");
     return;
   }
+  const stopJob = st.switching && st.switching.kind === "stop" ? st.switching : null;
   setV("v-model", a.model_name || a.profile);
   setV("v-port", a.port != null ? String(a.port) : "-");
-  setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
+  if (stopJob && stopJob.profile === a.profile) {
+    // 稼働中 → 停止中…(赤) → 完了後は active が null になり「停止中」(灰)
+    setV("v-status", "停止中…", "hot");
+  } else {
+    setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
+  }
   setV("v-uptime", a.uptime_str || "-");
   const mt = a.metrics || {};
   setV("v-running", mt.requests_running != null ? Math.round(mt.requests_running) : "-");
@@ -704,6 +729,59 @@ document.getElementById("switch-go").onclick = async () => {
 </script>
 
 <script>
+// ------------------------------------------------------------- モデル停止モーダル
+document.getElementById("btn-stop").onclick = () => {
+  const a = currentStatus && currentStatus.active;
+  if (!a) return;
+  const logEl = document.getElementById("stop-log");
+  logEl.textContent = "";
+  logEl.style.display = "none";
+  document.getElementById("stop-msg").textContent = `${a.model_name || a.profile} を停止しますか?`;
+  document.getElementById("stop-cancel").style.display = "";
+  document.getElementById("stop-go").disabled = false;
+  openModal("modal-stop");
+};
+
+document.getElementById("stop-cancel").onclick = () => closeModal("modal-stop");
+
+document.getElementById("stop-go").onclick = async () => {
+  const a = currentStatus && currentStatus.active;
+  if (!a) return;
+  const btn = document.getElementById("stop-go");
+  const logEl = document.getElementById("stop-log");
+  let failed = false;
+  btn.disabled = true;
+  document.getElementById("stop-cancel").style.display = "none";
+  document.getElementById("stop-msg").textContent = "停止中です… (完了するとこのダイアログは自動で閉じます)";
+  try {
+    const r = await fetch(API + "/api/vllm/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: a.profile }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      document.getElementById("stop-msg").textContent = "";
+      logEl.style.display = "block";
+      logEl.textContent = "エラー: " + (err.detail || r.status) + "\n";
+      failed = true;
+    } else {
+      logEl.style.display = "block";
+    }
+  } catch (e) {
+    document.getElementById("stop-msg").textContent = "";
+    logEl.style.display = "block";
+    logEl.textContent = "リクエスト失敗: " + e + "\n";
+    failed = true;
+  }
+  if (failed) {
+    btn.disabled = false;
+    document.getElementById("stop-cancel").style.display = "";
+  }
+};
+</script>
+
+<script>
 // ------------------------------------------------------------- パラメータモーダル
 let paramsProfile = null;
 
@@ -785,6 +863,8 @@ document.getElementById("params-save").onclick = async () => {
 };
 
 // ------------------------------------------------------------- ジョブ進捗ポーリング
+const JOB_LOG_IDS = { switch: "switch-log", recreate: "recreate-log", stop: "stop-log" };
+
 async function pollJob() {
   let job;
   try {
@@ -793,12 +873,11 @@ async function pollJob() {
     return;
   }
   if (!job.running) {
-    // ジョブ終了(切替/再作成): ログを非表示にし、ボタンを復元する
+    // ジョブ終了(切替/再作成/停止): ログを非表示にし、ボタン復元 / モーダル閉じる
     if (job.kind) onJobDone(job);
     return;
   }
-  const isSwitch = job.kind === "switch";
-  const logEl = document.getElementById(isSwitch ? "switch-log" : "recreate-log");
+  const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
   logEl.style.display = "block";
   // 空行を詰めて表示する(スクリプトの上書き表示用の空行が多い)
   const lines = (job.log_tail || []).filter((l) => l.trim()).join("\n");
@@ -808,11 +887,18 @@ async function pollJob() {
 
 function onJobDone(job) {
   const isSwitch = job.kind === "switch";
-  const logEl = document.getElementById(isSwitch ? "switch-log" : "recreate-log");
+  const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
   if (logEl.style.display !== "none") logEl.style.display = "none";
-  document.getElementById(isSwitch ? "switch-go" : "params-save").disabled = false;
-  if (!document.getElementById("modal-switch").classList.contains("hidden")) {
-    renderModelList();
+  if (isSwitch) {
+    document.getElementById("switch-go").disabled = false;
+    if (!document.getElementById("modal-switch").classList.contains("hidden")) {
+      renderModelList();
+    }
+  } else if (job.kind === "stop") {
+    // 停止完了で確認ダイアログを自動閉じる
+    closeModal("modal-stop");
+  } else {
+    document.getElementById("params-save").disabled = false;
   }
 }
 
