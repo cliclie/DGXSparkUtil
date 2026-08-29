@@ -596,15 +596,20 @@ function renderVllm(st) {
   const a = st.active;
   // 停止ボタン: 稼働中モデルがあり、かつジョブ実行中でないときのみ有効
   document.getElementById("btn-stop").disabled = !a || !!(st.switching);
+  // 切替ジョブ実行中は動作状況をコンテナ状態に同期する("切替中…" 赤)
+  const swJob = st.switching && st.switching.kind === "switch" ? st.switching : null;
   if (!a) {
     setV("v-model", "稼働中のモデルなし");
-    setV("v-status", "停止中", "down");
+    setV("v-status", swJob ? "切替中…" : "停止中", swJob ? "hot" : "down");
     return;
   }
   const stopJob = st.switching && st.switching.kind === "stop" ? st.switching : null;
   setV("v-model", a.model_name || a.profile);
   setV("v-port", a.port != null ? String(a.port) : "-");
-  if (stopJob && stopJob.profile === a.profile) {
+  if (swJob) {
+    // 切替中: 旧モデルがまだ稼働中 / 新モデルのAPI未応答の遷移期間も動作状況を表示
+    setV("v-status", "切替中…", "hot");
+  } else if (stopJob && stopJob.profile === a.profile) {
     // 稼働中 → 停止中…(赤) → 完了後は active が null になり「停止中」(灰)
     setV("v-status", "停止中…", "hot");
   } else {
