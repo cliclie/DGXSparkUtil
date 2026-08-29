@@ -197,9 +197,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   font-size: 11px;
   white-space: pre;
   max-height: 220px;
-  overflow: auto;
+  overflow-x: hidden; /* 横スクロールバーを出さず、オーバーフロー分を非表示(折り返しなし) */
+  overflow-y: auto;
   margin-top: 12px;
   display: none;
+}
+.job-log:empty::before { content: "ログ"; color: var(--muted); } /* 内容なし時のプレースホルダー */
+#switch-log {
+  display: block; /* 切替ログは常時表示(7行固定) */
+  line-height: 14px;
+  height: 116px; /* 7行 × 14px + padding 16px + border 2px = 116px (border-box) */
 }
 table.params { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.params th, table.params td {
@@ -692,7 +699,8 @@ document.getElementById("btn-switch").onclick = async () => {
     currentStatus = await fetchJson(API + "/api/vllm/status");
   } catch (e) { /* 表示のみ続行 */ }
   if (currentStatus && currentStatus.active) selectedProfile = currentStatus.active.profile;
-  document.getElementById("switch-log").style.display = "none";
+  // 切替ログは常時表示(7行固定): 開いたときは内容クリアでプレースホルダー("ログ")表示
+  document.getElementById("switch-log").textContent = "";
   // ジョブ実行中の場合は実行ボタンを無効化(完了時は pollJob が復元する)
   document.getElementById("switch-go").disabled = !!(currentStatus && currentStatus.switching);
   renderModelList();
@@ -888,7 +896,8 @@ async function pollJob() {
 function onJobDone(job) {
   const isSwitch = job.kind === "switch";
   const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
-  if (logEl.style.display !== "none") logEl.style.display = "none";
+  // 切替ログは完了後も表示を維持。再作成/停止のみ従来どおり非表示化
+  if (!isSwitch && logEl.style.display !== "none") logEl.style.display = "none";
   if (isSwitch) {
     document.getElementById("switch-go").disabled = false;
     if (!document.getElementById("modal-switch").classList.contains("hidden")) {
