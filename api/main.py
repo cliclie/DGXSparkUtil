@@ -3,6 +3,7 @@
 - GET  /api/metrics       ホストメトリクス JSON
 - GET  /api/vllm/status   コンテナ状態/健全性/モデル名/metrics/ログ
 - GET  /api/vllm/params   現在のパラメータ値
+- GET  /api/vllm/log      モデルコンテナの docker logs (実行ログダイアログ用)
 - POST /api/vllm/switch   モデル切替 (バックグラウンド)
 - POST /api/vllm/stop     モデル停止 (バックグラウンド)
 - POST /api/vllm/params   パラメータ編集 + コンテナ再作成 (バックグラウンド)
@@ -113,6 +114,14 @@ def api_vllm_edit_params(body: ParamsBody) -> dict:
         return vllm.edit_params(body.profile, body.updates)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/vllm/log")
+def api_vllm_log(profile: str, tail: int = 500) -> dict:
+    try:
+        return vllm.get_log(profile, tail)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/vllm/job")
