@@ -226,6 +226,51 @@ table.params td input {
 }
 table.params td input[readonly] { color: var(--muted); }
 .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 10px; }
+/* ---- モデル実行ログモーダル (三段構成) ---- */
+.log-box {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  max-height: 84vh;
+  overflow: hidden;
+  padding: 16px 18px;
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+.log-head h3 { margin: 0; }
+.log-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.log-search-input {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+  width: 220px;
+}
+.log-search-input.hidden { display: none; }
+.log-content {
+  flex: 1 1 auto;
+  min-height: 180px;
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+  overflow-y: auto;
+  color: var(--text);
+}
 </style>
 </head>
 <body>
@@ -274,6 +319,7 @@ table.params td input[readonly] { color: var(--muted); }
       </div>
       <div class="btns">
         <button class="primary" id="btn-switch">モデル切替</button>
+        <button id="btn-log">ログ</button>
         <button id="btn-params">パラメータ表示・編集</button>
         <button id="btn-stop" disabled>停止</button>
       </div>
@@ -319,6 +365,28 @@ table.params td input[readonly] { color: var(--muted); }
     <div class="modal-actions">
       <button id="stop-cancel">キャンセル</button>
       <button class="primary" id="stop-go">停止する</button>
+    </div>
+  </div>
+</div>
+
+<!-- モーダル: モデル実行ログ (三段構成) -->
+<div class="modal hidden" id="modal-log">
+  <div class="modal-box log-box">
+    <!-- 一段目: タイトル(左) / 検索・再読み込み・ダウンロード(右) -->
+    <div class="log-head">
+      <h3 id="log-title">実行ログ</h3>
+      <div class="log-head-actions">
+        <input id="log-search-input" type="text" placeholder="検索キーワード" class="log-search-input hidden">
+        <button id="log-search">検索</button>
+        <button id="log-refresh">再読み込み</button>
+        <button id="log-download">ダウンロード</button>
+      </div>
+    </div>
+    <!-- 二段目: ログ表示 (縦スクロール / 横折り返し / 初期表示は末尾) -->
+    <div class="log-content" id="log-content"></div>
+    <!-- 三段目: 閉じる (右) -->
+    <div class="modal-actions">
+      <button id="log-close">閉じる</button>
     </div>
   </div>
 </div>
@@ -596,6 +664,8 @@ function renderVllm(st) {
   const a = st.active;
   // 停止ボタン: 稼働中モデルがあり、かつジョブ実行中でないときのみ有効
   document.getElementById("btn-stop").disabled = !a || !!(st.switching);
+  // ログボタン: 稼働中モデルがあるときのみ有効 (読み取り専用なので切替中も表示可)
+  document.getElementById("btn-log").disabled = !a;
   // 切替ジョブ実行中は動作状況をコンテナ状態に同期する("切替中…" 赤)
   const swJob = st.switching && st.switching.kind === "switch" ? st.switching : null;
   if (!a) {
@@ -791,6 +861,80 @@ document.getElementById("stop-go").onclick = async () => {
     btn.disabled = false;
     document.getElementById("stop-cancel").style.display = "";
   }
+};
+</script>
+
+<script>
+// ------------------------------------------------------------- 実行ログモーダル
+let logProfile = null;
+let logLines = [];
+let logSearchTerm = "";
+
+document.getElementById("btn-log").onclick = () => {
+  const a = currentStatus && currentStatus.active;
+  if (!a) return;
+  logProfile = a.profile;
+  logSearchTerm = "";
+  logLines = [];
+  const input = document.getElementById("log-search-input");
+  input.value = "";
+  input.classList.add("hidden");
+  document.getElementById("log-title").textContent =
+    (a.model_name || a.profile) + "の実行ログ";
+  loadLog();
+  openModal("modal-log");
+};
+
+async function loadLog() {
+  if (!logProfile) return;
+  const el = document.getElementById("log-content");
+  el.textContent = "読み込み中...";
+  try {
+    const r = await fetchJson(
+      API + "/api/vllm/log?profile=" + encodeURIComponent(logProfile)
+    );
+    logLines = r.logs || [];
+    renderLog();
+  } catch (e) {
+    el.textContent = "ログ取得失敗: " + e;
+  }
+}
+
+function renderLog() {
+  const el = document.getElementById("log-content");
+  let lines = logLines;
+  if (logSearchTerm) {
+    lines = logLines.filter((l) => l.toLowerCase().includes(logSearchTerm));
+  }
+  el.textContent = lines.length ? lines.join("\n") : "(該当するログがありません)";
+  el.scrollTop = el.scrollHeight; // 初期表示・更新後は末尾までスクロール
+}
+
+document.getElementById("log-refresh").onclick = () => loadLog();
+document.getElementById("log-close").onclick = () => closeModal("modal-log");
+
+document.getElementById("log-search").onclick = () => {
+  const input = document.getElementById("log-search-input");
+  input.classList.toggle("hidden");
+  if (!input.classList.contains("hidden")) input.focus();
+};
+
+document.getElementById("log-search-input").oninput = (e) => {
+  logSearchTerm = e.target.value.trim().toLowerCase();
+  renderLog();
+};
+
+document.getElementById("log-download").onclick = () => {
+  const text = logLines.join("\n");
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = (logProfile || "model") + ".log";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };
 </script>
 

@@ -442,6 +442,28 @@ def get_status() -> dict:
     return out
 
 
+def get_log(profile: str, tail: int = 500) -> dict:
+    """モデルコンテナの docker logs を tail 行取得する(実行ログダイアログ用)。
+
+    停止済みコンテナでもログファイルが残っている限り取得できる。
+    コンテナの stdout/stderr 両方を取得するため _run ではなく直接 subprocess。
+    """
+    profiles = _load_profiles()
+    if profile not in profiles:
+        raise ValueError(f"不明なプロファイル: {profile}")
+    p = profiles[profile]
+    cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        text = r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        text = ""
+    except subprocess.SubprocessError as e:
+        text = f"(ログ取得エラー: {e})"
+    lines = text.splitlines()[-tail:]
+    return {"profile": profile, "logs": lines}
+
+
 # ---------------------------------------------------------------- バックグラウンドジョブ
 
 def _start_job(kind: str, profile: str, cmd: list[str]) -> dict:
