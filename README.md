@@ -442,4 +442,32 @@ cd /home/cliclie/DGXSparkUtil/api
   稼働中モデルがあるときのみ有効(切替中も表示可)。
   検証: エンドポイントの動作確認(正常プロファイルはJSON返却/不明プロファイルは400)、
   配信HTMLの tag 整合性(script/div 数)と幅指定の反映確認。
+- **スループットを入力/出力に分離 + held値を灰色表示**: vLLM 行の「スループット」1項目を
+  「入力スループット」(prompt) /「出力スループット」(generation)の2項目に分離(合計値 `tokens_per_s` は廃止)。
+  API 側 `api/vllm.py` は `vllm:prompt_tokens_total` / `generation_tokens_total`
+  (SGLang 相当系列も)のカウンター差分を**入力/出力別に**算出する(`_prev_metrics` / `_last_tps` を
+  key 別に分離、vLLM・SGLang 両パス共通のヘルパ `_tps_of()` を新設)。
+  `/api/vllm/status` の metrics は `prompt_tokens_per_s` / `generation_tokens_per_s` と
+  それぞれの `*_tps_held` フラグを返す(従来の `tokens_per_s` 合計は削除)。
+  片方の系列が欠落する場合は該当側のみ算出し、他側は前回保持値を維持(held)。
+  フロントは `*_tps_held=true`(今回非計測で前回非ゼロ値を引き継いでいる)の値を灰色
+  (`.v.stale`、muted)で表示し、最新計測値は従来どおり白。値が null のみ `-`。
+  検証: モック `/metrics` による隔離テスト(初回 null / 非ゼロ差分 held=false / 差分0 で前値維持
+  held=true / 片側系列欠落で他側保持) + 実機 API で新フィールドの確認。
+- **vLLM 行 2 段目のラベル短縮・幅圧縮**: 項目数を 6→4 に圧縮し、各値ボックスの `min-width`
+  も縮めた分だけ縮小した(フロントのみ変更、API・データ形式は不変)。
+  - 「実行中リクエスト」+「待機リクエスト」を統合して「実行/待機」1項目に(値は `0 / 0` 形式、
+    双方 null のときのみ `-`、id は `v-running`/`v-waiting` → `v-rw`)
+  - 「KVキャッシュ使用率」→「KVCache」(`#v-kv` 12ch→7ch)
+  - 「E2Eレイテンシ (平均)」→「E2E」(`#v-e2e` 12ch→7ch)
+  - 「TTFT (平均)」→「TTFT」(`#v-ttft` 6ch 維持、値幅は既に最小)
+  検証: HTML の id 参照整合(setV 呼び出し id が全て定義済み)・tag 整合性チェック。
+- **スループットの白/灰表示基準を「絶対 held 判定」から「相対最終更新判定」へ変更**: 従来の
+  「`*_tps_held=true` なら灰色」ではリクエストが無いとページ表示直後に両方が即座に灰色になるため、
+  基準を「どちらがより更新されたか」に変更(フロントのみ)。
+  「更新」= API が `*_tps_held=false` かつ非 null を返した場合(null 値は更新とみなさない)。
+  フロントは各側の最終更新時刻(`tpsLastUpdate`、モジュール変数)を保持し、新しい側が白
+  (`.v.stale` 付与なし)/ 古くなった側が灰色。同じポーリングで両方更新された場合(同一時刻)は
+  次の更新まで両方白、どちらの更新もなければ前回の色を維持。初期状態(更新なし)は「-」+ 灰色。
+  検証: HTML の tag / id 整合性チェック + 配信 HTML での反映確認。
 

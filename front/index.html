@@ -85,6 +85,7 @@ section > h2 {
 .warn { color: var(--yellow); }
 .hot { color: var(--red); }
 .v.down { color: var(--muted); } /* vLLM 行の「停止中」は灰色 */
+.v.stale { color: var(--muted); } /* スループット: 前回値を保持中(held)は灰色 */
 /* ---- Tier 2 ---- */
 .charts-head {
   display: flex;
@@ -119,12 +120,11 @@ section > h2 {
 #v-port { display: block; min-width: 5ch; text-align: center; }
 #v-status { display: block; min-width: 18ch; text-align: left; }
 #v-uptime { display: block; min-width: 7ch; text-align: center; }
-#v-running { display: block; min-width: 10ch; text-align: right; }
-#v-waiting { display: block; min-width: 9ch; text-align: right; }
-#v-kv { display: block; min-width: 12ch; text-align: right; }
-#v-e2e { display: block; min-width: 12ch; text-align: right; }
+#v-rw { display: block; min-width: 7ch; text-align: right; }
+#v-kv { display: block; min-width: 7ch; text-align: right; }
+#v-e2e { display: block; min-width: 7ch; text-align: right; }
 #v-ttft { display: block; min-width: 6ch; text-align: right; }
-#v-tps { display: block; min-width: 12ch; text-align: right; }
+#v-tps-in, #v-tps-out { display: block; min-width: 12ch; text-align: right; }
 .badge {
   display: inline-block;
   padding: 1px 8px;
@@ -310,12 +310,12 @@ table.params td input[readonly] { color: var(--muted); }
         <div class="item"><span class="k">ポート</span><span class="v" id="v-port">-</span></div>
         <div class="item"><span class="k">コンテナ状態</span><span class="v" id="v-status">-</span></div>
         <div class="item"><span class="k">稼働時間</span><span class="v" id="v-uptime">-</span></div>
-        <div class="item"><span class="k">実行中リクエスト</span><span class="v" id="v-running">-</span></div>
-        <div class="item"><span class="k">待機リクエスト</span><span class="v" id="v-waiting">-</span></div>
-        <div class="item"><span class="k">KVキャッシュ使用率</span><span class="v" id="v-kv">-</span></div>
-        <div class="item"><span class="k">E2Eレイテンシ (平均)</span><span class="v" id="v-e2e">-</span></div>
-        <div class="item"><span class="k">TTFT (平均)</span><span class="v" id="v-ttft">-</span></div>
-        <div class="item"><span class="k">スループット</span><span class="v" id="v-tps">-</span></div>
+        <div class="item"><span class="k">実行/待機</span><span class="v" id="v-rw">-</span></div>
+        <div class="item"><span class="k">KVCache</span><span class="v" id="v-kv">-</span></div>
+        <div class="item"><span class="k">E2E</span><span class="v" id="v-e2e">-</span></div>
+        <div class="item"><span class="k">TTFT</span><span class="v" id="v-ttft">-</span></div>
+        <div class="item"><span class="k">入力スループット</span><span class="v" id="v-tps-in">-</span></div>
+        <div class="item"><span class="k">出力スループット</span><span class="v" id="v-tps-out">-</span></div>
       </div>
       <div class="btns">
         <button class="primary" id="btn-switch">モデル切替</button>
@@ -660,6 +660,11 @@ function setV(id, text, cls) {
   el.className = "v" + (cls ? " " + cls : "");
 }
 
+// 入力/出力スループットの最終更新時刻(ms)。
+// 「更新」= API が held=false で非 null を返した場合。null 値は更新とみなさない。
+// 同時更新(同じポーリング)なら等値 → 両方白。
+let tpsLastUpdate = { in: null, out: null };
+
 function renderVllm(st) {
   const a = st.active;
   // 停止ボタン: 稼働中モデルがあり、かつジョブ実行中でないときのみ有効
@@ -687,12 +692,25 @@ function renderVllm(st) {
   }
   setV("v-uptime", a.uptime_str || "-");
   const mt = a.metrics || {};
-  setV("v-running", mt.requests_running != null ? Math.round(mt.requests_running) : "-");
-  setV("v-waiting", mt.requests_waiting != null ? Math.round(mt.requests_waiting) : "-");
+  const run = mt.requests_running != null ? Math.round(mt.requests_running) : "-";
+  const wait = mt.requests_waiting != null ? Math.round(mt.requests_waiting) : "-";
+  setV("v-rw", run === "-" && wait === "-" ? "-" : run + " / " + wait);
   setV("v-kv", mt.kv_cache_usage_pct != null ? mt.kv_cache_usage_pct.toFixed(1) + " %" : "-");
   setV("v-e2e", mt.e2e_latency_s != null ? mt.e2e_latency_s.toFixed(1) + " s" : "-");
   setV("v-ttft", mt.ttft_s != null ? mt.ttft_s.toFixed(2) + " s" : "-");
-  setV("v-tps", mt.tokens_per_s != null ? mt.tokens_per_s.toFixed(1) + " tok/s" : "-");
+  // スループットの白/灰: 最終更新が新しい側が白、古くなった側が灰。
+  // 同じポーリングで両方更新なら(同一時刻)次更新まで両白、片方が更新されなければ前回の色を維持。
+  const nowTs = Date.now();
+  const inUpdated = mt.prompt_tokens_per_s != null && !mt.prompt_tps_held;
+  const outUpdated = mt.generation_tokens_per_s != null && !mt.generation_tps_held;
+  if (inUpdated) tpsLastUpdate.in = nowTs;
+  if (outUpdated) tpsLastUpdate.out = nowTs;
+  const inWhite = tpsLastUpdate.in != null && tpsLastUpdate.in >= tpsLastUpdate.out;
+  const outWhite = tpsLastUpdate.out != null && tpsLastUpdate.out >= tpsLastUpdate.in;
+  setV("v-tps-in", mt.prompt_tokens_per_s != null ? mt.prompt_tokens_per_s.toFixed(1) + " tok/s" : "-",
+    inWhite ? "" : "stale");
+  setV("v-tps-out", mt.generation_tokens_per_s != null ? mt.generation_tokens_per_s.toFixed(1) + " tok/s" : "-",
+    outWhite ? "" : "stale");
 }
 
 // ------------------------------------------------------------- ポーリング
