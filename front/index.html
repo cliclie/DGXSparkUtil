@@ -550,13 +550,13 @@ const GAUGE_DEFS = [
     bg: "rgba(63,185,80,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
     dotBg: "rgba(63,185,80,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
     get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
-  { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#bc8cff",
-    bg: "rgba(188,140,255,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
-    dotBg: "rgba(188,140,255,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
+  { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#d29922",
+    bg: "rgba(210,153,34,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
+    dotBg: "rgba(210,153,34,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
     get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0), sub: () => "" },
   { id: "g-gpu-temp", title: "GPU 温度", max: 100, unit: "°C", color: "#ff7b72",
     get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
-  { id: "g-gpu-power", title: "GPU 電力", max: 140, unit: "W", color: "#d29922",
+  { id: "g-gpu-power", title: "GPU 電力", max: 140, unit: "W", color: "#bc8cff",
     get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1), sub: () => "上限 140 W (GB10 TDP)" },
   { id: "g-gpu-clock", title: "GPU クロック", max: 3003, unit: "MHz", color: "#8b949e",
     zoneStops: [2520 / 3003, 2700 / 3003], // 緑≤2520 / 黄≤2700 / 赤>2700 MHz (運用実測値)
@@ -604,9 +604,9 @@ const mainChart = new Chart(document.getElementById("ch-main"), {
       lineDS("CPU負荷 %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
       lineDS("CPU温度 %", toPct(series.cpuTemp, NORM.cpuTemp), "#f85149"),
       { ...lineDS("メモリ使用率 %", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
-      { ...lineDS("GPU負荷 %", series.gpuLoad, "#bc8cff", "rgba(188,140,255,.30)"), fill: true },
+      { ...lineDS("GPU負荷 %", series.gpuLoad, "#d29922", "rgba(210,153,34,.30)"), fill: true },
       lineDS("GPU温度 %", toPct(series.gpuTemp, NORM.cpuTemp), "#ff7b72"),
-      lineDS("GPU電力 %", toPct(series.gpuPower, NORM.gpuPower), "#d29922"),
+      lineDS("GPU電力 %", toPct(series.gpuPower, NORM.gpuPower), "#bc8cff"),
       lineDS("GPUクロック %", toPct(series.gpuClock, NORM.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
       lineDS("ストレージ使用率 %", series.diskUsed, "#79c0ff"),
       lineDS("ストレージ読込 %", toPct(series.diskRead, NORM.diskIO), "#56d364"),

@@ -320,7 +320,7 @@ def _container_state(name: str) -> dict:
             try:
                 from datetime import datetime
 
-                t = datetime.fromisoformat(created.split("+")[0].replace("Z", ""))
+                t = datetime.fromisoformat(created.replace("Z", "+00:00"))
                 uptime = max(0.0, now - t.timestamp())
             except ValueError:
                 uptime = None
