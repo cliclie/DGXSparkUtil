@@ -471,3 +471,18 @@ cd /home/cliclie/DGXSparkUtil/api
   次の更新まで両方白、どちらの更新もなければ前回の色を維持。初期状態(更新なし)は「-」+ 灰色。
   検証: HTML の tag / id 整合性チェック + 配信 HTML での反映確認。
 
+## 実装メモ(2026-09-03)
+
+- **タイトルヘッダーに GPU Performance State を表示**: `api/metrics.py` の `_read_gpu()` が
+  nvidia-smi のクエリに `pstate` を追加し、`/api/metrics` が `gpu_pstate`(例: `"P0"`)を返すようになった。
+  フロントはヘッダーの現在日時(`#clock`)の右に `#pstate` span を新設し、ポーリング時に
+  `renderPstate()` で値と色を設定する。色分けは P0=緑(`--green`)、
+  P2 / P3 / P8 / P12 / P15=黄(`--yellow`)、それ以外=赤(`--red`)。取得できない場合は非表示。
+  実環境で P0 の表示を確認済み。uvicorn は `--reload` なしで起動しているため、バックエンド
+  (`metrics.py`) の変更は `sudo systemctl restart dgx-spark-api` による再起動が必要。
+  フロント(`index.html`)の変更はブラウザのリロードのみで反映される。
+- **vLLM パネルの文言短縮と列幅圧縮(フロントのみ、API・データ形式は不変)**:
+  - ボタン文言「モデル切替」→「モデル」、「パラメータ表示・編集」→「パラメータ」
+  - 値ボックスの `min-width`: 実行/待機 `#v-rw` 7ch→5ch、E2E `#v-e2e` 7ch→3ch、
+    TTFT `#v-ttft` 6ch→5ch
+
