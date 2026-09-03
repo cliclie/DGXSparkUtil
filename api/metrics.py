@@ -80,7 +80,7 @@ def _read_gpu() -> dict:
         r = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm",
+                "--query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm,pstate",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -89,12 +89,13 @@ def _read_gpu() -> dict:
         )
         if r.returncode != 0:
             return {}
-        u, t, p, c = [x.strip() for x in r.stdout.split(",")]
+        u, t, p, c, ps = [x.strip() for x in r.stdout.split(",")]
         return {
             "gpu_load_pct": float(u),
             "gpu_temp_c": float(t),
             "gpu_power_w": float(p),
             "gpu_clock_mhz": float(c),
+            "gpu_pstate": ps,
         }
     except (subprocess.SubprocessError, ValueError):
         return {}

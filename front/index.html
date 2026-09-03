@@ -42,6 +42,7 @@ header {
 }
 header h1 { font-size: 17px; margin: 0; }
 header #clock { color: var(--muted); font-size: 13px; }
+header #pstate { font-size: 13px; font-weight: 600; }
 main { padding: 16px 20px 32px; }
 section { margin-bottom: 22px; }
 section > h2 {
@@ -120,10 +121,10 @@ section > h2 {
 #v-port { display: block; min-width: 5ch; text-align: center; }
 #v-status { display: block; min-width: 18ch; text-align: left; }
 #v-uptime { display: block; min-width: 7ch; text-align: center; }
-#v-rw { display: block; min-width: 7ch; text-align: right; }
+#v-rw { display: block; min-width: 5ch; text-align: right; }
 #v-kv { display: block; min-width: 7ch; text-align: right; }
-#v-e2e { display: block; min-width: 7ch; text-align: right; }
-#v-ttft { display: block; min-width: 6ch; text-align: right; }
+#v-e2e { display: block; min-width: 3ch; text-align: right; }
+#v-ttft { display: block; min-width: 5ch; text-align: right; }
 #v-tps-in, #v-tps-out { display: block; min-width: 12ch; text-align: right; }
 .badge {
   display: inline-block;
@@ -277,6 +278,7 @@ table.params td input[readonly] { color: var(--muted); }
 <header>
   <h1>DGX Spark Monitor</h1>
   <span id="clock"></span>
+  <span id="pstate"></span>
 </header>
 <main>
   <!-- Tier 1: 現在値カード -->
@@ -318,9 +320,9 @@ table.params td input[readonly] { color: var(--muted); }
         <div class="item"><span class="k">出力スループット</span><span class="v" id="v-tps-out">-</span></div>
       </div>
       <div class="btns">
-        <button class="primary" id="btn-switch">モデル切替</button>
+        <button class="primary" id="btn-switch">モデル</button>
         <button id="btn-log">ログ</button>
-        <button id="btn-params">パラメータ表示・編集</button>
+        <button id="btn-params">パラメータ</button>
         <button id="btn-stop" disabled>停止</button>
       </div>
     </div>
@@ -726,6 +728,7 @@ async function poll() {
     pushPoint(m.timestamp, m);
     renderGauges(m);
     refreshMainChart();
+    renderPstate(m);
   } catch (e) {
     console.error("metrics poll failed", e);
   }
@@ -1083,6 +1086,23 @@ setInterval(() => {
   document.getElementById("clock").textContent =
     new Date().toLocaleString("ja-JP", { hour12: false });
 }, 1000);
+
+// ------------------------------------------------------------- P-State(タイトルの現在日時の右)
+// P0=緑 / P2・P3・P8・P12・P15=黄 / それ以外=赤
+function renderPstate(m) {
+  const el = document.getElementById("pstate");
+  if (!m.gpu_pstate) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = m.gpu_pstate;
+  el.style.color =
+    m.gpu_pstate === "P0"
+      ? "var(--green)"
+      : ["P2", "P3", "P8", "P12", "P15"].includes(m.gpu_pstate)
+        ? "var(--yellow)"
+        : "var(--red)";
+}
 
 // ------------------------------------------------------------- 起動
 (async () => {
