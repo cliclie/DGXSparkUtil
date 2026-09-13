@@ -20,6 +20,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - 稼働中のモデルコンテナの状態(稼働/停止・稼働時間・健全性)を表示
    - APIの健全性(`/health`)、サーブ中のモデル名(`/v1/models`)、
      vLLM組み込みメトリクス(`/metrics`: リクエスト数・キュー・KVキャッシュ使用率・スループット等)を表示
+     (TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析)
    - 直近ログの表示
 3. **モデルの切替**
    - Web UI から稼働モデルを切替(サーバ側で既存の切替スクリプトを呼ぶ)
@@ -95,6 +96,7 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
   - 稼働中のモデルコンテナの状態(稼働/停止・稼働時間・再起動回数)
   - API 健全性(`/health`)、サーブ中のモデル名(`/v1/models`)
   - vLLM 組み込みメトリクス(`/metrics`: リクエスト数・キュー・KV キャッシュ使用率・スループット等)
+    (TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析、実装メモ 2026-09-14 参照)
   - 直近ログの表示
 - セクションヘッダーに「モデル切替・ログ・パラメータ編集」ボタンを配置
   - ボタン押下で**ポップアップ(モーダル)表示**する(常設のフォーム欄は持たない)
@@ -226,10 +228,13 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | API健全性 | `GET http://<host>:<port>/health` |
 | サーブ中モデル名 | `GET /v1/models` |
 | リクエスト数・キュー・KVキャッシュ使用率・スループット等 | `GET /metrics` (vLLM 組み込み Prometheus 形式) |
+| 同上(TabbyAPI) | `docker logs` (リクエスト毎統計の解析、実装メモ 2026-09-14 参照) |
 | 直近ログ | `docker logs --tail` |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
 
 - llama.cpp (muse) は `/metrics` が無い場合があるため、健全性/モデル名の表示にとどめる
+- TabbyAPI は `/metrics` が無いが、docker logs のリクエスト毎統計から実行/待機・KVCache(推定)・
+  E2E・TTFT・入力/出力スループットを取得する(実装メモ 2026-09-14 参照)
 
 **モデル切替**
 - 三段目のポップアップ内の「切替」ボタン → サーバ側で `switch_models.sh <profile>` を実行
@@ -498,7 +503,8 @@ cd /home/cliclie/DGXSparkUtil/api
   `api/vllm.py::_load_profiles()` が docker-compose.yml を動的にパースするため**コード変更なしで
   自動追従**した。削除モデルは一覧から自動で消え、TabbyAPI は一覧・切替・監視の対象に自動で
   追加される(稼働中 API で `active` 検出・`health=true`・`model_name` 取得を確認済み)。
-  TabbyAPI は `/metrics` が 404 のためメトリクス系は「-」表示(muse/llama.cpp と同じ既存挙動)。
+  TabbyAPI は `/metrics` が 404 のためメトリクス系は「-」表示(muse/llama.cpp と同じ既存挙動。
+  2026-09-14 にログ解析による取得を追加、下記実装メモ参照)。
 - **unsloth モデル(`qwen38flashnextgguf`)は追従対象外**: ホストプロセス方式で
   docker-compose.yml に存在しないため、`_load_profiles()` の対象外となり一覧にも現れない。
   当該モデルは今後の削除予定のため今回は対応しない(将来 docker コンテナ化された場合は
@@ -506,5 +512,36 @@ cd /home/cliclie/DGXSparkUtil/api
 - **README のモデル一覧・プロファイル列挙を現状に更新**: 上記の追加・削除を反映し、
   モデル一覧テーブルを現在の 10 種(vLLM 4 + SGLang 4 + llama.cpp 1 + TabbyAPI 1)に更新。
   vLLM イメージは 26.07 → 26.08 に移行済み。
+
+## 実装メモ(2026-09-14)
+
+- **TabbyAPI(`tabbyapi-flashnext`)のメトリクス表示(実行/待機・KVCache・E2E・TTFT・
+  入力/出力スループット)**: TabbyAPI(commit de76ff88)は `/metrics` が 404 で `/get_load` も
+  無いため、従来は 6 項目すべて「-」表示だった。docker logs にリクエスト毎の統計が出力される
+  こと(`common/gen_logging.py`、例: `#3932 chat/completions (stream): 986 tokens generated at
+  67.7 T/s · prompt 200,725 tokens, 99% cached, 1,557 new in 2.20 s (708 T/s) · first token
+  2.20 s, total 16.8 s`)を利用し、`api/vllm.py` でログ解析するメトリクス取得を追加した。
+  フロントは `active.metrics` を汎用的に描画しているため**変更なし**。
+  - 判定: `/.well-known/serviceinfo` の本文に "TabbyAPI" が含まれるか(`_is_tabbyapi()`)。
+    `get_status()` の分岐は vLLM → SGLang → **TabbyAPI(新規)** → `/get_load` フォールバック。
+    TabbyAPI 以外では `_reset_tabby_state()` でログ追跡状態をクリアする。
+  - 実行/待機: ログの req_id(`#NNNN`)を追跡し「開始ログあり・完了ログなし」= 実行中
+    (`_tabby_in_flight`、ポーリング間で保持)。`max_batch_size`(=1、`/v1/model` から取得)
+    超過分は待機。1 時間超の残留エントリは破棄(クラッシュしたリクエストの安全策)。
+  - KVCache: **推定値** = (直近完了リクエストの prompt+gen トークン) / `cache_size`(=262144)
+    × 100。TabbyAPI に直接使用率 API は無いが、KV キャッシュは直近会話分を保持するため
+    精度は高い(例: prompt 204,123 + gen 633 → 約 78%)。
+  - E2E / TTFT: 直近完了リクエストの `total` / `first token`(= queue + prefill)。
+  - 入力スループット: **全プロンプトトークン換算** = `prompt_tokens / prompt_time`
+    (vLLM の `prompt_tokens_per_s` と同一セマンティクス、キャッシュヒット含む)。
+    出力スループット: 直近完了の `gen T/s`。
+  - スループットは既存の held ロジックに準拠: 直近ポーリングで新規完了(req_id 増加)があれば
+    `held=false`(白)、なければ前回値を `held=true`(灰)で維持。req_id は単調増加のため
+    「新完了」判定に使用(`_tabby_last`)。
+  - ログパース: loguru の折返し(継続行は先頭が空白)をタイムスタンプ行で結合してから
+    開始/完了に正規表現マッチ(`_tabbyapi_parse_logs()`)。「parsed N tool call」等の
+    中間ログは無視。`docker logs --tail 300` を使用(リクエストログは疎のため十分)。
+  - 検証: 稼働中 API で `active.metrics` に KVCache/E2E/TTFT/スループットが入ること、
+    テストリクエスト送信で新リクエストの値に更新され `held=false` になることを確認済み。
 
 
