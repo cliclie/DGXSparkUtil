@@ -226,6 +226,35 @@ table.params td input {
   font-family: Consolas, monospace;
 }
 table.params td input[readonly] { color: var(--muted); }
+/* ---- Cline設定値モーダル ---- */
+.cline-section { margin-bottom: 14px; }
+.cline-section-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--purple);
+  padding-left: 8px;
+}
+.cline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cline-row:last-child { border-bottom: none; }
+.cline-label { flex: 0 0 200px; color: var(--muted); font-size: 13px; }
+.cline-value {
+  flex: 1;
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.cline-copy { flex: 0 0 auto; padding: 3px 10px; font-size: 11px; }
+.cline-copy.copied { background: #1a3a1a; border-color: var(--green); color: var(--green); }
+.cline-loading { color: var(--muted); padding: 10px 0; }
+.cline-error { color: var(--red); padding: 10px 0; }
 .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 10px; }
 /* ---- モデル実行ログモーダル (三段構成) ---- */
 .log-box {
@@ -323,6 +352,7 @@ table.params td input[readonly] { color: var(--muted); }
         <button class="primary" id="btn-switch">モデル</button>
         <button id="btn-log">ログ</button>
         <button id="btn-params">パラメータ</button>
+        <button id="btn-cline">Cline設定値</button>
         <button id="btn-stop" disabled>停止</button>
       </div>
     </div>
@@ -354,6 +384,18 @@ table.params td input[readonly] { color: var(--muted); }
     <div class="modal-actions">
       <button id="params-close">閉じる</button>
       <button class="primary" id="params-save">保存してコンテナを再作成</button>
+    </div>
+  </div>
+</div>
+
+<!-- モーダル: Cline設定値 -->
+<div class="modal hidden" id="modal-cline">
+  <div class="modal-box">
+    <h3>Cline設定値</h3>
+    <div id="cline-content"></div>
+    <div class="modal-actions">
+      <button id="cline-copy-all">すべてコピー</button>
+      <button id="cline-close">閉じる</button>
     </div>
   </div>
 </div>
@@ -673,6 +715,8 @@ function renderVllm(st) {
   document.getElementById("btn-stop").disabled = !a || !!(st.switching);
   // ログボタン: 稼働中モデルがあるときのみ有効 (読み取り専用なので切替中も表示可)
   document.getElementById("btn-log").disabled = !a;
+  // Cline設定値ボタン: 稼働中モデルがあるときのみ有効 (読み取り専用なので切替中も表示可)
+  document.getElementById("btn-cline").disabled = !a;
   // 切替ジョブ実行中は動作状況をコンテナ状態に同期する("切替中…" 赤)
   const swJob = st.switching && st.switching.kind === "switch" ? st.switching : null;
   if (!a) {
@@ -1039,6 +1083,115 @@ document.getElementById("params-save").onclick = async () => {
     btn.disabled = false;
   }
 };
+
+// ------------------------------------------------------------- Cline設定値モーダル
+let clineData = null;
+
+document.getElementById("btn-cline").onclick = async () => {
+  const a = currentStatus && currentStatus.active;
+  if (!a) return;
+  const content = document.getElementById("cline-content");
+  content.innerHTML = "<div class='cline-loading'>読み込み中...</div>";
+  openModal("modal-cline");
+  try {
+    clineData = await fetchJson(API + "/api/vllm/cline");
+    renderCline();
+  } catch (e) {
+    clineData = null;
+    content.innerHTML = "<div class='cline-error'>取得失敗: " + e + "</div>";
+  }
+};
+
+function renderCline() {
+  const d = clineData;
+  const content = document.getElementById("cline-content");
+  content.innerHTML = "";
+  const sections = [
+    {
+      title: "API Configuration",
+      rows: [
+        ["API Provider", d.api_provider],
+        ["Base URL", d.base_url],
+        ["OpenAI Compatible API Key", d.api_key],
+        ["ModelID", d.model_id],
+      ],
+    },
+    {
+      title: "MODEL CONFIGURATION",
+      rows: [
+        ["Supports Images", d.supports_images ? "On" : "Off"],
+        ["Context Windows Size", d.context_recommended + " (推奨) / " + d.context_max + " (最大)"],
+        ["Max Output Tokens", d.max_output_recommended + " (推奨) / " + d.max_output_max + " (最大)"],
+        ["Temperature", String(d.temperature)],
+        ["Reasoning Effort", d.reasoning_effort_options.join(" / ")],
+      ],
+    },
+  ];
+  for (const sec of sections) {
+    const secDiv = document.createElement("div");
+    secDiv.className = "cline-section";
+    const title = document.createElement("div");
+    title.className = "cline-section-title";
+    title.textContent = sec.title;
+    secDiv.appendChild(title);
+    for (const [label, value] of sec.rows) {
+      const row = document.createElement("div");
+      row.className = "cline-row";
+      const labelEl = document.createElement("span");
+      labelEl.className = "cline-label";
+      labelEl.textContent = label;
+      const valueEl = document.createElement("span");
+      valueEl.className = "cline-value";
+      valueEl.textContent = value;
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "cline-copy";
+      copyBtn.textContent = "コピー";
+      copyBtn.onclick = () => copyClineText(value, copyBtn);
+      row.appendChild(labelEl);
+      row.appendChild(valueEl);
+      row.appendChild(copyBtn);
+      secDiv.appendChild(row);
+    }
+    content.appendChild(secDiv);
+  }
+}
+
+function copyClineText(text, btn) {
+  if (!btn.dataset.orig) btn.dataset.orig = btn.textContent;
+  const restore = () => {
+    btn.textContent = btn.dataset.orig;
+    btn.classList.remove("copied");
+  };
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = "コピー済み";
+    btn.classList.add("copied");
+    setTimeout(restore, 1500);
+  }).catch(() => {
+    prompt("コピーしてください:", text);
+    restore();
+  });
+}
+
+document.getElementById("cline-copy-all").onclick = () => {
+  if (!clineData) return;
+  const d = clineData;
+  const text = [
+    "API Configuration",
+    "  API Provider: " + d.api_provider,
+    "  Base URL: " + d.base_url,
+    "  OpenAI Compatible API Key: " + d.api_key,
+    "  ModelID: " + d.model_id,
+    "MODEL CONFIGURATION",
+    "  Supports Images: " + (d.supports_images ? "On" : "Off"),
+    "  Context Windows Size: " + d.context_recommended + " (推奨) / " + d.context_max + " (最大)",
+    "  Max Output Tokens: " + d.max_output_recommended + " (推奨) / " + d.max_output_max + " (最大)",
+    "  Temperature: " + d.temperature,
+    "  Reasoning Effort: " + d.reasoning_effort_options.join(" / "),
+  ].join("\n");
+  copyClineText(text, document.getElementById("cline-copy-all"));
+};
+
+document.getElementById("cline-close").onclick = () => closeModal("modal-cline");
 
 // ------------------------------------------------------------- ジョブ進捗ポーリング
 const JOB_LOG_IDS = { switch: "switch-log", recreate: "recreate-log", stop: "stop-log" };

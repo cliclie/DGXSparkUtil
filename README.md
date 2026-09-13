@@ -193,6 +193,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │     GET  /api/vllm/status    → コンテナ状態/健全性/   │
 │                                モデル名/metrics       │
 │     GET  /api/vllm/params    → 現在のパラメータ値     │
+│     GET  /api/vllm/cline     → Cline設定値(稼働モデル) │
 │     GET  /api/vllm/log       → 実行ログ(docker logs)  │
 │     POST /api/vllm/switch    → モデル切替             │
 │     POST /api/vllm/params    → パラメータ編集+再作成  │
@@ -255,6 +256,15 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - 三段構成モーダル: 一段目は「<モデル名>の実行ログ」タイトル + 検索/再読み込み/ダウンロード、
   二段目はログ表示(縦スクロール・横折り返し・初期表示は末尾)、三段目は「閉じる」
 - 検索: キーワードでの行フィルタ / ダウンロード: `<profile>.log` として保存
+
+**Cline設定値**
+- 三段目の「Cline設定値」ボタン → `GET /api/vllm/cline` で Cline に設定すべきモデル情報を表示
+- モーダル表示: API Configuration(API Provider / Base URL / API Key / ModelID) +
+  MODEL CONFIGURATION(Supports Images / Context Windows Size / Max Output Tokens /
+  Temperature / Reasoning Effort)
+- 各値をコピー可能(個別コピー + 「すべてコピー」)
+- データ源: 動的取得(モデル名・ポート・hostname・コンテキスト・温度・画像対応) +
+  モデル別静的推奨値テーブル(`api/vllm.py` の `CLINE_MODEL_TABLE`)
 
 ### 実装方式の選択肢
 
@@ -543,5 +553,21 @@ cd /home/cliclie/DGXSparkUtil/api
     中間ログは無視。`docker logs --tail 300` を使用(リクエストログは疎のため十分)。
   - 検証: 稼働中 API で `active.metrics` に KVCache/E2E/TTFT/スループットが入ること、
     テストリクエスト送信で新リクエストの値に更新され `held=false` になることを確認済み。
+- **Cline設定値ボタン追加**: 三段目の「パラメータ」と「停止」の間に「Cline設定値」ボタンを追加。
+  押下でモーダル表示し、Cline に設定すべきモデル情報を表示(各値を個別コピー + 「すべてコピー」)。
+  - API: `GET /api/vllm/cline`(`api/vllm.py::get_cline_config()`)。稼働中モデルが無ければ 409。
+  - 表示項目: API Configuration(API Provider / Base URL / API Key / ModelID) +
+    MODEL CONFIGURATION(Supports Images / Context Windows Size / Max Output Tokens /
+    Temperature / Reasoning Effort)。
+  - データ源(ハイブリッド): 動的取得(モデル名 `/v1/models`・ポート・hostname・コンテキスト
+    `--max-model-len`/`--context-length`/`--ctx-size`・温度 `--temp`・画像対応フラグ) +
+    compose に無い値はモデル別静的テーブル `CLINE_MODEL_TABLE` で補完。
+  - Base URL は `http://<hostname>.local:<port>/v1/`(外部利用想定、hostname は動的取得)。
+    API Key は各サービスが認証なしのため「認証なし(任意の値でOK)」表示。
+  - 静的テーブルの Max Output Tokens(8192/32768)・温度(0.6)・Context 最大はモデル知識に基づく
+    仮定値。`CLINE_MODEL_TABLE` で修正可能。
+  - 検証: 稼働中モデル(qwen38flashnextexl3/TabbyAPI)で `get_cline_config()` が正しい値を
+    返すことを確認済み(Base URL `http://WhitebearATOM1.local:8009/v1/`・ModelID
+    `qwen3.8_flashnext_exl3_2p05bpw`・画像対応 true・Context 524288)。
 
 

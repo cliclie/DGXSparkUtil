@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -833,3 +834,184 @@ def edit_params(profile: str, updates: dict[str, str]) -> dict:
         service,
     ]
     return _start_job("recreate", profile, cmd)
+
+
+# ---------------------------------------------------------------- Cline 設定値
+
+# Cline 設定の推奨値テーブル (プロファイル別)。
+# compose の command に無い値(コンテキスト最大・最大出力トークン・温度・画像対応)を
+# ここで補完する。画像対応・温度は compose の command から動的取得できる場合は
+# それを優先し、取得できない場合のみこのテーブルを使う。
+CLINE_MODEL_TABLE = {
+    "nemotron": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "muse": {
+        "images": True,  # 動的: --mmproj
+        "context_max": 131072,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,  # 動的: --temp
+    },
+    "qwen38": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38bf16": {
+        "images": True,  # 動的: --limit-mm-per-prompt
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38nvfp4": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglang": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangeagle": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangdflash": {
+        "images": False,
+        "context_max": 1000000,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangdspark": {
+        "images": False,
+        "context_max": 1000000,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38flashnextexl3": {
+        "images": True,
+        "context_max": 524288,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38flashnextexl3_3p05": {
+        "images": True,
+        "context_max": 524288,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+}
+
+
+def _command_flag_value(service: str, flags: list[str]) -> str | None:
+    """compose の command ブロックから該当フラグの値を返す(無ければ None)。"""
+    block = _service_command_lines(service)
+    if block is None:
+        return None
+    for ln in block:
+        parts = ln.strip().split(None, 1)
+        if parts[0] in flags and len(parts) > 1:
+            return parts[1]
+    return None
+
+
+def _command_has_flag(service: str, flags: list[str]) -> bool:
+    """compose の command ブロックに該当フラグのいずれかが含まれるか。"""
+    block = _service_command_lines(service)
+    if block is None:
+        return False
+    for ln in block:
+        if ln.strip().split(None, 1)[0] in flags:
+            return True
+    return False
+
+
+def get_cline_config() -> dict:
+    """稼働中モデルの Cline 設定値を返す。
+
+    動的取得: モデル名(/v1/models)・ポート・hostname・コンテキスト(compose の
+    --max-model-len/--context-length/--ctx-size)・温度(--temp)・画像対応(フラグ)。
+    静的補完: compose に無い値は CLINE_MODEL_TABLE から。
+    """
+    status = get_status()
+    active = status.get("active")
+    if not active:
+        raise ValueError("稼働中のモデルがありません")
+    profile = active["profile"]
+    service = active["service"]
+    port = active["port"]
+
+    # 動的: モデル名・ポート・hostname
+    model_id = active.get("model_name") or profile
+    hostname = socket.gethostname()
+    base_url = f"http://{hostname}.local:{port}/v1/"
+
+    # 動的: コンテキストウィンドウ(推奨)
+    ctx = _command_flag_value(service, ["--max-model-len", "--context-length", "--ctx-size"])
+    context_recommended = None
+    if ctx:
+        try:
+            context_recommended = int(ctx)
+        except ValueError:
+            pass
+
+    # 動的: 温度 (--temp は llama.cpp のみ)
+    temp = _command_flag_value(service, ["--temp"])
+    temperature = None
+    if temp:
+        try:
+            temperature = float(temp)
+        except ValueError:
+            pass
+
+    # 動的: 画像対応 (vLLM / llama.cpp のフラグ)
+    images = _command_has_flag(
+        service,
+        ["--limit-mm-per-prompt", "--mm-processor-kwargs", "--mmproj"],
+    )
+
+    # 静的テーブル補完
+    table = CLINE_MODEL_TABLE.get(profile, {})
+    if not images:
+        images = table.get("images", False)
+    context_max = table.get("context_max", context_recommended)
+    if context_recommended is None:
+        context_recommended = context_max
+    max_output_recommended = table.get("max_output_recommended", 8192)
+    max_output_max = table.get("max_output_max", 32768)
+    if temperature is None:
+        temperature = table.get("temperature", 0.6)
+
+    return {
+        "api_provider": "OpenAI Compatible",
+        "base_url": base_url,
+        "api_key": "認証なし(任意の値でOK)",
+        "model_id": model_id,
+        "supports_images": images,
+        "context_recommended": context_recommended,
+        "context_max": context_max,
+        "max_output_recommended": max_output_recommended,
+        "max_output_max": max_output_max,
+        "temperature": temperature,
+        "reasoning_effort_options": ["None", "Low", "Medium", "High", "XHigh"],
+    }
