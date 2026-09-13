@@ -149,10 +149,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   - 動作: 対象が既に起動中で健全なら何もしない → 既存のモデルコンテナを全停止 →
     `docker compose --profile <profile> up -d --force-recreate <service>` →
     `/health` 応答を待機(タイムアウト 1800 秒、起動ログをライブ表示) → API URL とモデル名を報告
-  - プロファイル: `nemotron | qwen | laguna | qwen36 | qwen38 | qwen38bf16 | qwen38nvfp4 | muse`
+  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | muse`
   - 同時に稼働できるモデルは 1 つ(切替時は現モデルを停止)
 - `/home/cliclie/llm/compose/docker-compose.yml`
-  - モデルサービス 8 種(vLLM 7 + llama.cpp 1)と起動パラメータの定義
+  - モデルサービス 10 種(vLLM 4 + SGLang 4 + llama.cpp 1 + TabbyAPI 1)と起動パラメータの定義
 - `/home/cliclie/llm/compose/sociax-rag/collect-dgx-info.sh`
   - 既存の read-only 収集スクリプト(hostname / docker / GPU / ポート / 稼働コンテナ / ストレージ)
 
@@ -160,18 +160,22 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 
 | プロファイル | コンテナ | ポート | ランタイム | コンテキストサイズ | GPUメモリ使用率 | KVキャッシュ |
 |---|---|---|---|---|---|---|
-| nemotron | vllm-nemotron120b | 8000 | vLLM 26.07 | 262144 | 0.80 | 4G (fp8_e4m3) |
-| qwen | vllm-qwen72b | 8001 | vLLM 26.07 | 32768 | 0.70 | 6G (fp8_e4m3) |
-| laguna | vllm-laguna72b | 8002 | vLLM 26.07 | auto | 0.80 | 6G (fp8_e4m3) |
-| qwen36 | vllm-qwen36-35b | 8003 | vLLM 26.07 | 262144 | 0.70 | 16G (fp8_e4m3) |
+| nemotron | vllm-nemotron120b | 8000 | vLLM 26.08 | 262144 | 0.80 | 4G (fp8_e4m3) |
 | muse | llama-muse-glimmer | 8004 | llama.cpp | 131072 | - | - |
-| qwen38 | vllm-qwen38-27b | 8005 | vLLM (local build) | 262144 | 0.70 | 16G (fp8_e4m3) |
-| qwen38bf16 | vllm-qwen38-27b-bf16 | 8006 | vLLM (local build) | 262144 | 0.7 | 24G |
-| qwen38nvfp4 | vllm-qwen38-27b-nvfp4 | 8007 | vLLM (local build) | 262144 | 0.70 | 32G (fp8_e4m3) |
+| qwen38 | vllm-qwen38-27b | 8005 | vLLM 26.08 | 262144 | 0.70 | 16G (fp8_e4m3) |
+| qwen38bf16 | vllm-qwen38-27b-bf16 | 8006 | vLLM 26.08 | 262144 | 0.70 | 24G (fp8_e4m3) |
+| qwen38nvfp4 | vllm-qwen38-27b-nvfp4 | 8007 | vLLM 26.08 | 262144 | 0.70 | 16G (fp8_e4m3) |
+| qwen38sglang | sglang-qwen38-27b-nvfp4 | 8008 | SGLang | 262144 (ネイティブ) | 0.65 | fp8_e4m3 |
+| qwen38sglangeagle | sglang-qwen38-27b-nvfp4-eagle | 8008 | SGLang | 262144 (ネイティブ) | 0.65 | fp8_e4m3 |
+| qwen38sglangdflash | sglang-qwen38-27b-nvfp4-dflash | 8008 | SGLang | 1000000 (YaRN) | 0.65 | fp8_e4m3 |
+| qwen38sglangdspark | sglang-qwen38-27b-nvfp4-dspark | 8008 | SGLang | 1000000 (YaRN) | 0.65 | fp8_e4m3 |
+| qwen38flashnextexl3 | tabbyapi-flashnext | 8009 | TabbyAPI (ExLlamaV3) | 262144 | - | - |
 
-- コンテキストサイズ: vLLM は `--max-model-len`、llama.cpp (muse) は `--ctx-size`
-- 共通: `--max-num-seqs 1`、`--enable-chunked-prefill`。
-  qwen38 系は MTP 推測デコード(`--speculative-config`)、muse は `--temp / --top-p / --top-k`
+- コンテキストサイズ: vLLM は `--max-model-len`、SGLang は `--context-length`
+  (dflash / dspark は YaRN で 1M 拡張)、llama.cpp (muse) は `--ctx-size`
+- 共通: vLLM は `--max-num-seqs 1`・`--enable-chunked-prefill`、qwen38 系は MTP 推測デコード
+  (`--speculative-config`)。SGLang は `--mem-fraction-static 0.65`・`--enable-metrics`、
+  muse は `--temp / --top-p / --top-k`
 
 ## 技術基盤(実装アーキテクチャ)
 
@@ -485,4 +489,22 @@ cd /home/cliclie/DGXSparkUtil/api
   - ボタン文言「モデル切替」→「モデル」、「パラメータ表示・編集」→「パラメータ」
   - 値ボックスの `min-width`: 実行/待機 `#v-rw` 7ch→5ch、E2E `#v-e2e` 7ch→3ch、
     TTFT `#v-ttft` 6ch→5ch
+
+## 実装メモ(2026-09-13)
+
+- **compose 側のモデル追加・削除に追従(コード変更なし)**: `~/llm/compose` 側で TabbyAPI
+  (Qwen3.8 Flash-Next EXL3、`qwen38flashnextexl3`、ポート 8009)を追加し、qwen(72B NVFP4) /
+  laguna(72B NVFP4) / qwen36(35B FP8)の 3 モデルを削除した変更に対し、本ユーティリティは
+  `api/vllm.py::_load_profiles()` が docker-compose.yml を動的にパースするため**コード変更なしで
+  自動追従**した。削除モデルは一覧から自動で消え、TabbyAPI は一覧・切替・監視の対象に自動で
+  追加される(稼働中 API で `active` 検出・`health=true`・`model_name` 取得を確認済み)。
+  TabbyAPI は `/metrics` が 404 のためメトリクス系は「-」表示(muse/llama.cpp と同じ既存挙動)。
+- **unsloth モデル(`qwen38flashnextgguf`)は追従対象外**: ホストプロセス方式で
+  docker-compose.yml に存在しないため、`_load_profiles()` の対象外となり一覧にも現れない。
+  当該モデルは今後の削除予定のため今回は対応しない(将来 docker コンテナ化された場合は
+  compose への追加だけで自動追従する)。
+- **README のモデル一覧・プロファイル列挙を現状に更新**: 上記の追加・削除を反映し、
+  モデル一覧テーブルを現在の 10 種(vLLM 4 + SGLang 4 + llama.cpp 1 + TabbyAPI 1)に更新。
+  vLLM イメージは 26.07 → 26.08 に移行済み。
+
 
