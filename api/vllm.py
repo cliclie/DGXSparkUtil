@@ -304,6 +304,145 @@ def _sglang_get_load(base: str) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------- TabbyAPI (ログ解析メトリクス)
+# TabbyAPI は /metrics が 404 のため、docker logs のリクエスト毎統計を解析する。
+# ログ形式 (common/gen_logging.py、commit de76ff88 で検証済み):
+#   開始: #3932 chat/completions (stream): 200,725 prompt tokens · ...
+#   完了: #3932 chat/completions (stream): 986 tokens generated at 67.7 T/s ·
+#         prompt 200,725 tokens, 99% cached, 1,557 new in 2.20 s (708 T/s) ·
+#         first token 2.20 s, total 16.8 s · draft 757/916 accepted (83%)
+# 実行中 = 開始ログあり・完了ログなしのリクエスト (max_batch_size 超過分は待機)。
+_TABBY_LOG_TAIL = 300
+_TABBY_INFLIGHT_MAX_AGE_S = 3600  # 安全策: 1 時間超の残留エントリを破棄 (クラッシュ等)
+
+_tabby_in_flight: dict[int, float] = {}  # req_id -> 初回確認時刻
+_tabby_last: dict = {"req_id": None, "stats": None}  # 直近完了リクエスト
+
+
+def _reset_tabby_state() -> None:
+    """ログ追跡状態を初期化(稼働モデルが TabbyAPI でない/エンジン切替時)。"""
+    _tabby_in_flight.clear()
+    _tabby_last["req_id"], _tabby_last["stats"] = None, None
+
+
+def _is_tabbyapi(base: str) -> bool:
+    """/.well-known/serviceinfo で TabbyAPI かどうかを判定(llama.cpp 等には無い)。"""
+    return "TabbyAPI" in _http_get(f"{base}/.well-known/serviceinfo", timeout=3)
+
+
+_TABBY_ENTRY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d+ \w+:")
+_TABBY_START_RE = re.compile(r"#(\d+) \S+(?: \(stream\))?: ([\d,]+) prompt tokens")
+_TABBY_DONE_RE = re.compile(
+    r"#(\d+) \S+(?: \(stream\))?: ([\d,]+) tokens generated"
+    r"(?: at ([\d,.]+) T/s)?"
+    r" · prompt ([\d,]+) tokens, (?:\d+% cached|none cached), ([\d,]+) new in ([\d.]+) s"
+    r"(?: \(([\d,]+) T/s\))?"
+    r" · (?:queued ([\d.]+) s, )?first token ([\d.]+) s, total ([\d.]+) s"
+)
+
+
+def _tabbyapi_parse_logs(text: str) -> list[tuple[str, int, dict | None]]:
+    """TabbyAPI の docker logs を (kind, req_id, stats) の列に解析する。
+
+    loguru が長い行を折返す(継続行は先頭が空白)ため、タイムスタンプで始まる行を
+    1 エントリとして継続行を結合してから開始/完了にマッチする。
+    kind: "start"(stats=None) / "done"(stats=dict)。
+    """
+    entries: list[str] = []
+    for ln in text.splitlines():
+        if _TABBY_ENTRY_RE.match(ln) or not entries:
+            entries.append(ln)
+        else:
+            entries[-1] += " " + ln.strip()
+    events: list[tuple[str, int, dict | None]] = []
+    for e in entries:
+        m = _TABBY_DONE_RE.search(e)
+        if m:
+            events.append(
+                (
+                    "done",
+                    int(m.group(1)),
+                    {
+                        "gen_tokens": int(m.group(2).replace(",", "")),
+                        "gen_tps": float(m.group(3).replace(",", "")) if m.group(3) else None,
+                        "prompt_tokens": int(m.group(4).replace(",", "")),
+                        "prompt_time": float(m.group(6)),
+                        "ttft_s": float(m.group(9)),
+                        "total_s": float(m.group(10)),
+                    },
+                )
+            )
+            continue
+        m = _TABBY_START_RE.search(e)
+        if m:
+            events.append(("start", int(m.group(1)), None))
+    return events
+
+
+def _tabbyapi_metrics(base: str, container: str) -> dict:
+    """TabbyAPI メトリクス: docker logs のリクエスト毎統計を解析する(/metrics なし)。
+
+    実行/待機: ログの req_id 追跡(開始あり・完了なし)。max_batch_size 超過分は待機。
+    KVCache: (直近リクエストの prompt+gen トークン) / cache_size の推定値
+    (TabbyAPI に直接使用率 API は無い。KV キャッシュは直近会話分を保持するため)。
+    E2E/TTFT/スループット: 直近完了リクエストの値。スループットは vLLM/SGLang と同じ
+    held ロジック(新規完了がなければ前回値を保持・フロントで灰色表示)。
+    入力スループットは全プロンプトトークン換算(prompt_tokens / prompt_time)で
+    vLLM の prompt_tokens_per_s と同一セマンティクス。
+    """
+    now = time.time()
+    last_id_before = _tabby_last["req_id"]
+    events = _tabbyapi_parse_logs(
+        _run(["docker", "logs", "--tail", str(_TABBY_LOG_TAIL), container], timeout=10)
+    )
+    for kind, rid, stats in events:
+        if kind == "start":
+            _tabby_in_flight.setdefault(rid, now)
+        else:
+            # 完了は req_id の新旧に関わらず in_flight から除去する
+            # (tail 窓内の古い完了も対象。_tabby_last の更新のみ最大 id のみ)
+            _tabby_in_flight.pop(rid, None)
+            if _tabby_last["req_id"] is None or rid > _tabby_last["req_id"]:
+                _tabby_last["req_id"], _tabby_last["stats"] = rid, stats
+    for rid in [r for r, ts in _tabby_in_flight.items() if now - ts > _TABBY_INFLIGHT_MAX_AGE_S]:
+        _tabby_in_flight.pop(rid, None)
+
+    # cache_size / max_batch_size は /v1/model から
+    cache_size = max_batch_size = None
+    model_txt = _http_get(f"{base}/v1/model", timeout=3)
+    if model_txt:
+        cm = re.search(r'"cache_size"\s*:\s*(\d+)', model_txt)
+        bm = re.search(r'"max_batch_size"\s*:\s*(\d+)', model_txt)
+        if cm:
+            cache_size = int(cm.group(1))
+        if bm:
+            max_batch_size = int(bm.group(1))
+    if max_batch_size is None:
+        max_batch_size = 1
+
+    n = len(_tabby_in_flight)
+    m: dict = {
+        "requests_running": min(n, max_batch_size),
+        "requests_waiting": max(n - max_batch_size, 0),
+    }
+    stats = _tabby_last["stats"]
+    if stats:
+        if cache_size:
+            m["kv_cache_usage_pct"] = min(
+                100.0, (stats["prompt_tokens"] + stats["gen_tokens"]) / cache_size * 100.0
+            )
+        m["e2e_latency_s"] = stats["total_s"]
+        m["ttft_s"] = stats["ttft_s"]
+        held = _tabby_last["req_id"] == last_id_before  # 前回ポーリング以降に新規完了が無いか
+        m["prompt_tokens_per_s"] = (
+            stats["prompt_tokens"] / stats["prompt_time"] if stats["prompt_time"] > 0 else None
+        )
+        m["prompt_tps_held"] = held
+        m["generation_tokens_per_s"] = stats["gen_tps"]
+        m["generation_tps_held"] = held
+    return m
+
+
 def _container_state(name: str) -> dict:
     """docker inspect でコンテナ状態を取得する(存在しなければ空 dict)。"""
     out = _run(["docker", "inspect", name])
@@ -400,6 +539,7 @@ def get_status() -> dict:
     mt = _http_get(f"{base}/metrics", timeout=5)
     pm = _parse_vllm_metrics(mt) if mt else {}
     if any(k.startswith("vllm:") for k in pm):
+        _reset_tabby_state()
         def g(name: str) -> float | None:
             return pm.get(name)
 
@@ -443,11 +583,17 @@ def get_status() -> dict:
             _prev_metrics["generation"] = pm.get("vllm:generation_tokens_total", _prev_metrics["generation"])
     elif any(k.startswith("sglang:") for k in pm):
         # SGLang (--enable-metrics 有効)。系列名マッピングは _sglang_metrics 参照
+        _reset_tabby_state()
         active["metrics"] = _sglang_metrics(pm)
+    elif _is_tabbyapi(base):
+        # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析
+        _reset_token_state()
+        active["metrics"] = _tabbyapi_metrics(base, info["container"])
     else:
         # /metrics が無い(SGLang の --enable-metrics 未導入時・llama.cpp 等) →
         # SGLang の /get_load で実行中・待機リクエスト数を取得。これもない場合は None
         _reset_token_state()
+        _reset_tabby_state()
         active["metrics"] = _sglang_get_load(base)
 
     # 直近ログ
