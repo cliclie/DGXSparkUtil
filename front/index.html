@@ -607,10 +607,10 @@ const GAUGE_DEFS = [
     get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0), sub: () => "最大 3003 MHz" },
   { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
     get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
-  { id: "g-disk-read", title: "ストレージ負荷 (読込)", max: 12000, unit: "MB/s", color: "#56d364",
-    get: (m) => m.disk_read_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 12 GB/s" },
-  { id: "g-disk-write", title: "ストレージ負荷 (書込)", max: 12000, unit: "MB/s", color: "#e3b341",
-    get: (m) => m.disk_write_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 12 GB/s" },
+  { id: "g-disk-read", title: "ストレージ負荷 (読込)", max: 5000, unit: "MB/s", color: "#56d364",
+    get: (m) => m.disk_read_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
+  { id: "g-disk-write", title: "ストレージ負荷 (書込)", max: 5000, unit: "MB/s", color: "#e3b341",
+    get: (m) => m.disk_write_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
 ];
 
 // 半円ゲージ DOM 生成
@@ -629,8 +629,8 @@ function renderGauges(m) {
 }
 
 // ------------------------------------------------------------- 統合時系列グラフ
-// 100% 換算: CPU温度=100°C / ストレージI/O=12GB/s / GPU電力=140W (GB10 TDP) / GPUクロック=3003MHz (HW上限)
-const NORM = { cpuTemp: 100, gpuPower: 140, gpuClock: 3003, diskIO: 12000 };
+// 100% 換算: CPU温度=100°C / ストレージI/O=5GB/s / GPU電力=140W (GB10 TDP) / GPUクロック=3003MHz (HW上限)
+const NORM = { cpuTemp: 100, gpuPower: 140, gpuClock: 3003, diskIO: 5000 };
 const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
 
 const lineDS = (label, data, color, fill) => ({
