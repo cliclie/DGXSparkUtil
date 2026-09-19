@@ -1162,14 +1162,30 @@ function copyClineText(text, btn) {
     btn.textContent = btn.dataset.orig;
     btn.classList.remove("copied");
   };
-  navigator.clipboard.writeText(text).then(() => {
+  const onSuccess = () => {
     btn.textContent = "コピー済み";
     btn.classList.add("copied");
     setTimeout(restore, 1500);
-  }).catch(() => {
-    prompt("コピーしてください:", text);
+  };
+  const onFail = () => {
+    prompt("コピーできませんでした。テキストをコピーしてください:", text);
     restore();
-  });
+  };
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    // セキュリティコンテキスト(HTTPS/localhost): 最新 Clipboard API
+    navigator.clipboard.writeText(text).then(onSuccess).catch(onFail);
+  } else {
+    // 非セキュリティコンテキスト(HTTP/LAN IP): legacy execCommand フォールバック
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "absolute";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy") ? onSuccess() : onFail();
+    document.body.removeChild(ta);
+  }
 }
 
 document.getElementById("cline-copy-all").onclick = () => {
