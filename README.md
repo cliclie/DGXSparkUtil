@@ -578,4 +578,23 @@ cd /home/cliclie/DGXSparkUtil/api
   (ストレージ読込 % / 書込 % 系列の 100% 換算)。ゾーン帯は比率ベースのため自動で追従
   (緑 <3000 / 橙 3000〜4250 / 赤 >4250 MB/s)。5000 MB/s 超の値は 100% でクリップ(従来と同じ挙動)。
 
+## 実装メモ(2026-09-19)
+
+- **Cline設定値コピーの `navigator.clipboard` 未定義エラーを修正**:
+  LAN PC から平文 HTTP(`http://<host>:<port>`)でアクセスしたとき、ブラウザの
+  セキュリティコンテキスト外のため `navigator.clipboard` が `undefined` になり、
+  Cline設定値モーダルのコピーボタン(個別・すべて)で
+  `TypeError: Cannot read properties of undefined (reading 'writeText')` が thrown されていた。
+  既存の `.catch()` は例外が同期で thrown されるため到達しなかった。
+  `front/index.html` の `copyClineText` を修正し、`navigator.clipboard.writeText`
+  が存在する場合のみ最新 Clipboard API を使用、それ以外(非セキュリティコンテキスト)は
+  非セキュリティコンテキストでも動作する legacy の `document.execCommand('copy')`
+  にフォールバックした。
+  - 判定: `navigator.clipboard && typeof navigator.clipboard.writeText === "function"`
+  - フォールバック: 非表示 textarea にテキストを挿入 → `focus()`/`select()` →
+    `document.execCommand("copy")` → 成功なら「コピー済み」表示、失敗なら `prompt` 提示。
+  - 個別コピーと「すべてコピー」は両方この関数を呼ぶため、1箇所修正で両方直る。
+  - 反映: ブラウザのリロードのみで反映(サーバ/モデル再起動不要)。
+  - 検証: LAN PC から `http://192.168.0.110:8080` でCline設定値モーダルを開き、
+    個別コピー・すべてコピーの両方でクリップボードに反映されることを確認済み。
 
