@@ -920,6 +920,20 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
+    "mimo_flash": {
+        "images": False,  # テキスト専用（Vision/Audio なし）
+        "context_max": 262144,  # KV cache_size（1M Q8 は MemAvailable 不足のため 262K）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "mimo9b": {
+        "images": True,  # 動的: --limit-mm-per-prompt / --mm-processor-kwargs
+        "context_max": 1010000,  # YaRN factor 4.0（Qwen3.5-9B 公式カード推奨値）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
 }
 
 
