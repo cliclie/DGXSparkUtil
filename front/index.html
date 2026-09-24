@@ -247,10 +247,15 @@ table.params td input[readonly] { color: var(--muted); }
 .cline-label { flex: 0 0 200px; color: var(--muted); font-size: 13px; }
 .cline-value {
   flex: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-family: Consolas, monospace;
   font-size: 13px;
-  word-break: break-all;
 }
+.cline-part { word-break: break-all; }
+.cline-sep { color: var(--muted); }
 .cline-copy { flex: 0 0 auto; padding: 3px 10px; font-size: 11px; }
 .cline-copy.copied { background: #1a3a1a; border-color: var(--green); color: var(--green); }
 .cline-loading { color: var(--muted); padding: 10px 0; }
@@ -1120,10 +1125,16 @@ function renderCline() {
       title: "MODEL CONFIGURATION",
       rows: [
         ["Supports Images", d.supports_images ? "On" : "Off"],
-        ["Context Windows Size", d.context_recommended + " (推奨) / " + d.context_max + " (最大)"],
-        ["Max Output Tokens", d.max_output_recommended + " (推奨) / " + d.max_output_max + " (最大)"],
+        ["Context Windows Size", [
+          { text: d.context_recommended + " (推奨)", copy: String(d.context_recommended) },
+          { text: d.context_max + " (最大)", copy: String(d.context_max) },
+        ]],
+        ["Max Output Tokens", [
+          { text: d.max_output_recommended + " (推奨)", copy: String(d.max_output_recommended) },
+          { text: d.max_output_max + " (最大)", copy: String(d.max_output_max) },
+        ]],
         ["Temperature", String(d.temperature)],
-        ["Reasoning Effort", d.reasoning_effort_options.join(" / ")],
+        ["Reasoning Effort", d.reasoning_effort_options.map((o) => ({ text: o, copy: o }))],
       ],
     },
   ];
@@ -1142,14 +1153,27 @@ function renderCline() {
       labelEl.textContent = label;
       const valueEl = document.createElement("span");
       valueEl.className = "cline-value";
-      valueEl.textContent = value;
-      const copyBtn = document.createElement("button");
-      copyBtn.className = "cline-copy";
-      copyBtn.textContent = "コピー";
-      copyBtn.onclick = () => copyClineText(value, copyBtn);
+      // 値を「パーツ」のリストに正規化: 各パーツは個別にコピー可能
+      const parts = Array.isArray(value) ? value : [{ text: value, copy: value }];
+      parts.forEach((part, i) => {
+        if (i > 0) {
+          const sep = document.createElement("span");
+          sep.className = "cline-sep";
+          sep.textContent = "/";
+          valueEl.appendChild(sep);
+        }
+        const partEl = document.createElement("span");
+        partEl.className = "cline-part";
+        partEl.textContent = part.text;
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "cline-copy";
+        copyBtn.textContent = "コピー";
+        copyBtn.onclick = () => copyClineText(part.copy, copyBtn);
+        valueEl.appendChild(partEl);
+        valueEl.appendChild(copyBtn);
+      });
       row.appendChild(labelEl);
       row.appendChild(valueEl);
-      row.appendChild(copyBtn);
       secDiv.appendChild(row);
     }
     content.appendChild(secDiv);
