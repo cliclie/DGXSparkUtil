@@ -151,10 +151,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   - 動作: 対象が既に起動中で健全なら何もしない → 既存のモデルコンテナを全停止 →
     `docker compose --profile <profile> up -d --force-recreate <service>` →
     `/health` 応答を待機(タイムアウト 1800 秒、起動ログをライブ表示) → API URL とモデル名を報告
-  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | muse`
+  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | qwen38flashnextexl3_3p05 | qwen38swift | qwen38swift_dflash | muse | mimo_flash | mimo9b`
   - 同時に稼働できるモデルは 1 つ(切替時は現モデルを停止)
 - `/home/cliclie/llm/compose/docker-compose.yml`
-  - モデルサービス 10 種(vLLM 4 + SGLang 4 + llama.cpp 1 + TabbyAPI 1)と起動パラメータの定義
+  - モデルサービス 15 種(vLLM 6 + SGLang 5 + llama.cpp 1 + TabbyAPI 3)と起動パラメータの定義
 - `/home/cliclie/llm/compose/sociax-rag/collect-dgx-info.sh`
   - 既存の read-only 収集スクリプト(hostname / docker / GPU / ポート / 稼働コンテナ / ストレージ)
 
@@ -171,10 +171,16 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | qwen38sglangeagle | sglang-qwen38-27b-nvfp4-eagle | 8008 | SGLang | 262144 (ネイティブ) | 0.65 | fp8_e4m3 |
 | qwen38sglangdflash | sglang-qwen38-27b-nvfp4-dflash | 8008 | SGLang | 1000000 (YaRN) | 0.65 | fp8_e4m3 |
 | qwen38sglangdspark | sglang-qwen38-27b-nvfp4-dspark | 8008 | SGLang | 1000000 (YaRN) | 0.65 | fp8_e4m3 |
-| qwen38flashnextexl3 | tabbyapi-flashnext | 8009 | TabbyAPI (ExLlamaV3) | 262144 | - | - |
+| qwen38flashnextexl3 | tabbyapi-flashnext | 8009 | TabbyAPI (ExLlamaV3) | 1048576 (YaRN) | - | Q8 |
+| qwen38flashnextexl3_3p05 | tabbyapi-flashnext-3p05 | 8011 | TabbyAPI (ExLlamaV3) | 1048576 (YaRN) | - | Q8 |
+| qwen38swift | vllm-swift-qwen38-27b | 8012 | vLLM 26.08 | 262144 | 0.70 | 24G (BF16) |
+| qwen38swift_dflash | sglang-swift-qwen38-27b | 8012 | SGLang | 262144 | 0.65 | fp8_e4m3 |
+| mimo_flash | tabbyapi-mimo-flash | 8013 | TabbyAPI (ExLlamaV3 1.5.1) | 262144 | - | Q8 |
+| mimo9b | vllm-mimo-9b | 8014 | vLLM 26.08 | 1010000 (YaRN) | 0.70 | 16G (fp8_e4m3) |
 
 - コンテキストサイズ: vLLM は `--max-model-len`、SGLang は `--context-length`
-  (dflash / dspark は YaRN で 1M 拡張)、llama.cpp (muse) は `--ctx-size`
+  (sglang dflash / dspark と TabbyAPI の qwen38flashnextexl3 系は YaRN で 1M 拡張、
+  mimo9b は YaRN で 1,010,000)、llama.cpp (muse) は `--ctx-size`
 - 共通: vLLM は `--max-num-seqs 1`・`--enable-chunked-prefill`、qwen38 系は MTP 推測デコード
   (`--speculative-config`)。SGLang は `--mem-fraction-static 0.65`・`--enable-metrics`、
   muse は `--temp / --top-p / --top-k`
@@ -597,4 +603,22 @@ cd /home/cliclie/DGXSparkUtil/api
   - 反映: ブラウザのリロードのみで反映(サーバ/モデル再起動不要)。
   - 検証: LAN PC から `http://192.168.0.110:8080` でCline設定値モーダルを開き、
     個別コピー・すべてコピーの両方でクリップボードに反映されることを確認済み。
+
+## 実装メモ(2026-09-25)
+
+- **MiMo-V2.6 系 2 モデル(`mimo_flash` / `mimo9b`)の Cline 設定値テーブル追加**:
+  `~/llm/compose` 側に MiMo-V2.6-Flash(309B-A24B, TabbyAPI ExLlamaV3 1.5.1, ポート 8013)と
+  MiMo-V2.6-Flash-Instruct-2511(Distill-Qwen3.5-9B, vLLM, ポート 8014)が追加された。
+  モデル一覧・切替・監視は `_load_profiles()` が compose を動的パースするため**自動追従**し、
+  追加したのは `api/vllm.py` の `CLINE_MODEL_TABLE` の 2 エントリのみ。
+  - `mimo_flash`: `images=False`(テキスト専用)・`context_max=262144`
+    (KV cache_size。ネイティブ 1M は Q8 KV で MemAvailable 1.4GB まで低下するため 262K 運用)
+  - `mimo9b`: `images=True`(マルチモーダル)・`context_max=1010000`(YaRN factor 4.0)
+  - 反映: `CLINE_MODEL_TABLE` は import 時に読まれるため `sudo systemctl restart dgx-spark-api`
+    で再起動。再起動後 `active`(mimo_flash)で `context_max=262144`・`supports_images=false` を確認済み。
+- **README のモデル一覧・プロファイル列挙を現状に更新**: 上記 2 モデルに加え、
+  2026-09-18 の `qwen38flashnextexl3_3p05` と 2026-09-23 の `qwen38swift` /
+  `qwen38swift_dflash` を反映し、モデル一覧テーブルを現在の 15 種
+  (vLLM 6 + SGLang 5 + llama.cpp 1 + TabbyAPI 3)に更新。
+  `qwen38flashnextexl3` のコンテキストは YaRN 1M 化(2026-09-18)を反映。
 
