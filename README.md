@@ -268,7 +268,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - モーダル表示: API Configuration(API Provider / Base URL / API Key / ModelID) +
   MODEL CONFIGURATION(Supports Images / Context Windows Size / Max Output Tokens /
   Temperature / Reasoning Effort)
-- 各値をコピー可能(個別コピー + 「すべてコピー」)
+- 各値をコピー可能(個別コピー + 「すべてコピー」)。推奨/最大値(Context Windows Size /
+  Max Output Tokens)は数値を個別コピーでき、Reasoning Effort も各選択肢を個別コピーできる
 - データ源: 動的取得(モデル名・ポート・hostname・コンテキスト・温度・画像対応) +
   モデル別静的推奨値テーブル(`api/vllm.py` の `CLINE_MODEL_TABLE`)
 
@@ -621,4 +622,19 @@ cd /home/cliclie/DGXSparkUtil/api
   `qwen38swift_dflash` を反映し、モデル一覧テーブルを現在の 15 種
   (vLLM 6 + SGLang 5 + llama.cpp 1 + TabbyAPI 3)に更新。
   `qwen38flashnextexl3` のコンテキストは YaRN 1M 化(2026-09-18)を反映。
+- **Cline設定値モーダルで設定に貼る値(数値など)のみをコピー可能に**:
+  従来は個別コピーボタンが値の全文をコピーするため、「Context Windows Size」などで
+  `16384 (推奨) / 32768 (最大)` のような文章全体がコピーされ、Cline の設定へそのまま
+  ペーストできなかった。
+  - 変更: `front/index.html` の `renderCline()` で行の値を「パーツ」のリスト
+    (`{ text, copy }`)に一般化し、各パーツに個別コピーボタンを配置(そのパーツの
+    `copy` のみコピー)。単一値は 1 パーツ(表示=コピー)で従来どおり。
+  - Context Windows Size / Max Output Tokens: 推奨/最大を 2 パーツに分割し、
+    各コピーボタンが数値のみをコピー。
+  - Reasoning Effort: 各選択肢(None/Low/Medium/High/XHigh)を個別コピー可能に。
+  - CSS: `.cline-value` を flex 容器化し `.cline-part` / `.cline-sep` を追加
+    (長い値の折り返しは `.cline-part` の `word-break: break-all` で維持)。
+  - 「すべてコピー」ボタンは参照用の全文コピーを維持。
+  - 検証: HTML の tag 整合性チェック + `renderCline` の JS 構文チェック(esprima) +
+    配信 HTML に新コードが反映されていることを確認済み。
 
