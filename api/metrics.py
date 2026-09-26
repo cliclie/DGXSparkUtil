@@ -29,6 +29,7 @@ _prev: dict = {
     "cpu_idle": None,
     "cpu_total": None,
     "disk": None,  # (ts, reads, writes, sectors_read, sectors_written, ms_read, ms_write)
+    "net": None,   # (ts, rx_bytes, tx_bytes)
 }
 
 
@@ -58,6 +59,40 @@ def _read_disk_stats():
                     int(parts[6]),   # time spent reading (ms)
                     int(parts[10]),  # time spent writing (ms)
                 )
+    return None
+
+
+def _default_iface() -> str | None:
+    """/proc/net/route からデフォルトルート(宛先 00000000)のインターフェース名を返す。
+
+    docker の br-*/veth*/docker0 は内部トラフィックのため、外部通信を実際に
+    担うデフォルトルートIFのみを計測対象とする。
+    """
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "00000000":
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def _read_net_stats(iface: str):
+    """/proc/net/dev から指定インターフェースの (rx_bytes, tx_bytes) を返す。"""
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                name, data = line.split(":", 1)
+                if name.strip() != iface:
+                    continue
+                fields = data.split()
+                return int(fields[0]), int(fields[8])  # rx bytes, tx bytes
+    except (OSError, ValueError, IndexError):
+        pass
     return None
 
 
@@ -170,5 +205,24 @@ def collect() -> dict:
         out["disk_write_mbps"] = None
         out["disk_iops"] = None
         out["disk_await_ms"] = None
+
+    # --- ネットワーク負荷 (/proc/net/dev 差分, デフォルトルートIF) ---
+    # Mbps = 10^6 bits/s (10 Gbps = 10000 Mbps)
+    iface = _default_iface()
+    n = _read_net_stats(iface) if iface else None
+    if n is not None:
+        rx, tx = n
+        pn = _prev["net"]
+        if pn is not None:
+            dt = max(now - pn[0], 1e-9)
+            out["net_down_mbps"] = max(0, rx - pn[1]) * 8 / dt / 1e6
+            out["net_up_mbps"] = max(0, tx - pn[2]) * 8 / dt / 1e6
+        else:
+            out["net_down_mbps"] = None
+            out["net_up_mbps"] = None
+        _prev["net"] = (now, rx, tx)
+    else:
+        out["net_down_mbps"] = None
+        out["net_up_mbps"] = None
 
     return out
