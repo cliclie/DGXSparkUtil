@@ -81,6 +81,8 @@ section > h2 {
   pointer-events: none;
 }
 .gauge .gval .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+.gauge .gval.gval-dual { font-size: 12px; line-height: 1.3; top: 77%; }
+.gauge .gval .gval-line { white-space: nowrap; }
 .gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 4px; min-height: 14px; }
 .ok { color: var(--green); }
 .warn { color: var(--yellow); }
@@ -527,18 +529,29 @@ class Gauge {
     const wrap = document.getElementById(id).parentElement; // .gcanvas
     const card = wrap.parentElement; // .gauge
     this.valEl = document.createElement("div");
-    this.valEl.className = "gval";
+    this.valEl.className = def.dual ? "gval gval-dual" : "gval";
     wrap.appendChild(this.valEl);
     this.subEl = card.querySelector(".gsub");
     this._last = null;
   }
   set(v, m) {
-    if (v === this._last) return;
-    this._last = v;
+    const key = this.def.dual ? v.a + "|" + v.b : v;
+    if (key === this._last) return;
+    this._last = key;
     this.render(v);
-    this.valEl.innerHTML =
-      (v == null ? "-" : this.def.fmt(v)) +
-      (this.def.unit ? `<span class="unit">${this.def.unit}</span>` : "");
+    if (this.def.dual) {
+      const line = (label, val, color) =>
+        `<div class="gval-line" style="color:${color}">${label} ` +
+        (val == null ? "-" : this.def.fmt(val)) +
+        `<span class="unit">${this.def.unit}</span></div>`;
+      this.valEl.innerHTML =
+        line(this.def.labelA, v.a, this.def.colorA) +
+        line(this.def.labelB, v.b, this.def.colorB);
+    } else {
+      this.valEl.innerHTML =
+        (v == null ? "-" : this.def.fmt(v)) +
+        (this.def.unit ? `<span class="unit">${this.def.unit}</span>` : "");
+    }
     this.subEl.textContent = this.def.sub ? this.def.sub(m) : "";
   }
   render(v) {
@@ -556,22 +569,30 @@ class Gauge {
     const cx = w / 2;
     const cy = h - 2;
     const R = Math.min(w / 2, h) - 6;   // ゾーン帯の外半径 (コンテナ内に収まる)
-    const lw = Math.max(8, R * 0.16);   // 値アーチの厚み
-    const r = R - lw / 2 - 4;           // 値アーチの半径
+    const dual = !!this.def.dual;
+    // アーチの半径/厚み (dual: 外側=A / 内側=B)
+    const lwA = Math.max(8, R * 0.16);
+    const rA = R - lwA / 2 - 4;
+    const lwB = dual ? Math.max(6, R * 0.12) : 0;
+    const rB = dual ? rA - lwA / 2 - lwB / 2 - 3 : 0;
     // 背景アーチ
     ctx.beginPath();
-    ctx.arc(cx, cy, r, Math.PI, 2 * Math.PI);
+    ctx.arc(cx, cy, rA, Math.PI, 2 * Math.PI);
     ctx.strokeStyle = ARC_BG;
-    ctx.lineWidth = lw;
+    ctx.lineWidth = lwA;
     ctx.stroke();
-    if (v == null) return;
-    const frac = Math.max(0, Math.min(1, v / this.def.max));
-    // ゾーン色 (緑→橙→赤)。閾値は def.zoneStops でゲージ単位に上書き可能
-    const stops = this.def.zoneStops || ZONE_STOPS;
-    let color = ZONE_GREEN;
-    if (frac > stops[1]) color = ZONE_RED;
-    else if (frac > stops[0]) color = ZONE_ORANGE;
+    if (dual) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rB, Math.PI, 2 * Math.PI);
+      ctx.strokeStyle = ARC_BG;
+      ctx.lineWidth = lwB;
+      ctx.stroke();
+    }
+    const a = dual ? v.a : v;
+    const b = dual ? v.b : null;
+    if (a == null && b == null) return;
     // 色ゾーン帯 (細い外側リング)
+    const stops = this.def.zoneStops || ZONE_STOPS;
     const zr = R - 1.5;
     ctx.lineWidth = 3;
     ctx.strokeStyle = ZONE_GREEN;
@@ -580,12 +601,25 @@ class Gauge {
     ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[0]), Math.PI * (1 + stops[1])); ctx.stroke();
     ctx.strokeStyle = ZONE_RED;
     ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[1]), 2 * Math.PI); ctx.stroke();
-    // 値アーチ
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, Math.PI, Math.PI * (1 + frac));
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lw;
-    ctx.stroke();
+    // 値アーチ (dual は固定色: 外側=A / 内側=B、単一はゾーン色)
+    const arc = (val, radius, lw, color) => {
+      if (val == null) return;
+      const frac = Math.max(0, Math.min(1, val / this.def.max));
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, Math.PI, Math.PI * (1 + frac));
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    };
+    arc(a, rA, lwA, dual ? this.def.colorA : this._zoneColor(a));
+    if (dual) arc(b, rB, lwB, this.def.colorB);
+  }
+  _zoneColor(v) {
+    const frac = Math.max(0, Math.min(1, v / this.def.max));
+    const stops = this.def.zoneStops || ZONE_STOPS;
+    if (frac > stops[1]) return ZONE_RED;
+    if (frac > stops[0]) return ZONE_ORANGE;
+    return ZONE_GREEN;
   }
 }
 
@@ -612,25 +646,35 @@ const GAUGE_DEFS = [
     get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0), sub: () => "最大 3003 MHz" },
   { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
     get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
-  { id: "g-disk-read", title: "ストレージ負荷 (読込)", max: 5000, unit: "MB/s", color: "#56d364",
-    get: (m) => m.disk_read_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
-  { id: "g-disk-write", title: "ストレージ負荷 (書込)", max: 5000, unit: "MB/s", color: "#e3b341",
-    get: (m) => m.disk_write_mbps, fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
+  { id: "g-disk-io", title: "ストレージ負荷", dual: true, max: 5000, unit: "MB/s",
+    colorA: "#56d364", colorB: "#e3b341", labelA: "読込", labelB: "書込",
+    getA: (m) => m.disk_read_mbps, getB: (m) => m.disk_write_mbps,
+    fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
+  { id: "g-net", title: "ネットワーク負荷", dual: true, max: 10000, unit: "Mbps",
+    colorA: "#58a6ff", colorB: "#bc8cff", labelA: "下り", labelB: "上り",
+    getA: (m) => m.net_down_mbps, getB: (m) => m.net_up_mbps,
+    fmt: (v) => v.toFixed(0), sub: () => "上限 10 Gbps" },
 ];
 
 // 半円ゲージ DOM 生成
-document.getElementById("host-cards").innerHTML = GAUGE_DEFS.map((d) =>
-  `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
-     <div class="gtitle"><span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>${d.title}</div>
+document.getElementById("host-cards").innerHTML = GAUGE_DEFS.map((d) => {
+  const dots = d.dual
+    ? `<span class="gdot" style="background:${d.colorA}"></span><span class="gdot" style="background:${d.colorB}"></span>`
+    : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
+  return `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
+     <div class="gtitle">${dots}${d.title}</div>
      <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
      <div class="gsub"></div>
-   </div>`
-).join("");
+   </div>`;
+}).join("");
 
 const gages = GAUGE_DEFS.map((d) => new Gauge(d.id, d));
 
 function renderGauges(m) {
-  for (const g of gages) g.set(g.def.get(m), m);
+  for (const g of gages) {
+    const d = g.def;
+    g.set(d.dual ? { a: d.getA(m), b: d.getB(m) } : d.get(m), m);
+  }
 }
 
 // ------------------------------------------------------------- 統合時系列グラフ
