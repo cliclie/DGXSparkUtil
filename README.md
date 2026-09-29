@@ -11,7 +11,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - モニタリング項目:
      - CPU負荷
      - CPU温度
-     - System Memoryの使用率
+     - 統合メモリの使用率
      - GPU負荷
      - GPU温度
      - ストレージの使用率(使用量・空き容量)
@@ -52,7 +52,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 |---|---|---|---|
 | CPU負荷 | CPU Load | 使用率 % | コア数(例: `20 cores`) |
 | CPU温度 | CPU Temperature | 現在温度(例: `38°C`) | 上限(例: `100°C`) |
-| System Memoryの使用率 | System Memory | 使用量(例: `101.08 GiB`) | 総量(例: `121.62 GiB total`) |
+| 統合メモリの使用率 | 統合メモリ | 使用率 %(例: `75.2%`) + 2行目に空き量(例: `空き 20.5 GiB`) | 使用/総量(例: `101.08 / 121.62 GiB`) |
 | GPU負荷 | GPU Load | 使用率 % | — |
 | GPU温度 | GPU Temperature | 現在温度(例: `38°C`) | 上限(例: `100°C`) |
 | ストレージの使用率 | Storage | 使用量(例: `663 GiB`) | 容量(例: `3.6 TiB total`) |
@@ -68,7 +68,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 
 ### 一段目: 現在値ゲージ行
 
-- 各項目のゲージ(半円アーチ)を**横方向に 1 行へ並べて表示**する(左 → 右: CPU Load, CPU Temperature, System Memory, GPU Load, GPU Temperature, GPU Power, GPU Clock, Storage, Storage I/O, Network の順)
+- 各項目のゲージ(半円アーチ)を**横方向に 1 行へ並べて表示**する(左 → 右: CPU Load, CPU Temperature, 統合メモリ, GPU Load, GPU Temperature, GPU Power, GPU Clock, Storage, Storage I/O, Network の順)
 - 表示領域(ウィンドウ幅)が狭くなれば、**自然に折り返して次の行へ表示する**(1 行に無理に詰めない)
   - 実装イメージ: CSS の flexbox + `flex-wrap: wrap`、各ゲージに固定幅(例: 220〜260px)を割り当て、幅が足りなくなったら折り返す
 - 折り返し時にも各ゲージの幅は揃え、間隔を一定にする
@@ -81,7 +81,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - 横軸: 時間(timestamp)、目盛りは「月 日, 年, 時刻」形式(例: `October 8, 2023, 12:00 AM`)
 - 縦軸: 測定値(単位は項目ごとに % / °C / GiB / MB/s など)、軸ラベルに単位を明記(例: `gpu load [%]`)
 - グラフタイトルは項目名(例: `gpu load`)
-- **各項目の線色を変える**(例: CPU Load=緑, CPU Temperature=紫, System Memory=赤, GPU Load=青 など。色は項目ごとに固定しスクショ風の明るい色調とする)
+- **各項目の線色を変える**(例: CPU Load=緑, CPU Temperature=紫, 統合メモリ=赤, GPU Load=青 など。色は項目ごとに固定しスクショ風の明るい色調とする)
 - **凡例を表示する**(各線の先頭に丸マーカー + 項目名を横に並べる)
 - **測定値の点と点はスプライン補間で滑らかに表示する**(直線ではなくカーブで結ぶ)
 - 描画ライブラリ: **Chart.js**(MIT ライセンス)の line chart を使用
@@ -122,7 +122,7 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
 
 GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の統合メモリを共有**する構成。
 このため `nvidia-smi` の `memory.total / memory.used` は `[N/A]` となり、独立した VRAM 使用量は取得できない。
-→ System Memory(RAM/VRAM)は「統合メモリ使用率」として 1 本で表示するのが実態に忠実。
+→ 統合メモリ(RAM/VRAM)は「統合メモリ使用率」として 1 本で表示するのが実態に忠実。
 (vLLM は `--gpu-memory-utilization 0.7 --kv-cache 24G` 等でこのプールを大半占有しているため、
 使用率が高めに出るのが正常。必要に応じて vLLM プロセスの RSS を「アプリ占有」として分離表示も可能)
 
@@ -132,7 +132,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 |---|---|---|---|
 | CPU負荷 | `/proc/stat` の idle 差分(または psutil) | loadavg 0.31 | OK |
 | CPU温度 | `/sys/class/thermal/thermal_zone0-6` (acpitz) | 36.8〜39.8℃ | OK |
-| System Memoryの使用率 | `/proc/meminfo` (MemTotal − MemAvailable) | 121Gi 中 約102Gi 使用 | 統合メモリとして表示 |
+| 統合メモリの使用率 | `/proc/meminfo` (MemTotal − MemAvailable) | 121Gi 中 約102Gi 使用 | 統合メモリとして表示 |
 | GPU負荷 | `nvidia-smi --query-gpu=utilization.gpu` | 0% | OK |
 | GPU温度 | `nvidia-smi --query-gpu=temperature.gpu` | 37〜38℃ | OK |
 | GPU電力/クロック(追加) | `nvidia-smi power.draw / clocks.sm` | 11.4W / 2398MHz | OK |
@@ -673,4 +673,21 @@ cd /home/cliclie/DGXSparkUtil/api
   (フロントはブラウザのリロードのみ)。
 - 検証: `metrics.collect()` で `net_down_mbps`/`net_up_mbps` が正しく返ること
   (デフォルトIF=`enP7s7`)、JS 構文チェックを確認済み。
+
+## 実装メモ(2026-09-29)
+
+- **統合メモリゲージ(`g-mem`)の表示改善**:
+  - ゲージタイトル「System Memory」→「統合メモリ」に変更(GB10 の CPU/GPU 共有メモリ構成に合わせる)。
+  - 中央の使用率に % 単位を追加(`unit: ""` → `"%"`、例: `75.2` → `75.2%`)。
+  - メーター内に空きメモリの行(使用率の 2 行目、例: `空き 29.7 GiB`)を追加。
+    空き量はフロント側で `mem_total_gib - mem_used_gib` を算出(API 変更なし)。
+  - 下部サブ行は使用/総量(例: `91.8 / 121.6 GiB`)に戻した。
+- **`Gauge` クラスに `subVal` フックを追加(単一値ゲージのメーター内 2 行目)**:
+  単一値ゲージで `subVal(m)` を定義すると中央値の直下に 2 行目を描画する。
+  CSS `.gval-sub` は `position: absolute; top: 100%` で 2 行目をメイン値の下端に吊り下げるため、
+  メイン値は左右の 1 行ゲージと同一の高さに揃う(2 行ブロックの中央揃えで
+  メイン値が上にずれる問題の回避)。文字色は `var(--text)`(白系)。
+- 反映: フロントのみ変更で API 変更なし。ブラウザのリロードのみで反映。
+- 検証: JS 構文(テンプレートリテラルの整合)と CSS 位置確認(2 行目は canvas 内
+  63〜77px 付近でアーチと重ならない)を確認済み。
 
