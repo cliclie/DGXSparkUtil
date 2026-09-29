@@ -83,6 +83,7 @@ section > h2 {
 .gauge .gval .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
 .gauge .gval.gval-dual { font-size: 12px; line-height: 1.3; top: 77%; }
 .gauge .gval .gval-line { white-space: nowrap; }
+.gauge .gval .gval-sub { position: absolute; top: 100%; left: 0; right: 0; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text); }
 .gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 4px; min-height: 14px; }
 .ok { color: var(--green); }
 .warn { color: var(--yellow); }
@@ -550,7 +551,8 @@ class Gauge {
     } else {
       this.valEl.innerHTML =
         (v == null ? "-" : this.def.fmt(v)) +
-        (this.def.unit ? `<span class="unit">${this.def.unit}</span>` : "");
+        (this.def.unit ? `<span class="unit">${this.def.unit}</span>` : "") +
+        (this.def.subVal ? `<div class="gval-line gval-sub">${this.def.subVal(m)}</div>` : "");
     }
     this.subEl.textContent = this.def.sub ? this.def.sub(m) : "";
   }
@@ -629,10 +631,12 @@ const GAUGE_DEFS = [
     get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1), sub: (m) => (m.cpu_cores ? m.cpu_cores + " cores" : "") },
   { id: "g-cpu-temp", title: "CPU 温度", max: 100, unit: "°C", color: "#f85149",
     get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
-  { id: "g-mem", title: "System Memory", max: 100, unit: "", color: "#3fb950",
+  { id: "g-mem", title: "統合メモリ", max: 100, unit: "%", color: "#3fb950",
     bg: "rgba(63,185,80,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
     dotBg: "rgba(63,185,80,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
-    get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
+    get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1),
+    subVal: (m) => `空き ${(m.mem_total_gib - m.mem_used_gib).toFixed(1)} GiB`, // メーター内2行目
+    sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
   { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#d29922",
     bg: "rgba(210,153,34,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
     dotBg: "rgba(210,153,34,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
