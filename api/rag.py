@@ -107,12 +107,14 @@ def _container_state(name: str) -> dict:
             timeout=10,
         )
         c = json.loads(r.stdout)[0]
-        created = c.get("Created", "")
+        # 稼働時間の起点は State.StartedAt(最後に起動した日時)。
+        # Created はコンテナ作成時のみで、再起動しても更新されないため使わない。
+        started = c.get("State", {}).get("StartedAt", "")
         now = time.time()
         uptime = None
-        if c.get("State", {}).get("Running") and created:
+        if c.get("State", {}).get("Running") and started:
             try:
-                t = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                t = datetime.fromisoformat(started.replace("Z", "+00:00"))
                 uptime = max(0.0, now - t.timestamp())
             except ValueError:
                 uptime = None
