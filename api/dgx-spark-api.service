@@ -5,15 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=cliclie
-Group=cliclie
-WorkingDirectory=/home/cliclie/DGXSparkUtil/api
-ExecStartPre=/bin/sh -c 'test -x /home/cliclie/DGXSparkUtil/api/venv/bin/python || (cd /home/cliclie/DGXSparkUtil/api && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
-ExecStart=/home/cliclie/DGXSparkUtil/api/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080
+User=__USER__
+Group=__USER__
+WorkingDirectory=__API_DIR__
+ExecStartPre=/bin/sh -c 'test -x __API_DIR__/venv/bin/python || (cd __API_DIR__ && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
+ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=5
-StandardOutput=append:/home/cliclie/DGXSparkUtil/api/server.log
-StandardError=append:/home/cliclie/DGXSparkUtil/api/server.log
+StandardOutput=append:__API_DIR__/server.log
+StandardError=append:__API_DIR__/server.log
 
 [Install]
 WantedBy=multi-user.target

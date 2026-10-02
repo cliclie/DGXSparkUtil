@@ -314,7 +314,7 @@ table.params td input[readonly] { color: var(--muted); }
 </head>
 <body>
 <header>
-  <h1>DGX Spark Monitor</h1>
+  <h1 id="hdr-title">DGX Spark Monitor</h1>
   <span id="clock"></span>
   <span id="pstate"></span>
 </header>
@@ -368,7 +368,7 @@ table.params td input[readonly] { color: var(--muted); }
   </section>
 
   <section>
-    <h2>RAG (sociax-rag)</h2>
+    <h2>RAG (sociax-rag) <span id="rag-excl-note" style="display:none;color:var(--muted);font-size:12px;font-weight:400;">※ LLM ⇔ RAG は VRAM 排他</span></h2>
     <div id="rag-panel">
       <div id="rag-headline">
         <div class="item"><span class="k">Embedding (8010)</span><span class="v" id="r-emb">-</span></div>
@@ -387,6 +387,7 @@ table.params td input[readonly] { color: var(--muted); }
 <div class="modal hidden" id="modal-switch">
   <div class="modal-box">
     <h3>モデル切替</h3>
+    <div id="switch-warn" style="display:none;color:var(--red);font-size:12px;margin:4px 0;white-space:pre-line;"></div>
     <div class="model-list" id="model-list"></div>
     <div class="job-log" id="switch-log"></div>
     <div class="modal-actions">
@@ -441,7 +442,7 @@ table.params td input[readonly] { color: var(--muted); }
 <div class="modal hidden" id="modal-rag">
   <div class="modal-box">
     <h3 id="rag-modal-title">RAG 起動/停止</h3>
-    <p id="rag-msg"></p>
+    <p id="rag-msg" style="white-space:pre-line;"></p>
     <div class="job-log" id="rag-log"></div>
     <div class="modal-actions">
       <button id="rag-cancel">キャンセル</button>
@@ -478,6 +479,13 @@ table.params td input[readonly] { color: var(--muted); }
 const API = "";  // 同一オリジン (FastAPI が front/ を配信)
 const MAX_POINTS = 4500;   // 3時間 / 2秒
 const POLL_MS = 2000;
+
+// プラットフォーム情報 (/api/platform で取得。既定は DGX Spark 挙動 = 従来動作)
+// memory_mode: unified=統合メモリ1枚 / discrete=RAM+VRAM 2枚
+let PLAT = {
+  platform: "dgx-spark", label: "DGX Spark", hostname: "",
+  memory_mode: "unified", net_max_mbps: 10000, exclusive_llm_rag: false,
+};
 const RANGE_SECS = { "30m": 1800, "3h": 10800, all: Infinity };
 
 Chart.defaults.color = "#8b949e";
@@ -489,7 +497,7 @@ const series = {
   ts: [],
   labels: [],
   cpuLoad: [], cpuTemp: [],
-  memUsed: [],
+  memUsed: [], vramUsed: [],
   gpuLoad: [], gpuTemp: [], gpuPower: [], gpuClock: [],
   diskUsed: [],
   diskRead: [], diskWrite: [],
@@ -501,6 +509,7 @@ function pushPoint(ts, m) {
   series.cpuLoad.push(m.cpu_load_pct);
   series.cpuTemp.push(m.cpu_temp_c);
   series.memUsed.push(m.mem_used_pct);
+  series.vramUsed.push(m.vram_used_pct);
   series.gpuLoad.push(m.gpu_load_pct);
   series.gpuTemp.push(m.gpu_temp_c);
   series.gpuPower.push(m.gpu_power_w);
@@ -531,7 +540,7 @@ function viewArrays() {
   return {
     labels: sl(series.labels),
     cpuLoad: sl(series.cpuLoad), cpuTemp: sl(series.cpuTemp),
-    memUsed: sl(series.memUsed),
+    memUsed: sl(series.memUsed), vramUsed: sl(series.vramUsed),
     gpuLoad: sl(series.gpuLoad), gpuTemp: sl(series.gpuTemp), gpuPower: sl(series.gpuPower),
     gpuClock: sl(series.gpuClock),
     diskUsed: sl(series.diskUsed),
@@ -558,6 +567,7 @@ class Gauge {
     this.ctx = document.getElementById(id).getContext("2d");
     const wrap = document.getElementById(id).parentElement; // .gcanvas
     const card = wrap.parentElement; // .gauge
+    this.cardEl = card; // 項目未提供時の非表示制御用
     this.valEl = document.createElement("div");
     this.valEl.className = def.dual ? "gval gval-dual" : "gval";
     wrap.appendChild(this.valEl);
@@ -654,65 +664,118 @@ class Gauge {
   }
 }
 
-const GAUGE_DEFS = [
-  { id: "g-cpu-load", title: "CPU 負荷", max: 100, unit: "%", color: "#58a6ff",
-    dotBg: "rgba(88,166,255,.10)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
-    get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1), sub: (m) => (m.cpu_cores ? m.cpu_cores + " cores" : "") },
-  { id: "g-cpu-temp", title: "CPU 温度", max: 100, unit: "°C", color: "#f85149",
-    get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
-  { id: "g-mem", title: "統合メモリ", max: 100, unit: "%", color: "#3fb950",
-    bg: "rgba(63,185,80,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
-    dotBg: "rgba(63,185,80,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
-    get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1),
-    subVal: (m) => `空き ${(m.mem_total_gib - m.mem_used_gib).toFixed(1)} GiB`, // メーター内2行目
-    sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
-  { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#d29922",
-    bg: "rgba(210,153,34,.10)", // タイル背景=線グラフの塗り潰し色を10%透過で
-    dotBg: "rgba(210,153,34,.30)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
-    get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0), sub: () => "" },
-  { id: "g-gpu-temp", title: "GPU 温度", max: 100, unit: "°C", color: "#ff7b72",
-    get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
-  { id: "g-gpu-power", title: "GPU 電力", max: 140, unit: "W", color: "#bc8cff",
-    get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1), sub: () => "上限 140 W (GB10 TDP)" },
-  { id: "g-gpu-clock", title: "GPU クロック", max: 3003, unit: "MHz", color: "#8b949e",
-    zoneStops: [2520 / 3003, 2700 / 3003], // 緑≤2520 / 黄≤2700 / 赤>2700 MHz (運用実測値)
-    get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0), sub: () => "最大 3003 MHz" },
-  { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
-    get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
-  { id: "g-disk-io", title: "ストレージ負荷", dual: true, max: 5000, unit: "MB/s",
-    colorA: "#56d364", colorB: "#e3b341", labelA: "読込", labelB: "書込",
-    getA: (m) => m.disk_read_mbps, getB: (m) => m.disk_write_mbps,
-    fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
-  { id: "g-net", title: "ネットワーク負荷", dual: true, max: 10000, unit: "Mbps",
-    colorA: "#58a6ff", colorB: "#bc8cff", labelA: "下り", labelB: "上り",
-    getA: (m) => m.net_down_mbps, getB: (m) => m.net_up_mbps,
-    fmt: (v) => v.toFixed(0), sub: () => "上限 10 Gbps" },
-];
+// プラットフォーム別ゲージ定義 (PLAT.memory_mode / net_max_mbps に応じる)
+function gaugeDefs() {
+  const discrete = PLAT.memory_mode === "discrete";
+  const netMax = PLAT.net_max_mbps || 10000;
+  const defs = [
+    { id: "g-cpu-load", title: "CPU 負荷", max: 100, unit: "%", color: "#58a6ff",
+      dotBg: "rgba(88,166,255,.10)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
+      get: (m) => m.cpu_load_pct, fmt: (v) => v.toFixed(1), sub: (m) => (m.cpu_cores ? m.cpu_cores + " cores" : "") },
+    { id: "g-cpu-temp", title: "CPU 温度", max: 100, unit: "°C", color: "#f85149",
+      get: (m) => m.cpu_temp_c, fmt: (v) => v.toFixed(0), sub: () => "上限 100°C" },
+  ];
+  if (discrete) {
+    // atom2 (R9700): RAM と VRAM は別物 → ゲージ 2 枚構成
+    defs.push(
+      { id: "g-ram", title: "RAM", max: 100, unit: "%", color: "#3fb950",
+        bg: "rgba(63,185,80,.10)", dotBg: "rgba(63,185,80,.30)",
+        get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1),
+        subVal: (m) => `空き ${(m.mem_total_gib - m.mem_used_gib).toFixed(1)} GiB`,
+        sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` },
+      { id: "g-vram", title: "VRAM", max: 100, unit: "%", color: "#39c5cf",
+        bg: "rgba(57,197,207,.10)", dotBg: "rgba(57,197,207,.30)",
+        get: (m) => m.vram_used_pct, fmt: (v) => v.toFixed(1),
+        subVal: (m) => `空き ${(m.vram_total_gib - m.vram_used_gib).toFixed(1)} GiB`,
+        sub: (m) => `${m.vram_used_gib.toFixed(1)} / ${m.vram_total_gib.toFixed(1)} GiB` });
+  } else {
+    // DGX Spark (GB10): CPU/GPU 共有メモリ → 「統合メモリ」1 枚 (従来どおり)
+    defs.push(
+      { id: "g-mem", title: "統合メモリ", max: 100, unit: "%", color: "#3fb950",
+        bg: "rgba(63,185,80,.10)", dotBg: "rgba(63,185,80,.30)",
+        get: (m) => m.mem_used_pct, fmt: (v) => v.toFixed(1),
+        subVal: (m) => `空き ${(m.mem_total_gib - m.mem_used_gib).toFixed(1)} GiB`, // メーター内2行目
+        sub: (m) => `${m.mem_used_gib.toFixed(1)} / ${m.mem_total_gib.toFixed(1)} GiB` });
+  }
+  defs.push(
+    { id: "g-gpu-load", title: "GPU 負荷", max: 100, unit: "%", color: "#d29922",
+      bg: "rgba(210,153,34,.10)", dotBg: "rgba(210,153,34,.30)",
+      get: (m) => m.gpu_load_pct, fmt: (v) => v.toFixed(0), sub: () => "" },
+    { id: "g-gpu-temp", title: "GPU 温度", max: discrete ? 110 : 100, unit: "°C", color: "#ff7b72",
+      get: (m) => m.gpu_temp_c, fmt: (v) => v.toFixed(0),
+      sub: (m) => `上限 ${m.gpu_temp_crit_c ? m.gpu_temp_crit_c.toFixed(0) : (discrete ? 110 : 100)}°C` },
+    { id: "g-gpu-power", title: "GPU 電力", max: discrete ? 300 : 140, unit: "W", color: "#bc8cff",
+      get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1),
+      sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W ${discrete ? "(R9700 PPT)" : "(GB10 TDP)"}` },
+    { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
+      zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
+      get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
+      sub: (m) => `最大 ${m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003)} MHz` },
+    { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
+      get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
+    { id: "g-disk-io", title: "ストレージ負荷", dual: true, max: 5000, unit: "MB/s",
+      colorA: "#56d364", colorB: "#e3b341", labelA: "読込", labelB: "書込",
+      getA: (m) => m.disk_read_mbps, getB: (m) => m.disk_write_mbps,
+      fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
+    { id: "g-net", title: "ネットワーク負荷", dual: true, max: netMax, unit: "Mbps",
+      colorA: "#58a6ff", colorB: "#bc8cff", labelA: "下り", labelB: "上り",
+      getA: (m) => m.net_down_mbps, getB: (m) => m.net_up_mbps,
+      fmt: (v) => v.toFixed(0),
+      sub: () => `上限 ${netMax >= 1000 ? netMax / 1000 + " Gbps" : netMax + " Mbps"}` },
+  );
+  return defs;
+}
 
-// 半円ゲージ DOM 生成
-document.getElementById("host-cards").innerHTML = GAUGE_DEFS.map((d) => {
-  const dots = d.dual
-    ? `<span class="gdot" style="background:${d.colorA}"></span><span class="gdot" style="background:${d.colorB}"></span>`
-    : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
-  return `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
-     <div class="gtitle">${dots}${d.title}</div>
-     <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
-     <div class="gsub"></div>
-   </div>`;
-}).join("");
+let gages = [];
 
-const gages = GAUGE_DEFS.map((d) => new Gauge(d.id, d));
+// 半円ゲージ DOM 生成 (プラットフォーム確定後に呼ぶ)
+function buildHostCards() {
+  const defs = gaugeDefs();
+  document.getElementById("host-cards").innerHTML = defs.map((d) => {
+    const dots = d.dual
+      ? `<span class="gdot" style="background:${d.colorA}"></span><span class="gdot" style="background:${d.colorB}"></span>`
+      : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
+    return `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
+       <div class="gtitle">${dots}${d.title}</div>
+       <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
+       <div class="gsub"></div>
+     </div>`;
+  }).join("");
+  gages = defs.map((d) => new Gauge(d.id, d));
+}
+
+// 上限の実測値補正: amdgpu sysfs の cap/crit/max があればプラットフォーム既定値を上書き
+function tuneGauge(g, m) {
+  const d = g.def;
+  let max = null;
+  if (d.id === "g-gpu-power" && m.gpu_power_cap_w) max = m.gpu_power_cap_w;
+  if (d.id === "g-gpu-clock" && m.gpu_clock_max_mhz) max = m.gpu_clock_max_mhz;
+  if (d.id === "g-gpu-temp" && m.gpu_temp_crit_c) max = m.gpu_temp_crit_c;
+  if (max !== null && max !== d.max) {
+    d.max = max;
+    g._last = null; // 上限変更時はキャッシュ無効化で再描画
+    if (d.id === "g-gpu-clock" && PLAT.memory_mode === "discrete") d.zoneStops = undefined;
+  }
+}
 
 function renderGauges(m) {
   for (const g of gages) {
     const d = g.def;
+    tuneGauge(g, m);
+    // バックエンド未提供の項目 (undefined) はゲージ自体を非表示。
+    // null は差分計測初回等の「測定待ち」なので "-" 表示で可視のまま。
+    const missing = d.dual
+      ? (d.getA(m) === undefined && d.getB(m) === undefined)
+      : d.get(m) === undefined;
+    if (g.cardEl) g.cardEl.style.display = missing ? "none" : "";
+    if (missing) continue;
     g.set(d.dual ? { a: d.getA(m), b: d.getB(m) } : d.get(m), m);
   }
 }
 
 // ------------------------------------------------------------- 統合時系列グラフ
-// 100% 換算: CPU温度=100°C / ストレージI/O=5GB/s / GPU電力=140W (GB10 TDP) / GPUクロック=3003MHz (HW上限)
-const NORM = { cpuTemp: 100, gpuPower: 140, gpuClock: 3003, diskIO: 5000 };
+// 100% 換算: CPU温度=100°C / ストレージI/O=5GB/s / GPU電力=GB10 140W (TDP)・R9700 300W (PPT) /
+// GPUクロック=GB10 3003MHz・R9700 2350MHz (HW上限)
 const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
 
 const lineDS = (label, data, color, fill) => ({
@@ -722,50 +785,68 @@ const lineDS = (label, data, color, fill) => ({
   spanGaps: true,
 });
 
-const mainChart = new Chart(document.getElementById("ch-main"), {
-  type: "line",
-  data: {
-    labels: [],
-    datasets: [
-      lineDS("CPU負荷 %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
-      lineDS("CPU温度 %", toPct(series.cpuTemp, NORM.cpuTemp), "#f85149"),
-      { ...lineDS("メモリ使用率 %", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
-      { ...lineDS("GPU負荷 %", series.gpuLoad, "#d29922", "rgba(210,153,34,.30)"), fill: true },
-      lineDS("GPU温度 %", toPct(series.gpuTemp, NORM.cpuTemp), "#ff7b72"),
-      lineDS("GPU電力 %", toPct(series.gpuPower, NORM.gpuPower), "#bc8cff"),
-      lineDS("GPUクロック %", toPct(series.gpuClock, NORM.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
-      lineDS("ストレージ使用率 %", series.diskUsed, "#79c0ff"),
-      lineDS("ストレージ読込 %", toPct(series.diskRead, NORM.diskIO), "#56d364"),
-      lineDS("ストレージ書込 %", toPct(series.diskWrite, NORM.diskIO), "#e3b341"),
-    ],
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    interaction: { mode: "index", intersect: false },
-    plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
-    scales: {
-      x: { ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } } },
-      y: { min: 0, max: 100, ticks: { callback: (v) => v + "%" } },
+let mainChart = null;   // buildMainChart() で生成 (プラットフォーム確定後)
+let chartDs = null;     // ラベル参照用のデータセット辞書
+let CHART_NORM = null;  // 100% 換算基準
+
+function buildMainChart() {
+  const discrete = PLAT.memory_mode === "discrete";
+  CHART_NORM = { cpuTemp: 100, gpuPower: discrete ? 300 : 140, gpuClock: discrete ? 2350 : 3003, diskIO: 5000 };
+  const N = CHART_NORM;
+  chartDs = {
+    cpuLoad: lineDS("CPU負荷 %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
+    cpuTemp: lineDS("CPU温度 %", toPct(series.cpuTemp, N.cpuTemp), "#f85149"),
+    memUsed: { ...lineDS(discrete ? "RAM使用率 %" : "メモリ使用率 %", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
+    gpuLoad: { ...lineDS("GPU負荷 %", series.gpuLoad, "#d29922", "rgba(210,153,34,.30)"), fill: true },
+    gpuTemp: lineDS("GPU温度 %", toPct(series.gpuTemp, N.cpuTemp), "#ff7b72"),
+    gpuPower: lineDS("GPU電力 %", toPct(series.gpuPower, N.gpuPower), "#bc8cff"),
+    gpuClock: lineDS("GPUクロック %", toPct(series.gpuClock, N.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
+    diskUsed: lineDS("ストレージ使用率 %", series.diskUsed, "#79c0ff"),
+    diskRead: lineDS("ストレージ読込 %", toPct(series.diskRead, N.diskIO), "#56d364"),
+    diskWrite: lineDS("ストレージ書込 %", toPct(series.diskWrite, N.diskIO), "#e3b341"),
+  };
+  const datasets = [chartDs.cpuLoad, chartDs.cpuTemp, chartDs.memUsed];
+  if (discrete) {
+    // atom2: VRAM は RAM と別系列 (シアン=VRAM ゲージと同色)
+    chartDs.vramUsed = { ...lineDS("VRAM使用率 %", series.vramUsed, "#39c5cf", "rgba(57,197,207,.30)"), fill: true };
+    datasets.push(chartDs.vramUsed);
+  }
+  datasets.push(chartDs.gpuLoad, chartDs.gpuTemp, chartDs.gpuPower, chartDs.gpuClock,
+    chartDs.diskUsed, chartDs.diskRead, chartDs.diskWrite);
+  mainChart = new Chart(document.getElementById("ch-main"), {
+    type: "line",
+    data: { labels: [], datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } } },
+        y: { min: 0, max: 100, ticks: { callback: (v) => v + "%" } },
+      },
     },
-  },
-});
+  });
+}
 
 function refreshMainChart() {
+  if (!mainChart) return;
   const v = viewArrays();
+  const N = CHART_NORM;
+  const ds = chartDs;
   mainChart.data.labels = v.labels;
-  const ds = mainChart.data.datasets;
-  ds[0].data = v.cpuLoad;
-  ds[1].data = toPct(v.cpuTemp, NORM.cpuTemp);
-  ds[2].data = v.memUsed;
-  ds[3].data = v.gpuLoad;
-  ds[4].data = toPct(v.gpuTemp, NORM.cpuTemp);
-  ds[5].data = toPct(v.gpuPower, NORM.gpuPower);
-  ds[6].data = toPct(v.gpuClock, NORM.gpuClock);
-  ds[7].data = v.diskUsed;
-  ds[8].data = toPct(v.diskRead, NORM.diskIO);
-  ds[9].data = toPct(v.diskWrite, NORM.diskIO);
+  ds.cpuLoad.data = v.cpuLoad;
+  ds.cpuTemp.data = toPct(v.cpuTemp, N.cpuTemp);
+  ds.memUsed.data = v.memUsed;
+  if (ds.vramUsed) ds.vramUsed.data = v.vramUsed;
+  ds.gpuLoad.data = v.gpuLoad;
+  ds.gpuTemp.data = toPct(v.gpuTemp, N.cpuTemp);
+  ds.gpuPower.data = toPct(v.gpuPower, N.gpuPower);
+  ds.gpuClock.data = toPct(v.gpuClock, N.gpuClock);
+  ds.diskUsed.data = v.diskUsed;
+  ds.diskRead.data = toPct(v.diskRead, N.diskIO);
+  ds.diskWrite.data = toPct(v.diskWrite, N.diskIO);
   mainChart.update("none");
 }
 
@@ -890,6 +971,15 @@ function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 
 function renderModelList() {
   const st = currentStatus || { containers: [], active: null };
+  // 排他環境: RAG embedding 稼働中に LLM へ切替すると embedding が停止される警告
+  const warn = document.getElementById("switch-warn");
+  if (warn) {
+    const on = !!st.rag_running;
+    warn.style.display = on ? "" : "none";
+    warn.textContent = on
+      ? "注意: 稼働中の RAG embedding を停止して切り替えます (VRAM 排他)"
+      : "";
+  }
   // 切替ジョブ実行中なら kind=switch の情報のみ状態表示に使う
   const sw = st.switching && st.switching.kind === "switch" ? st.switching : null;
   const list = document.getElementById("model-list");
@@ -1035,13 +1125,19 @@ function renderRag(st) {
     if (s.health) return ["稼働中 (API応答)", "up"];
     return ["起動中… (API応答なし)", "hot"];
   };
-  const [eText, eCls] = stateOf(emb);
+  const [eText0, eCls0] = stateOf(emb);
+  // 排他環境: LLM 稼働中による embedding 停止は「LLM 排他で停止」と表示
+  const eText = st.blocked_by_llm && !emb.running ? "停止中 (LLM 排他)" : eText0;
+  const eCls = st.blocked_by_llm && !emb.running ? "down" : eCls0;
   const [qText, qCls] = stateOf(qdr);
   setR("r-emb", eText, eCls);
   setR("r-qdr", qText, qCls);
   setR("r-uptime", emb.uptime_str || qdr.uptime_str || "-");
-  // 起動: 完全に停止中かつジョブ実行中でないときのみ / 停止: 稼働中かつジョブ実行中でないときのみ
-  document.getElementById("btn-rag-start").disabled = !!job || st.running;
+  // 起動: 排他環境 (atom2) は Qdrant 常時稼働のため embedding 基準 / それ以外は従来どおりいずれか稼働で不可
+  const startBlocked = PLAT.exclusive_llm_rag
+    ? emb.running && qdr.running
+    : st.running;
+  document.getElementById("btn-rag-start").disabled = !!job || startBlocked;
   document.getElementById("btn-rag-stop").disabled = !!job || !st.running;
 }
 
@@ -1054,7 +1150,9 @@ function openRagModal(action) {
     action === "start" ? "RAG 起動" : "RAG 停止";
   document.getElementById("rag-msg").textContent =
     action === "start"
-      ? "RAG環境 (embedding + qdrant) を起動しますか?"
+      ? (PLAT.exclusive_llm_rag
+          ? "RAG環境 (embedding + qdrant) を起動しますか?\n稼働中の LLM は自動停止されます (VRAM 排他)。"
+          : "RAG環境 (embedding + qdrant) を起動しますか?")
       : "RAG環境 (embedding + qdrant) を停止しますか?";
   document.getElementById("rag-cancel").style.display = "";
   document.getElementById("rag-go").textContent = action === "start" ? "起動する" : "停止する";
@@ -1488,18 +1586,38 @@ function renderPstate(m) {
 }
 
 // ------------------------------------------------------------- 起動
+function applyPlatform() {
+  const name = PLAT.hostname || PLAT.label;
+  const h1 = document.getElementById("hdr-title");
+  if (h1) h1.textContent = name + " Monitor";
+  document.title = name + " Monitor";
+  if (PLAT.exclusive_llm_rag) {
+    const note = document.getElementById("rag-excl-note");
+    if (note) note.style.display = "";
+  }
+}
+
 (async () => {
+  // プラットフォーム取得 (失敗時は既定 = DGX Spark/unified 挙動で継続)
+  try {
+    PLAT = Object.assign(PLAT, await fetchJson(API + "/api/platform"));
+  } catch (e) {
+    console.error("platform fetch failed", e);
+  }
+  applyPlatform();
+  buildHostCards();
+  buildMainChart();
   // ページリロード後、サーバー側が保持する直近30分の履歴で時系列グラフをバックフィルする
   try {
     const hist = await fetchJson(API + "/api/history");
     for (const m of hist) pushPoint(m.timestamp, m);
-    refreshMainChart();
   } catch (e) {
     console.error("history backfill failed", e);
   }
+  refreshMainChart();
+  poll();
+  setInterval(poll, POLL_MS);
 })();
-poll();
-setInterval(poll, POLL_MS);
 </script>
 </body>
 </html>

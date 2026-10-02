@@ -1,10 +1,11 @@
 """RAG環境 (sociax-rag) の状態モニタリング / 起動 / 停止。
 
-WhitebearATOM2 の RAG 環境との共存のため、本機の RAG(embedding vLLM + Qdrant)を
-Web UI から起動/停止できるようにする。
+本機の RAG(embedding vLLM + Qdrant)を Web UI から起動/停止できるようにする。
 
 - 状態: docker compose ps / inspect + embedding /v1/models, qdrant REST の健全性
 - 起動: docker compose up -d (バックグラウンドジョブ)
+  ※ 排他環境 (atom2 / VRAM 32GB) では switch_models.sh rag を経由し、
+    稼働中 LLM を停止してから embedding を起動する(Qdrant は up -d で補完)
 - 停止: docker compose stop (バックグラウンドジョブ。Qdrant は volume に永続化済み)
 - ジョブ状態は vllm.py の _job と独立(モデル切替と RAG 操作の並行実行を許可)
 """
@@ -18,7 +19,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-RAG_DIR = Path("/home/cliclie/llm/compose/sociax-rag")
+import config
+
+# パスは config (プラットフォーム検出) に集約
+RAG_DIR = config.RAG_DIR
 COMPOSE_FILE = RAG_DIR / "compose.yaml"
 ENV_FILE = RAG_DIR / ".env"
 
@@ -129,6 +133,28 @@ def _container_state(name: str) -> dict:
         return {}
 
 
+def embedding_running() -> bool:
+    """embedding コンテナが稼働中か (vllm.py の排他警告用)。"""
+    name = _container_names().get("embedding")
+    return bool(name and _container_state(name).get("running"))
+
+
+def _llm_running() -> bool:
+    """LLM コンテナのいずれかが稼働中か (排他環境の状態表示用)。
+
+    遅延 import: vllm.py は get_status で rag を参照する循環構成。
+    """
+    try:
+        import vllm
+
+        profiles = vllm._load_profiles()
+        return any(
+            _container_state(p["container"]).get("running") for p in profiles.values()
+        )
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- 状態
 
 def _switching_info() -> dict | None:
@@ -167,6 +193,11 @@ def get_status() -> dict:
         s["running"] and s["health"] for s in out["services"].values()
     )
     out["switching"] = _switching_info()
+    # 排他環境 (atom2): LLM 稼働中かつ embedding 停止中なら「LLM 排他で停止」状態
+    if config.EXCLUSIVE_LLM_RAG:
+        llm = _llm_running()
+        out["llm_running"] = llm
+        out["blocked_by_llm"] = llm and not out["services"]["embedding"]["running"]
     return out
 
 
@@ -236,9 +267,21 @@ def job_status() -> dict:
 
 
 def start_rag() -> dict:
-    """RAG環境を起動する(バックグラウンド)。既に稼働中の場合は compose が何もしない。"""
+    """RAG環境を起動する(バックグラウンド)。既に稼働中の場合は compose が何もしない。
+
+    排他環境 (atom2) では switch_models.sh rag を実行し、稼働中 LLM を停止してから
+    embedding を起動する(スクリプトが API 応答まで待機)。完了後に qdrant も補完起動。
+    """
     if not COMPOSE_FILE.is_file():
         raise ValueError(f"{COMPOSE_FILE} が見つかりません")
+    switch = config.COMPOSE_DIR / "switch_models.sh"
+    if config.EXCLUSIVE_LLM_RAG and switch.is_file():
+        cmd = [
+            "bash", "-c",
+            "bash " + str(switch) + " rag && "
+            + " ".join(_compose_cmd("up", "-d")),
+        ]
+        return _start_job("start", cmd)
     return _start_job("start", _compose_cmd("up", "-d"))
 
 
