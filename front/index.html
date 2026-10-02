@@ -1587,7 +1587,8 @@ function renderPstate(m) {
 
 // ------------------------------------------------------------- 起動
 function applyPlatform() {
-  const name = PLAT.hostname || PLAT.label;
+  // dgx-spark は固定ラベル「DGX Spark」、atom2 はホスト名 (例: WhitebearATOM2)
+  const name = PLAT.platform === "dgx-spark" ? PLAT.label : (PLAT.hostname || PLAT.label);
   const h1 = document.getElementById("hdr-title");
   if (h1) h1.textContent = name + " Monitor";
   document.title = name + " Monitor";
