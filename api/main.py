@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import config
 import metrics as host_metrics
 import rag
 import vllm
@@ -83,6 +84,12 @@ class ParamsBody(BaseModel):
 @app.get("/api/metrics")
 def api_metrics() -> dict:
     return host_metrics.collect()
+
+
+@app.get("/api/platform")
+def api_platform() -> dict:
+    """プラットフォーム情報 (フロントの表示切替用)。"""
+    return config.info()
 
 
 @app.get("/api/vllm/status")

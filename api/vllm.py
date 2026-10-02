@@ -14,7 +14,10 @@ import subprocess
 import time
 from pathlib import Path
 
-COMPOSE_DIR = Path("/home/cliclie/llm/compose")
+import config
+
+# パス・排他有無は config (プラットフォーム検出) に集約
+COMPOSE_DIR = config.COMPOSE_DIR
 COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yml"
 SWITCH_SCRIPT = COMPOSE_DIR / "switch_models.sh"
 
@@ -503,6 +506,16 @@ def get_status() -> dict:
             running_profile = profile
         out["containers"].append({"profile": profile, "container": info["container"], **st})
 
+    # 排他環境 (atom2): RAG embedding の稼働有無をモデル切替警告表示用に付与
+    # (遅延 import: rag.py 側も vllm を関数内で参照する循環構成)
+    if config.EXCLUSIVE_LLM_RAG:
+        try:
+            import rag
+
+            out["rag_running"] = rag.embedding_running()
+        except Exception:
+            out["rag_running"] = False
+
     # 切替/再作成ジョブ実行中の状態表示用(停止処理中は稼働コンテナが無いため、
     # 早期 return より前に付与する)
     out["switching"] = _switching_info()
@@ -930,6 +943,28 @@ CLINE_MODEL_TABLE = {
     "mimo9b": {
         "images": True,  # 動的: --limit-mm-per-prompt / --mm-processor-kwargs
         "context_max": 1010000,  # YaRN factor 4.0（Qwen3.5-9B 公式カード推奨値）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    # --- WhitebearATOM2 (R9700 / VRAM 32GB) 用 -----------------
+    "qwen38radiance": {
+        "images": True,  # 動的: --limit-mm-per-prompt
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangrocm": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38gguf": {
+        "images": True,  # 動的: --mmproj
+        "context_max": 262144,
         "max_output_recommended": 8192,
         "max_output_max": 32768,
         "temperature": 0.6,

@@ -2,27 +2,57 @@
 
 データ源:
 - CPU負荷: /proc/stat の idle 差分
-- CPU温度: /sys/class/thermal/thermal_zone* (acpitz, ミリ℃)
-- System Memory(統合メモリ): /proc/meminfo
-- GPU負荷/温度/電力/クロック: nvidia-smi
+- CPU温度: /sys/class/thermal/thermal_zone* (acpitz 優先、x86_pkg_temp フォールバック、ミリ℃)
+- メモリ: /proc/meminfo (DGX Spark は統合メモリ、atom2 は RAM。VRAM は GPU 側で取得)
+- GPU負荷/温度/電力/クロック: config.GPU_BACKEND に応じ nvidia-smi または amdgpu sysfs
 - ストレージ使用率: shutil.disk_usage
-- ストレージ負荷: /proc/diskstats 差分
+- ストレージ負荷: /proc/diskstats 差分 (ルート FS の親デバイスを自動導出)
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
+import config
+
 # 1 セクタ = 512 バイト
 _SECTOR = 512
 
-# ルートファイルシステム (nvme0n1p2) の親デバイス
-_DISK_NAME = "nvme0n1"
 _DISK_MOUNT = "/"
+
+
+def _root_disk_name() -> str:
+    """ルートファイルシステムのブロックデバイス親名を導出する (例: /dev/nvme0n1p2 → nvme0n1)。
+
+    nvme/mmc のパーティション番号サフィックス (pN) と SATA 系の末尾数字 (sda1) を除去する。
+    tmpfs 等の場合は "nvme0n1" にフォールバック(見つからなければ diskstats 系は None になる)。
+    """
+    dev = ""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "/":
+                    dev = parts[0]
+                    break
+    except OSError:
+        pass
+    if not dev.startswith("/dev/"):
+        return "nvme0n1"
+    name = Path(dev).name
+    if re.search(r"p\d+$", name):     # nvme0n1p2 / mmcblk0p1 → pN サフィックスのみ除去
+        name = re.sub(r"p\d+$", "", name)
+    else:                              # sda1 / vda2 → 末尾数字のみ除去
+        name = re.sub(r"\d+$", "", name)
+    return name or "nvme0n1"
+
+
+_DISK_NAME = _root_disk_name()
 
 # 前回サンプル(差分計算用)
 _prev: dict = {
@@ -97,20 +127,23 @@ def _read_net_stats(iface: str):
 
 
 def _read_cpu_temp_c() -> float | None:
-    """acpitz ゾーン全体の最高温度(℃)を返す。"""
-    temps = []
-    for z in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
-        try:
-            if (z / "type").read_text().strip() != "acpitz":
+    """CPU温度(℃)。acpitz ゾーン全体の最高値、無ければ x86_pkg_temp にフォールバック。"""
+    for want in ("acpitz", "x86_pkg_temp"):
+        temps = []
+        for z in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
+            try:
+                if (z / "type").read_text().strip() != want:
+                    continue
+                temps.append(int((z / "temp").read_text()) / 1000.0)
+            except (OSError, ValueError):
                 continue
-            temps.append(int((z / "temp").read_text()) / 1000.0)
-        except (OSError, ValueError):
-            continue
-    return max(temps) if temps else None
+        if temps:
+            return max(temps)
+    return None
 
 
-def _read_gpu() -> dict:
-    """nvidia-smi で GPU メトリクスを取得する。"""
+def _read_gpu_nvidia() -> dict:
+    """nvidia-smi で GPU メトリクスを取得する (DGX Spark / GB10)。"""
     try:
         r = subprocess.run(
             [
@@ -126,6 +159,7 @@ def _read_gpu() -> dict:
             return {}
         u, t, p, c, ps = [x.strip() for x in r.stdout.split(",")]
         return {
+            "gpu_vendor": "nvidia",
             "gpu_load_pct": float(u),
             "gpu_temp_c": float(t),
             "gpu_power_w": float(p),
@@ -136,6 +170,160 @@ def _read_gpu() -> dict:
         return {}
 
 
+_amdgpu_dev: Path | None = None
+
+
+def _find_amdgpu_device() -> Path | None:
+    """amdgpu の DRM device ディレクトリ (/sys/class/drm/cardN/device) を探す。
+
+    hwmon の name が amdgpu のカードを優先し、無ければ gpu_busy_percent の
+    存在する最初のカードを返す。結果はキャッシュする(カード構成は再起動でしか変わらない)。
+    """
+    global _amdgpu_dev
+    if _amdgpu_dev is not None and _amdgpu_dev.is_dir():
+        return _amdgpu_dev
+    fallback: Path | None = None
+    for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+        if not (dev / "gpu_busy_percent").is_file():
+            continue
+        fallback = fallback or dev
+        for h in dev.glob("hwmon/hwmon*"):
+            try:
+                if (h / "name").read_text().strip() == "amdgpu":
+                    _amdgpu_dev = dev
+                    return dev
+            except OSError:
+                continue
+    _amdgpu_dev = fallback
+    return fallback
+
+
+def _read_sysfs_float(path: Path) -> float | None:
+    try:
+        return float(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _amdgpu_hwmon(dev: Path) -> Path | None:
+    for h in sorted(dev.glob("hwmon/hwmon*")):
+        try:
+            if (h / "name").read_text().strip() == "amdgpu":
+                return h
+        except OSError:
+            continue
+    return None
+
+
+def _amdgpu_temp_c(h: Path) -> float | None:
+    """GPU温度(℃)。label=junction のゾーンを優先し、無ければ計測値の最高値。"""
+    best = None
+    junction = None
+    for t in sorted(h.glob("temp*_input")):
+        v = _read_sysfs_float(t)
+        if v is None:
+            continue
+        v /= 1000.0
+        best = v if best is None else max(best, v)
+        try:
+            label = t.with_name(t.name.replace("_input", "_label")).read_text().strip().lower()
+        except OSError:
+            label = ""
+        if label == "junction":
+            junction = max(junction, v) if junction is not None else v
+    return junction if junction is not None else best
+
+
+def _amdgpu_clock_mhz(dev: Path) -> float | None:
+    """現在の GPU クロック(MHz)。hwmon freq (label=sclk) 優先、pp_dpm_sclk の * 行にフォールバック。"""
+    h = _amdgpu_hwmon(dev)
+    if h is not None:
+        for f in sorted(h.glob("freq*_input")):
+            try:
+                label = f.with_name(f.name.replace("_input", "_label")).read_text().strip().lower()
+            except OSError:
+                label = ""
+            if label == "sclk":
+                v = _read_sysfs_float(f)
+                if v is not None:
+                    return v / 1e6
+    try:
+        for ln in (dev / "pp_dpm_sclk").read_text().splitlines():
+            m = re.match(r"^\s*\S+:\s*(\d+)Mhz\s*\*\s*$", ln)
+            if m:
+                return float(m.group(1))
+    except OSError:
+        pass
+    return None
+
+
+def _amdgpu_clock_max_mhz(dev: Path) -> float | None:
+    """pp_dpm_sclk の数値付き行の最大値(ハード上限クロック)。"""
+    vals = []
+    try:
+        for ln in (dev / "pp_dpm_sclk").read_text().splitlines():
+            m = re.match(r"^\s*\d+:\s*(\d+)Mhz", ln)
+            if m:
+                vals.append(float(m.group(1)))
+    except OSError:
+        return None
+    return max(vals) if vals else None
+
+
+def _read_gpu_amdgpu() -> dict:
+    """amdgpu sysfs で GPU メトリクスを取得する (WhitebearATOM2 / R9700)。
+
+    rocm-smi はホストに未インストールのため /sys 直接読み。VRAM は
+    mem_info_vram_used/total (ディスクリート 32GB。統合メモリではない)。
+    """
+    dev = _find_amdgpu_device()
+    if dev is None:
+        return {}
+    out: dict = {"gpu_vendor": "amd"}
+    busy = _read_sysfs_float(dev / "gpu_busy_percent")
+    if busy is not None:
+        out["gpu_load_pct"] = busy
+    h = _amdgpu_hwmon(dev)
+    if h is not None:
+        t = _amdgpu_temp_c(h)
+        if t is not None:
+            out["gpu_temp_c"] = t
+        pw = _read_sysfs_float(h / "power1_average")
+        if pw is not None:
+            out["gpu_power_w"] = pw / 1e6  # µW → W
+        cap = _read_sysfs_float(h / "power1_cap")
+        if cap:
+            out["gpu_power_cap_w"] = cap / 1e6
+        crit = _read_sysfs_float(h / "temp2_crit") or _read_sysfs_float(h / "temp1_crit")
+        if crit:
+            out["gpu_temp_crit_c"] = crit / 1000.0
+    clk = _amdgpu_clock_mhz(dev)
+    if clk is not None:
+        out["gpu_clock_mhz"] = clk
+    clkmax = _amdgpu_clock_max_mhz(dev)
+    if clkmax:
+        out["gpu_clock_max_mhz"] = clkmax
+    vram_total = _read_sysfs_float(dev / "mem_info_vram_total")
+    vram_used = _read_sysfs_float(dev / "mem_info_vram_used")
+    if vram_total and vram_used is not None:
+        out["vram_total_gib"] = vram_total / 2 ** 30
+        out["vram_used_gib"] = vram_used / 2 ** 30
+        out["vram_used_pct"] = vram_used / vram_total * 100.0
+    gtt_total = _read_sysfs_float(dev / "mem_info_gtt_total")
+    gtt_used = _read_sysfs_float(dev / "mem_info_gtt_used")
+    if gtt_total and gtt_used is not None:
+        out["gtt_used_gib"] = gtt_used / 2 ** 30
+        out["gtt_total_gib"] = gtt_total / 2 ** 30
+    return out
+
+
+def _read_gpu() -> dict:
+    """GPU メトリクス取得。バックエンドは config.GPU_BACKEND (nvidia|amdgpu)。"""
+    if config.GPU_BACKEND == "amdgpu":
+        return _read_gpu_amdgpu()
+    return _read_gpu_nvidia()
+
+
 def collect() -> dict:
     """ホストメトリクスのスナップショットを 1 回収集する。
 
@@ -143,7 +331,11 @@ def collect() -> dict:
     初回呼び出しでは None になる。
     """
     now = time.time()
-    out: dict = {"timestamp": now}
+    out: dict = {
+        "timestamp": now,
+        "platform": config.PLATFORM,
+        "memory_mode": config.MEMORY_MODE,
+    }
 
     # --- CPU負荷 (/proc/stat idle 差分) ---
     idle, total = _read_cpu_times()
@@ -159,7 +351,7 @@ def collect() -> dict:
     out["cpu_temp_c"] = _read_cpu_temp_c()
     out["cpu_cores"] = os.cpu_count() or 0
 
-    # --- System Memory(統合メモリ使用率) ---
+    # --- メモリ使用率 (dgx-spark=統合メモリ / atom2=RAM。VRAM は amdgpu 側で取得) ---
     info: dict[str, int] = {}
     with open("/proc/meminfo") as f:
         for line in f:
@@ -173,7 +365,7 @@ def collect() -> dict:
         (mem_total - mem_avail) / mem_total * 100.0 if mem_total else None
     )
 
-    # --- GPU (nvidia-smi) ---
+    # --- GPU (nvidia-smi / amdgpu sysfs) ---
     out.update(_read_gpu())
 
     # --- ストレージ使用率 ---

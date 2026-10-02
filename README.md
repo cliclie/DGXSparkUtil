@@ -30,7 +30,9 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - コンテキストサイズ等のパラメータ値を表示
    - 一部項目は編集可能。編集後はコンテナを再作成して反映
 
-- 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip)
+- 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip) および
+  WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)。
+  プラットフォームは `api/config.py` の自動検出で両環境同一コードで動作する(実装メモ 2026-10-03 参照)
 - 仕組み: クライアントからブラウザでアクセス → ビジュアル表示 → 値の更新はAPI経由
 
 ## 表示スタイル(ゲージ)
@@ -779,4 +781,53 @@ cd /home/cliclie/DGXSparkUtil/api
   注: `api/vllm.py` の `_container_state` も同様に `Created` を起点にしているが、
   vLLM のモデル切替は `--force-recreate` でコンテナを再作成するため `Created` が新しめになり
   顕在化しにくい。今回は RAG のみ修正(vllm.py は変更していない)。
+
+## 実装メモ(2026-10-03)
+
+- **両環境対応(WhitebearATOM2 / AMD R9700 追加)** — 本リポジトリを DGX Spark と
+  whitebearatom2 の両方で動かすリファクタ。プラットフォーム固有値を新規 `api/config.py` に集約し、
+  自動検出 (nvidia-smi あり → `dgx-spark` / amdgpu sysfs あり → `atom2`。
+  環境変数 `DGXUTIL_PLATFORM` / `DGXUTIL_COMPOSE_DIR` / `DGXUTIL_RAG_DIR` で上書き可):
+  - `COMPOSE_DIR`: dgx-spark `/home/cliclie/llm/compose` / atom2 `/home/cliclie/LLM/compose`
+  - `RAG_DIR`: dgx-spark `/home/cliclie/llm/compose/sociax-rag` / atom2 `/home/cliclie/RAG/compose`
+  - `MEMORY_MODE`: unified(統合メモリ 1 枚)/ discrete(RAM + VRAM 2 枚)、`NET_MAX_MBPS` 10000/1000、
+    `EXCLUSIVE_LLM_RAG`(atom2 のみ True: VRAM 32GB のため LLM ⇔ RAG embedding 排他)
+- **`api/metrics.py` GPU バックエンド分割**: `_read_gpu_nvidia`(現行) / `_read_gpu_amdgpu`
+  (rocm-smi 未インストールのため sysfs 直接読み: `gpu_busy_percent`、hwmon `temp*_input`
+  の label=junction 優先、`power1_average`/`power1_cap`(µW)、`freq*_input` label=sclk +
+  `pp_dpm_sclk` フォールバック、`mem_info_vram_used/total`、`mem_info_gtt_*`)。
+  返却 JSON に `platform` / `memory_mode` / `gpu_vendor` / `vram_*` / `gtt_*` /
+  `gpu_power_cap_w` / `gpu_clock_max_mhz` / `gpu_temp_crit_c` を追加。
+  ディスク計測対象は `/proc/mounts` のルートソースから親デバイスを自動導出(nvme0n1p2 → nvme0n1)。
+  CPU温度は acpitz → x86_pkg_temp フォールバック。
+- **新規 API `GET /api/platform`**: フロントの表示切替用(ゲージ構成・上限値・排他注記)。
+- **フロント両対応** (`front/index.html`): ゲージ/グラフの生成をプラットフォーム取得後に実行
+  (`buildHostCards()` / `buildMainChart()`)。discrete 時は「統合メモリ」ゲージの位置に
+  **RAM + VRAM の 2 ゲージ**(VRAM=シアン #39c5cf、書式は統合メモリと同じ: 使用率% +
+  空き GiB / 使用・総量)、時系列グラフにも「VRAM使用率 %」系列を追加。
+  GPU 電力/クロック/温度の上限はプラットフォーム既定値から実測値 (`*_cap_w` /
+  `*_max_mhz` / `*_crit_c`) へ自動補正。ネットワーク上限は 1Gbps/10Gbps 切替。
+  バックエンド未提供の項目 (`undefined`) はゲージ自体を非表示。
+  ヘッダータイトルは `<hostname> Monitor` に。
+- **LLM ⇔ RAG 排他 (atom2)**:
+  - `rag.py` の起動は `switch_models.sh rag`(稼働中 LLM を停止して embedding 起動、
+    API 応答まで待機) → 続けて `docker compose up -d`(Qdrant 補完起動) を 1 ジョブとして実行。
+    dgx-spark は従来どおり `compose up -d` のみ。停止は両環境とも `compose stop`(embedding+Qdrant 全体)。
+  - `/api/rag/status` に `llm_running` / `blocked_by_llm`(LLM 稼働中による embedding 停止) を追加。
+    UI は「停止中 (LLM 排他)」表示 + セクションヘッダーに「※ LLM ⇔ RAG は VRAM 排他」注記。
+    起動ボタンは atom2 では embedding 基準(Qdrant 常時稼働でも押せる)。
+  - `/api/vllm/status` に `rag_running` を追加し、モデル切替モーダルに
+    「稼働中の RAG embedding を停止して切り替えます (VRAM 排他)」警告を表示。
+- **`vllm.py`**: CLINE_MODEL_TABLE に atom2 用 3 プロファイル
+  (qwen38radiance / qwen38sglangrocm / qwen38gguf、context 262144) を追加。
+  プロファイル対応表は従来どおり docker-compose.yml から動的パース。
+- **デプロイ汎用化**: `install_service.sh` はスクリプト位置から API_DIR を導出、
+  実行ユーザーは SUDO_USER。unit ファイルは `__API_DIR__` / `__USER__` プレースホルダを
+  sed で置換してインストール(サービス名・ポート 8080 は両環境共通)。
+- 検証 (whitebearatom2 実機): `/api/platform`=atom2 確認。`/api/metrics` で
+  VRAM 31.86 GiB 総量・embedding 起動時 10.08 GiB / LLM 起動時 29.17 GiB 使用を実測。
+  RAG 起動 → LLM 切替(embedding 自動停止・radiance health OK・/metrics 取得)→
+  RAG 再起動(LLM 自動停止)→ RAG 停止 の排他サイクル全通過。
+  JS 構文チェック(node --check 全ブロック OK)。dgx-spark 側は nvidia 経路が
+  デフォルト動作のまま(統合メモリ 1 枚・10Gbps・GB10 上限値)で変更なし。
 
