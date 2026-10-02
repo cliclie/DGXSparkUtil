@@ -771,4 +771,12 @@ cd /home/cliclie/DGXSparkUtil/api
   最下部の余白を縮小した。`main` の `padding-bottom` を 32px→12px、
   `section:last-child { margin-bottom: 0; }` を追加(最下段セクションの 22px を潰す)。
   最下部余白は 54px(22+32)→12px に縮小。セクション間の 22px は維持。
+- **RAG 稼働時間の起点を `State.StartedAt` に修正**:
+  稼働時間が 1246 時間(約 52 日)と実際より長く表示されていた。原因は起点に
+  `docker inspect` の `Created`(コンテナの**作成**日時、再起動しても更新されない)を使っていたこと。
+  `State.StartedAt`(**最後に起動した日時**、再起動毎に更新)に変更した。
+  検証: 停止→起動テスト後のコンテナで `00:39:13`(実際の最終起動から約 39 分)を正しく表示。
+  注: `api/vllm.py` の `_container_state` も同様に `Created` を起点にしているが、
+  vLLM のモデル切替は `--force-recreate` でコンテナを再作成するため `Created` が新しめになり
+  顕在化しにくい。今回は RAG のみ修正(vllm.py は変更していない)。
 
