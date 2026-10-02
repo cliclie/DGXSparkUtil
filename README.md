@@ -117,9 +117,10 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
 
 ### 四段目: RAG (sociax-rag) 起動/停止
 
-`/home/cliclie/llm/compose/sociax-rag/` の RAG 環境(embedding vLLM + Qdrant)の
-状態を常時表示し、起動/停止を操作できるセクション。WhitebearATOM2 の RAG 環境との
-共存のため、本機の RAG を必要時に停止して GPU メモリ等を解放できるようにする。
+RAG 環境(embedding vLLM + Qdrant)の状態を常時表示し、起動/停止を操作できるセクション。
+対象ディレクトリはプラットフォーム別(dgx-spark `/home/cliclie/llm/compose/sociax-rag/`、
+atom2 `/home/cliclie/RAG/compose/`、`api/config.py` 参照)。atom2 では VRAM のため
+LLM と RAG embedding が排他(実装メモ 2026-10-03 参照)。
 
 - 表示内容:
   - Embedding (8010) / Qdrant (6333/6334) それぞれの状態
@@ -219,24 +220,33 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 ┌──────────────────────────────────────────────────────┐
 │  AI TOP ATOM (192.168.0.110)                          │
 │                                                       │
-│  ① 収集 + API  (api/ : Python + FastAPI, psutil)  │
+│  ① 収集 + API  (api/ : Python + FastAPI)  │
+│     GET  /api/platform      → プラットフォーム情報(表示切替) │
 │     GET  /api/metrics        → ホストメトリクス JSON  │
+│     GET  /api/history        → 直近30分履歴(バックフィル) │
 │     GET  /api/vllm/status    → コンテナ状態/健全性/   │
 │                                モデル名/metrics       │
 │     GET  /api/vllm/params    → 現在のパラメータ値     │
 │     GET  /api/vllm/cline     → Cline設定値(稼働モデル) │
 │     GET  /api/vllm/log       → 実行ログ(docker logs)  │
+│     GET  /api/vllm/job       → 切替/編集ジョブ進捗    │
 │     POST /api/vllm/switch    → モデル切替             │
+│     POST /api/vllm/stop      → モデル停止             │
 │     POST /api/vllm/params    → パラメータ編集+再作成  │
+│     GET  /api/rag/status     → RAG状態(embedding/Qdrant) │
+│     POST /api/rag/start|stop → RAG 起動/停止(ジョブ)  │
+│     GET  /api/rag/job        → RAG ジョブ進捗         │
 │     データ源: /proc/stat, /proc/meminfo,              │
 │      /sys/class/thermal/*, /proc/diskstats,           │
-│      nvidia-smi(subprocess), docker CLI(ps/inspect/  │
-│      logs), vLLM /health, /v1/models, /metrics        │
+│      nvidia-smi(subprocess) / amdgpu sysfs,           │
+│      docker CLI(ps/inspect/logs), vLLM /health,       │
+│      /v1/models, /metrics                              │
 │  ② 表示: front/ (単一 index.html + JS)          │
-│     3段レイアウト(表示レイアウト(3段構成)参照)   │
+│     4段レイアウト(表示レイアウト(4段構成)参照)   │
 │     一段目: 現在値ゲージ行 / 二段目: 時系列グラフ  │
 │     三段目: vLLM状態 + 「モデル切替・パラメータ   │
 │      編集」ボタン(押下でポップアップ表示)          │
+│     四段目: RAG (sociax-rag) 状態 + 起動/停止      │
 │     fetch を 2秒毎ポーリングしてビジュアル表示     │
 │     (既存 vLLM/Qdrant に依存しない独立ポート)      │
 └──────────────────────────────────────────────────────┘
@@ -250,7 +260,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 ### vLLM関連機能の設計
 
 - UI 配置: 三段目(vLLM 状態モニタリング)に状態を常時表示。「モデル切替」・「パラメータ表示・編集」は
-  三段目の「モデル切替・パラメータ編集」ボタンから**ポップアップ(モーダル)表示**する(詳細は「表示レイアウト(3段構成)」参照)
+  三段目の「モデル切替・パラメータ編集」ボタンから**ポップアップ(モーダル)表示**する(詳細は「表示レイアウト(4段構成)」参照)
 
 **状態モニタリング**
 
@@ -370,6 +380,8 @@ tail -f /home/cliclie/DGXSparkUtil/api/server.log  # ログ確認
 ```
 
 - ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
+  (テンプレート: `__API_DIR__` / `__USER__` プレースホルダを `install_service.sh` が
+  sed で置換して `/etc/systemd/system/` にインストール)
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
 - ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード）
@@ -830,4 +842,9 @@ cd /home/cliclie/DGXSparkUtil/api
   RAG 再起動(LLM 自動停止)→ RAG 停止 の排他サイクル全通過。
   JS 構文チェック(node --check 全ブロック OK)。dgx-spark 側は nvidia 経路が
   デフォルト動作のまま(統合メモリ 1 枚・10Gbps・GB10 上限値)で変更なし。
+- **README 同期**: アーキテクチャ図の API 一覧に欠落エンドポイント
+  (`/api/platform` / `/api/history` / `/api/vllm/stop` / `/api/vllm/job` / `/api/rag/*`)
+  を追加し、3段→4段構成の旧記述を修正。データ源に amdgpu sysfs を追記、
+  未使用の psutil 記述を削除。RAG セクションの対象ディレクトリをプラットフォーム別に、
+  ユニットファイルのテンプレート化を注記。
 
