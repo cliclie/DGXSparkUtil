@@ -62,9 +62,9 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - 色ゾーンの閾値は設定可能(デフォルト: 緑 < 60%、オレンジ 60〜85%、赤 > 85%)
 - ストレージの使用率は、下部に空き容量を2行目で表示可能(例: `free 2.8 TiB`)
 
-## 表示レイアウト(3段構成)
+## 表示レイアウト(4段構成)
 
-ダッシュボード全体は上下 3 段の構成とする。
+ダッシュボード全体は上下 4 段の構成とする。
 
 ### 一段目: 現在値ゲージ行
 
@@ -112,6 +112,24 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
     - **パラメータ表示・編集**: 稼働モデルのパラメータ値の一覧表示、編集可能項目の編集 + 「保存」ボタン(編集後はコンテナ再作成して反映)
   - 切替・保存は時間がかかる処理のため、ポップアップ内に進捗/状態を返し、完了後に閉じる(結果は三段目の状態表示に反映)
 - 三段目の状態表示は 2 秒毎ポーリングで更新する(モデル切替中は「切替中」状態を明示)
+
+### 四段目: RAG (sociax-rag) 起動/停止
+
+`/home/cliclie/llm/compose/sociax-rag/` の RAG 環境(embedding vLLM + Qdrant)の
+状態を常時表示し、起動/停止を操作できるセクション。WhitebearATOM2 の RAG 環境との
+共存のため、本機の RAG を必要時に停止して GPU メモリ等を解放できるようにする。
+
+- 表示内容:
+  - Embedding (8010) / Qdrant (6333/6334) それぞれの状態
+    (稼働中 (API応答) / 起動中… (API応答なし) / 停止中)
+  - 稼働時間
+- セクションヘッダーに「起動」「停止」ボタンを配置
+  - 押下で確認モーダル表示、実行後はジョブログをモーダル内に自動更新し、
+    完了時にモーダルを自動閉じる(三段目の停止モーダルと同一パターン)
+  - 起動: 完全に停止中かつジョブ実行中でないときのみ有効
+  - 停止: 稼働中かつジョブ実行中でないときのみ有効
+- 状態表示は 2 秒毎ポーリングで更新する(起動直後は embedding のモデルロード完了まで
+  「起動中… (API応答なし)」を表示)
 
 ## 調査結果(2026-08-22 実機確認)
 
@@ -277,6 +295,40 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   Max Output Tokens)は数値を個別コピーでき、Reasoning Effort も各選択肢を個別コピーできる
 - データ源: 動的取得(モデル名・ポート・hostname・コンテキスト・温度・画像対応) +
   モデル別静的推奨値テーブル(`api/vllm.py` の `CLINE_MODEL_TABLE`)
+
+### RAG関連機能の設計
+
+- UI 配置: 四段目(RAG (sociax-rag) 起動/停止)に状態を常時表示。「起動」「停止」は
+  確認モーダル表示(詳細は「表示レイアウト(4段構成)」参照)
+- 対象: `/home/cliclie/llm/compose/sociax-rag/` の Docker Compose プロジェクト
+  (embedding vLLM: Qwen3-Embedding-0.6B / ポート 8010、Qdrant v1.18.2 / ポート 6333・6334)
+- 目的: WhitebearATOM2 の RAG 環境との共存。本機の RAG を停止して
+  GPU メモリ(embedding は `--gpu-memory-utilization 0.10`)等を解放する
+
+**状態モニタリング**
+
+| 情報 | 取得源 |
+|---|---|
+| コンテナ稼働/停止・稼働時間・再起動回数 | `docker compose ps` / `docker inspect` |
+| Embedding API健全性 | `GET http://localhost:8010/v1/models` |
+| Qdrant API健全性 | `GET http://localhost:6333/` |
+
+- ポートは `.env` (EMBEDDING_PORT / QDRANT_REST_PORT) から動的取得
+- 起動直後はコンテナ稼働中だが embedding のモデルロード完了まで API 未応答
+  (healthcheck `start_period: 180s`) → 「起動中… (API応答なし)」で表示
+
+**起動/停止**
+
+- 起動: `docker compose --env-file .env -f compose.yaml up -d` (バックグラウンドジョブ)
+  - コマンド自体は数秒で完了。モデルロードはコンテナ内でバックグラウンド実行
+  - 既に稼働中の場合は何もしない(冪等)
+- 停止: `docker compose --env-file .env -f compose.yaml stop` (バックグラウンドジョブ)
+  - Qdrant のデータは volume (`QDRANT_STORAGE_DIR`) に永続化済みなので安全
+  - `docker stop` は `restart: unless-stopped` を無効化するため、停止後自動再起動しない
+  - `down` (コンテナ削除) は使わない
+- ジョブ状態は `api/vllm.py` のジョブと独立(`api/rag.py` 独自) →
+  モデル切替と RAG 起動/停止の並行実行を許可。RAG 起動/停止の同時実行は拒否(409)
+- API: `GET /api/rag/status` / `POST /api/rag/start` / `POST /api/rag/stop` / `GET /api/rag/job`
 
 ### 実装方式の選択肢
 
@@ -690,4 +742,33 @@ cd /home/cliclie/DGXSparkUtil/api
 - 反映: フロントのみ変更で API 変更なし。ブラウザのリロードのみで反映。
 - 検証: JS 構文(テンプレートリテラルの整合)と CSS 位置確認(2 行目は canvas 内
   63〜77px 付近でアーチと重ならない)を確認済み。
+
+## 実装メモ(2026-10-02)
+
+- **RAG環境 (sociax-rag) の起動/停止 Web UI 追加**(WhitebearATOM2 の RAG 環境との共存のため):
+  - 四段目に新セクション「RAG (sociax-rag)」を追加。Embedding (8010) / Qdrant (6333/6334)
+    の状態(稼働中 (API応答) / 起動中… (API応答なし) / 停止中)と稼働時間を 2 秒毎ポーリングで表示。
+    「起動」「停止」ボタンは確認モーダル(三段目の停止モーダルと同一パターン)で実行し、
+    ジョブログを自動更新・完了時にモーダル自動閉じる。
+  - 新規 `api/rag.py`: `docker compose --env-file .env -f compose.yaml up -d` / `stop` を
+    バックグラウンドジョブとして実行。vllm.py と同じジョブパターン(log_tail 付き)だが
+    ジョブ状態は独立 `_job` → モデル切替と RAG 操作の並行実行を許可。
+    停止はコンテナが 1 つも稼働していない場合のみ 409 拒否。起動は冪等(`up -d` が何もしない)。
+  - 新規 API: `GET /api/rag/status` / `POST /api/rag/start` / `POST /api/rag/stop` /
+    `GET /api/rag/job`。
+  - 状態判定: `docker compose ps` + `docker inspect`(稼働/稼働時間/再起動回数) +
+    HTTP 健全性(embedding `:8010/v1/models`、qdrant `:6333/`)。ポートは `.env` から動的取得。
+  - 起動直後は embedding のモデルロード完了まで API 未応答(healthcheck `start_period: 180s`)。
+    UI は「起動中… (API応答なし)」(赤)で表示し、応答後に「稼働中 (API応答)」(白)へ遷移する。
+  - 停止は `docker stop` のため `restart: unless-stopped` が無効化され、停止後自動再起動しない
+    (WhitebearATOM2 側 RAG 使用期間中に停止を維持できる)。Qdrant データは volume に永続化済み。
+- 検証: 停止ジョブ実行 → 両コンテナ停止(status API で running=false 確認、停止中での
+  再停止は 409)→ 起動ジョブ実行 → 両コンテナ再起動 → `check-services.sh` 4 項目
+  (embedding モデル一覧 / 1024 次元ベクトル / Qdrant REST / gRPC)全て通過 →
+  status API で running=true, healthy=true を確認済み。
+- **下部余白の縮小(縦スクロールバー出現の緩和)**:
+  ブラウザの表示領域を狭めたとき、下部に余白があるのに縦スクロールバーが出る現象を緩和するため、
+  最下部の余白を縮小した。`main` の `padding-bottom` を 32px→12px、
+  `section:last-child { margin-bottom: 0; }` を追加(最下段セクションの 22px を潰す)。
+  最下部余白は 54px(22+32)→12px に縮小。セクション間の 22px は維持。
 
