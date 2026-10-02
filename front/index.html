@@ -43,8 +43,9 @@ header {
 header h1 { font-size: 17px; margin: 0; }
 header #clock { color: var(--muted); font-size: 13px; }
 header #pstate { font-size: 13px; font-weight: 600; }
-main { padding: 16px 20px 32px; }
+main { padding: 16px 20px 12px; }
 section { margin-bottom: 22px; }
+section:last-child { margin-bottom: 0; } /* 最下段の余白を潰し、縦スクロールバー出現を遅らせる */
 section > h2 {
   font-size: 14px;
   color: var(--muted);
@@ -117,9 +118,9 @@ section > h2 {
   border-radius: 8px;
   padding: 12px 14px;
 }
-#vllm-headline { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 8px; }
-#vllm-headline .item .k { color: var(--muted); font-size: 11px; display: block; }
-#vllm-headline .item .v { font-size: 15px; font-weight: 600; }
+#vllm-headline, #rag-headline { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 8px; }
+#vllm-headline .item .k, #rag-headline .item .k { color: var(--muted); font-size: 11px; display: block; }
+#vllm-headline .item .v, #rag-headline .item .v { font-size: 15px; font-weight: 600; }
 #v-model { display: block; min-width: 10ch; }
 #v-port { display: block; min-width: 5ch; text-align: center; }
 #v-status { display: block; min-width: 18ch; text-align: left; }
@@ -365,6 +366,21 @@ table.params td input[readonly] { color: var(--muted); }
       </div>
     </div>
   </section>
+
+  <section>
+    <h2>RAG (sociax-rag)</h2>
+    <div id="rag-panel">
+      <div id="rag-headline">
+        <div class="item"><span class="k">Embedding (8010)</span><span class="v" id="r-emb">-</span></div>
+        <div class="item"><span class="k">Qdrant (6333/6334)</span><span class="v" id="r-qdr">-</span></div>
+        <div class="item"><span class="k">稼働時間</span><span class="v" id="r-uptime">-</span></div>
+      </div>
+      <div class="btns">
+        <button class="primary" id="btn-rag-start" disabled>起動</button>
+        <button id="btn-rag-stop" disabled>停止</button>
+      </div>
+    </div>
+  </section>
 </main>
 
 <!-- モーダル: モデル切替 -->
@@ -417,6 +433,19 @@ table.params td input[readonly] { color: var(--muted); }
     <div class="modal-actions">
       <button id="stop-cancel">キャンセル</button>
       <button class="primary" id="stop-go">停止する</button>
+    </div>
+  </div>
+</div>
+
+<!-- モーダル: RAG 起動/停止 -->
+<div class="modal hidden" id="modal-rag">
+  <div class="modal-box">
+    <h3 id="rag-modal-title">RAG 起動/停止</h3>
+    <p id="rag-msg"></p>
+    <div class="job-log" id="rag-log"></div>
+    <div class="modal-actions">
+      <button id="rag-cancel">キャンセル</button>
+      <button class="primary" id="rag-go">実行</button>
     </div>
   </div>
 </div>
@@ -840,6 +869,12 @@ async function poll() {
   } catch (e) {
     console.error("vllm poll failed", e);
   }
+  try {
+    const rst = await fetchJson(API + "/api/rag/status");
+    renderRag(rst);
+  } catch (e) {
+    console.error("rag poll failed", e);
+  }
   pollJob();
 }
 
@@ -978,6 +1013,88 @@ document.getElementById("stop-go").onclick = async () => {
   if (failed) {
     btn.disabled = false;
     document.getElementById("stop-cancel").style.display = "";
+  }
+};
+</script>
+
+<script>
+// ------------------------------------------------------------- RAG (sociax-rag) 起動/停止
+let ragAction = null; // "start" | "stop"
+
+function renderRag(st) {
+  const job = st.switching;
+  const emb = st.services.embedding;
+  const qdr = st.services.qdrant;
+  const setR = (id, text, cls) => {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = "v" + (cls ? " " + cls : "");
+  };
+  const stateOf = (s) => {
+    if (!s.running) return ["停止中", "down"];
+    if (s.health) return ["稼働中 (API応答)", "up"];
+    return ["起動中… (API応答なし)", "hot"];
+  };
+  const [eText, eCls] = stateOf(emb);
+  const [qText, qCls] = stateOf(qdr);
+  setR("r-emb", eText, eCls);
+  setR("r-qdr", qText, qCls);
+  setR("r-uptime", emb.uptime_str || qdr.uptime_str || "-");
+  // 起動: 完全に停止中かつジョブ実行中でないときのみ / 停止: 稼働中かつジョブ実行中でないときのみ
+  document.getElementById("btn-rag-start").disabled = !!job || st.running;
+  document.getElementById("btn-rag-stop").disabled = !!job || !st.running;
+}
+
+function openRagModal(action) {
+  ragAction = action;
+  const logEl = document.getElementById("rag-log");
+  logEl.textContent = "";
+  logEl.style.display = "none";
+  document.getElementById("rag-modal-title").textContent =
+    action === "start" ? "RAG 起動" : "RAG 停止";
+  document.getElementById("rag-msg").textContent =
+    action === "start"
+      ? "RAG環境 (embedding + qdrant) を起動しますか?"
+      : "RAG環境 (embedding + qdrant) を停止しますか?";
+  document.getElementById("rag-cancel").style.display = "";
+  document.getElementById("rag-go").textContent = action === "start" ? "起動する" : "停止する";
+  document.getElementById("rag-go").disabled = false;
+  openModal("modal-rag");
+}
+
+document.getElementById("btn-rag-start").onclick = () => openRagModal("start");
+document.getElementById("btn-rag-stop").onclick = () => openRagModal("stop");
+
+document.getElementById("rag-cancel").onclick = () => closeModal("modal-rag");
+
+document.getElementById("rag-go").onclick = async () => {
+  if (!ragAction) return;
+  const btn = document.getElementById("rag-go");
+  const logEl = document.getElementById("rag-log");
+  let failed = false;
+  btn.disabled = true;
+  document.getElementById("rag-cancel").style.display = "none";
+  document.getElementById("rag-msg").textContent = "実行中です… (完了するとこのダイアログは自動で閉じます)";
+  try {
+    const r = await fetch(API + "/api/rag/" + ragAction, { method: "POST" });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      document.getElementById("rag-msg").textContent = "";
+      logEl.style.display = "block";
+      logEl.textContent = "エラー: " + (err.detail || r.status) + "\n";
+      failed = true;
+    } else {
+      logEl.style.display = "block";
+    }
+  } catch (e) {
+    document.getElementById("rag-msg").textContent = "";
+    logEl.style.display = "block";
+    logEl.textContent = "リクエスト失敗: " + e + "\n";
+    failed = true;
+  }
+  if (failed) {
+    btn.disabled = false;
+    document.getElementById("rag-cancel").style.display = "";
   }
 };
 </script>
@@ -1289,19 +1406,44 @@ async function pollJob() {
   try {
     job = await fetchJson(API + "/api/vllm/job");
   } catch (e) {
+    job = null;
+  }
+  if (job) {
+    if (!job.running) {
+      // ジョブ終了(切替/再作成/停止): ログを非表示にし、ボタン復元 / モーダル閉じる
+      if (job.kind) onJobDone(job);
+    } else {
+      const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
+      logEl.style.display = "block";
+      // 空行を詰めて表示する(スクリプトの上書き表示用の空行が多い)
+      const lines = (job.log_tail || []).filter((l) => l.trim()).join("\n");
+      logEl.textContent = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+  // RAG ジョブ (vLLM ジョブと独立)
+  let rjob;
+  try {
+    rjob = await fetchJson(API + "/api/rag/job");
+  } catch (e) {
     return;
   }
-  if (!job.running) {
-    // ジョブ終了(切替/再作成/停止): ログを非表示にし、ボタン復元 / モーダル閉じる
-    if (job.kind) onJobDone(job);
+  if (!rjob.running) {
+    if (rjob.kind) onRagJobDone(rjob);
     return;
   }
-  const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
-  logEl.style.display = "block";
-  // 空行を詰めて表示する(スクリプトの上書き表示用の空行が多い)
-  const lines = (job.log_tail || []).filter((l) => l.trim()).join("\n");
-  logEl.textContent = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
+  const rlogEl = document.getElementById("rag-log");
+  rlogEl.style.display = "block";
+  const rlines = (rjob.log_tail || []).filter((l) => l.trim()).join("\n");
+  rlogEl.textContent = `[${rjob.kind}] ${rjob.elapsed_s}s 経過\n---\n${rlines}\n`;
+  rlogEl.scrollTop = rlogEl.scrollHeight;
+}
+
+function onRagJobDone(job) {
+  const logEl = document.getElementById("rag-log");
+  if (logEl.style.display !== "none") logEl.style.display = "none";
+  document.getElementById("rag-go").disabled = false;
+  closeModal("modal-rag");
 }
 
 function onJobDone(job) {

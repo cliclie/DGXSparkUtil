@@ -9,6 +9,10 @@
 - POST /api/vllm/stop     モデル停止 (バックグラウンド)
 - POST /api/vllm/params   パラメータ編集 + コンテナ再作成 (バックグラウンド)
 - GET  /api/vllm/job      切替/再作成/停止ジョブの進捗
+- GET  /api/rag/status    RAG環境 (sociax-rag) の状態
+- POST /api/rag/start     RAG環境起動 (バックグラウンド)
+- POST /api/rag/stop      RAG環境停止 (バックグラウンド)
+- GET  /api/rag/job       RAG 起動/停止ジョブの進捗
 - GET  /                  front/ の静的ファイル
 """
 
@@ -26,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import metrics as host_metrics
+import rag
 import vllm
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -136,6 +141,32 @@ def api_vllm_log(profile: str, tail: int = 500) -> dict:
 @app.get("/api/vllm/job")
 def api_vllm_job() -> dict:
     return vllm.job_status()
+
+
+@app.get("/api/rag/status")
+def api_rag_status() -> dict:
+    return rag.get_status()
+
+
+@app.post("/api/rag/start")
+def api_rag_start() -> dict:
+    try:
+        return rag.start_rag()
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/rag/stop")
+def api_rag_stop() -> dict:
+    try:
+        return rag.stop_rag()
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/rag/job")
+def api_rag_job() -> dict:
+    return rag.job_status()
 
 
 # front/ の静的ファイル (index.html / chart.umd.js 等)
