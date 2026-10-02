@@ -808,7 +808,7 @@ cd /home/cliclie/DGXSparkUtil/api
   GPU 電力/クロック/温度の上限はプラットフォーム既定値から実測値 (`*_cap_w` /
   `*_max_mhz` / `*_crit_c`) へ自動補正。ネットワーク上限は 1Gbps/10Gbps 切替。
   バックエンド未提供の項目 (`undefined`) はゲージ自体を非表示。
-  ヘッダータイトルは `<hostname> Monitor` に。
+  ヘッダータイトルは dgx-spark が「DGX Spark Monitor」、atom2 が `<hostname> Monitor`。
 - **LLM ⇔ RAG 排他 (atom2)**:
   - `rag.py` の起動は `switch_models.sh rag`(稼働中 LLM を停止して embedding 起動、
     API 応答まで待機) → 続けて `docker compose up -d`(Qdrant 補完起動) を 1 ジョブとして実行。
