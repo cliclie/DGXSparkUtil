@@ -21,7 +21,8 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - 稼働中のモデルコンテナの状態(稼働/停止・稼働時間・健全性)を表示
    - APIの健全性(`/health`)、サーブ中のモデル名(`/v1/models`)、
      vLLM組み込みメトリクス(`/metrics`: リクエスト数・キュー・KVキャッシュ使用率・スループット等)を表示
-     (TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析)
+      (SGLang は `--enable-metrics` 指定時、llama.cpp は `--metrics` 指定時に `/metrics` を使用、
+      TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析)
    - 直近ログの表示
 3. **モデルの切替**
    - Web UI から稼働モデルを切替(サーバ側で既存の切替スクリプトを呼ぶ)
@@ -103,7 +104,8 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
   - 稼働中のモデルコンテナの状態(稼働/停止・稼働時間・再起動回数)
   - API 健全性(`/health`)、サーブ中のモデル名(`/v1/models`)
   - vLLM 組み込みメトリクス(`/metrics`: リクエスト数・キュー・KV キャッシュ使用率・スループット等)
-    (TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析、実装メモ 2026-09-14 参照)
+    (SGLang: `--enable-metrics` 指定時、llama.cpp: `--metrics` 指定時に `/metrics` を使用、
+    TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析、実装メモ 2026-09-14 参照)
   - 直近ログの表示
 - セクションヘッダーに「モデル切替・ログ・パラメータ編集」ボタンを配置
   - ボタン押下で**ポップアップ(モーダル)表示**する(常設のフォーム欄は持たない)
@@ -271,10 +273,12 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | サーブ中モデル名 | `GET /v1/models` |
 | リクエスト数・キュー・KVキャッシュ使用率・スループット等 | `GET /metrics` (vLLM 組み込み Prometheus 形式) |
 | 同上(TabbyAPI) | `docker logs` (リクエスト毎統計の解析、実装メモ 2026-09-14 参照) |
+| 同上(llama.cpp) | `GET /metrics` (`--metrics` 指定時、Prometheus 形式) + `GET /slots` (KVキャッシュ使用率) |
 | 直近ログ | `docker logs --tail` |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
 
-- llama.cpp (muse) は `/metrics` が無い場合があるため、健全性/モデル名の表示にとどめる
+- llama.cpp は `--metrics` 指定時に `/metrics` (実行/待機・スループット) + `/slots` (KVキャッシュ使用率) を利用。
+  `--metrics` 未有効時は `/slots` のみで基本状態を取得。E2E/TTFT は v0.5.0 では未公開(実装メモ 2026-10-04 参照)
 - TabbyAPI は `/metrics` が無いが、docker logs のリクエスト毎統計から実行/待機・KVCache(推定)・
   E2E・TTFT・入力/出力スループットを取得する(実装メモ 2026-09-14 参照)
 
@@ -430,8 +434,9 @@ cd /home/cliclie/DGXSparkUtil/api
   ファイルの mtime が変わったときのみ再パースするキャッシュ付き(2 秒ポーリングでも低コスト)
 - これにより compose に追加済みの **SGLang 4 種**(qwen38sglang / eagle / dflash / dspark、ポート 8008 共有)も
   モデル一覧に表示され切替可能になった。修正前は SGLang が稼働中でも `active` が検出されず三段目が空表示になる不具合があった(検証で確認)
-- トークンスループットは `/metrics` にトークンカウンタが存在する場合のみ算出する(vLLM、または `--enable-metrics` 有効の SGLang)。
-  取得できない項目(llama.cpp 等)は null → フロントで "-" 表示
+- トークンスループットは `/metrics` にトークンカウンタ(またはゲージ)が存在する場合のみ算出する
+  (vLLM: カウンター差分、SGLang: `--enable-metrics` 時カウンター差分、llama.cpp: `--metrics` 時ゲージ直接値)。
+  取得できない項目は null → フロントで "-" 表示
 - **制約**: `switch_models.sh` は case 文で profile をハードコードしたまま(今回は変更しない方針)。
   compose に新規モデルを追加した場合、モニタリング・UI 表示は自動追従するが、**切替を実行するには switch_models.sh 側にも
   該当 profile の case を手動追加する必要がある**(未定義の場合ジョブログに usage エラーが出る)
@@ -449,9 +454,9 @@ cd /home/cliclie/DGXSparkUtil/api
   `sglang:num_running_reqs` / `num_queue_reqs` / `token_usage`(0-1 比率)×100 / `e2e_request_latency_seconds`・`time_to_first_token_seconds`
   (sum/count 平均) / トークンカウンタ差分を vLLM と同じ構造にマッピングし、三段目の全項目が取得可能になる。
   系列名はイメージ内の `sglang/srt/observability/metrics_collector.py` を直接確認して検証済み
-- **`/get_load` フォールバック**: `/metrics` が無い場合(再作成前の SGLang・llama.cpp 等)は `_sglang_get_load()` が
+- **`/get_load` フォールバック**: `/metrics` が無い場合(再作成前の SGLang 等)は `_sglang_get_load()` が
   SGLang の `/get_load` から実行中・待機リクエスト数を取得(dp_rank 毎のリストを合計)。これもない場合は従来どおり `metrics: null` → "-"。
-  llama.cpp(muse)は両方無いため全項目 "-" のまま
+  llama.cpp は `_is_llamacpp()` により `/v1/models` の `owned_by` で検出し、`/slots` から基本状態を取得(実装メモ 2026-10-04 参照)
 - 注意: 稼働中の SGLang コンテナは再作成まで `--enable-metrics` なしのままなので、**再作成までは三段目が実行中/待機リクエストのみ表示**になる
 - **SGLang スループットが常に 0.0 tok/s になる不具合の修正**: `sglang:prompt_tokens_total` /
   `generation_tokens_total` はラベル `is_streaming=true/false` で2系列に分かれる(実機 `/metrics` で確認)が、
@@ -861,3 +866,24 @@ cd /home/cliclie/DGXSparkUtil/api
     温度 56〜58°C。再起動後サービス active・`power1_cap`=210000000 (210W) を確認。
   - Trade-off: compute-heavy な prefill は THROTTLED (低速化)、モデルロードも低速化。
 
+- **llama.cpp メトリクス対応 (2026-10-04)**: llama.cpp ネイティブサーバー (`llama-cpp-vulkan-r9700:latest`,
+  v0.5.0-dev build 11339) が TabbyAPI ではなく llama-server だったため、三段目のメトリクスが全項目 "-"
+  になる問題の修正。
+  - **docker-compose.yml**: `qwen38_27b_gguf` の command に `--metrics` フラグを追加
+    (Prometheus 形式の `/metrics` を有効化)
+  - **`api/vllm.py` に llama.cpp 対応関数を追加**:
+    - `_is_llamacpp(base)`: `/v1/models` の `owned_by: "llamacpp"` で llama.cpp を検出
+    - `_llamacpp_slots_kv(base)`: `/slots` から `n_prompt_tokens / n_ctx × 100` で KV キャッシュ使用率を算出
+    - `_llamacpp_metrics(pm, base)`: llama.cpp の Prometheus 系列を vLLM と同じ構造にマッピング
+  - **`get_status()` の分岐追加**: vLLM → SGLang → **llama.cpp (新規)** → TabbyAPI → `/get_load`
+    - `llamacpp:` プレフィックスあり → `_llamacpp_metrics(pm, base)`
+    - `_is_llamacpp()` 検出 → `_llamacpp_metrics({}, base)` (`/slots` のみで基本状態)
+  - **系列名マッピング** (実機 `/metrics` で検証済み):
+    - `llamacpp:requests_processing` (gauge) → `requests_running`
+    - `llamacpp:requests_deferred` (gauge) → `requests_waiting`
+    - `llamacpp:prompt_tokens_seconds` (gauge) → `prompt_tokens_per_s` (直接値・カウンター差分不要)
+    - `llamacpp:predicted_tokens_seconds` (gauge) → `generation_tokens_per_s` (直接値)
+    - KV キャッシュ使用率 → `/slots` の `n_prompt_tokens / n_ctx × 100`
+    - E2E / TTFT → v0.5.0 では未公開 (None → "-" 表示)
+  - **検証** (whitebearatom2 実機): リクエスト後 `generation_tokens_per_s: 49.3 tok/s`、
+    `kv_cache_usage_pct: 22.0%` を確認。アイドル時はスループット 0・実行/待機 0 が正しく表示。
