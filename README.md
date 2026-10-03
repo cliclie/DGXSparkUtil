@@ -847,4 +847,17 @@ cd /home/cliclie/DGXSparkUtil/api
   を追加し、3段→4段構成の旧記述を修正。データ源に amdgpu sysfs を追記、
   未使用の psutil 記述を削除。RAG セクションの対象ディレクトリをプラットフォーム別に、
   ユニットファイルのテンプレート化を注記。
+- **GPU 電力上限 PPT0 210W (whitebearatom2 / R9700)**: モデルロード時に GPU 電力が
+  300W (stock) まで到達し、持続 LLM 負荷で 100°C になる問題への恒久対策。
+  systemd サービス `llm-gpu-powercap.service` (oneshot / enabled) で起動時に
+  `amd-smi set -g 0 -o ppt0 210` を実行 (unit は実機の `/etc/systemd/system/` に配置、
+  リポジトリ外)。PPT0 の設定可能範囲は 210〜300W (sysfs `power1_cap_min/max`)。
+  - 初版は `After=local-fs.target` のみで、起動時に amdgpu モジュール未ロードのため
+    `amd-smi` が "driver not initialized" で失敗し、再起動後 cap が 300W に戻っていた。
+  - 修正: `After=systemd-modules-load.service` 追加 + `ExecStartPre` で
+    `power1_cap` sysfs の出現 (amdgpu ロード完了) を最大 120 秒待機。
+  - 検証: 推論 (4096 トークン) / モデルロード (vLLM 再起動) の両方で電力 210W に
+    キャップ (一時的オーバーシュート 212W / 235W は 0.5 秒サンプル 1 回分)、
+    温度 56〜58°C。再起動後サービス active・`power1_cap`=210000000 (210W) を確認。
+  - Trade-off: compute-heavy な prefill は THROTTLED (低速化)、モデルロードも低速化。
 
