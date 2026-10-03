@@ -887,3 +887,19 @@ cd /home/cliclie/DGXSparkUtil/api
     - E2E / TTFT → v0.5.0 では未公開 (None → "-" 表示)
   - **検証** (whitebearatom2 実機): リクエスト後 `generation_tokens_per_s: 49.3 tok/s`、
     `kv_cache_usage_pct: 22.0%` を確認。アイドル時はスループット 0・実行/待機 0 が正しく表示。
+
+## 実装メモ(2026-10-04)
+
+- **atom2 側改修の atom1 (WhitebearATOM1 / DGX Spark) への反映**: 親リポジトリの更新
+  (0c77106 → aeb60f0、3 コミット: llama.cpp メトリクス対応 / RAG ジョブ完了モーダル修正 /
+  README 整備) を pull し、`dgx-spark-api` を再起動して反映した。
+  - 再起動方法: sudo が利用できないため旧 uvicorn プロセスを kill し、systemd の
+    `Restart=always` による自動再起動に委ねた (active (running) を確認)。
+  - 検証: `/api/vllm/status` (稼働中モデル qwen38flashnextexl3_3p05・メトリクス正常返却)、
+    `/api/rag/status`、`/api/metrics` とも 200 OK。venv の python で llama.cpp 対応新関数
+    (`_is_llamacpp` / `_llamacpp_slots_kv` / `_llamacpp_metrics`) の import を確認。
+  - atom1 への影響: llama.cpp プロファイル `muse` (llama-muse-glimmer) の compose
+    (/home/cliclie/llm/compose、リポジトリ外) は `--metrics` フラグ未有効のため、稼働時は
+    `_is_llamacpp()` 分岐で `/slots` のみから基本状態 (KV キャッシュ使用率) を取得する。
+    全メトリクス表示には command に `--metrics` を追加してコンテナ再作成が必要。
+  - RAG モーダル修正はブラウザの再読み込みで反映。
