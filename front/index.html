@@ -1110,6 +1110,7 @@ document.getElementById("stop-go").onclick = async () => {
 <script>
 // ------------------------------------------------------------- RAG (sociax-rag) 起動/停止
 let ragAction = null; // "start" | "stop"
+let ragJobStarted = false; // ユーザーが実際にジョブを開始したか（確認ダイアログ誤閉じ防止）
 
 function renderRag(st) {
   const job = st.switching;
@@ -1143,6 +1144,7 @@ function renderRag(st) {
 
 function openRagModal(action) {
   ragAction = action;
+  ragJobStarted = false;
   const logEl = document.getElementById("rag-log");
   logEl.textContent = "";
   logEl.style.display = "none";
@@ -1183,6 +1185,7 @@ document.getElementById("rag-go").onclick = async () => {
       failed = true;
     } else {
       logEl.style.display = "block";
+      ragJobStarted = true;
     }
   } catch (e) {
     document.getElementById("rag-msg").textContent = "";
@@ -1527,7 +1530,7 @@ async function pollJob() {
     return;
   }
   if (!rjob.running) {
-    if (rjob.kind) onRagJobDone(rjob);
+    if (rjob.kind && ragJobStarted) onRagJobDone(rjob);
     return;
   }
   const rlogEl = document.getElementById("rag-log");
@@ -1538,6 +1541,7 @@ async function pollJob() {
 }
 
 function onRagJobDone(job) {
+  ragJobStarted = false;
   const logEl = document.getElementById("rag-log");
   if (logEl.style.display !== "none") logEl.style.display = "none";
   document.getElementById("rag-go").disabled = false;
