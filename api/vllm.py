@@ -308,6 +308,64 @@ def _sglang_get_load(base: str) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------- llama.cpp (--metrics)
+# llama.cpp ネイティブサーバー (llama-server) の /metrics 対応。
+# 系列名は llama-cpp-vulkan-r9700:latest (v0.5.0-dev build 11339) で検証済み。
+# スループットはゲージとして直接公開される(カウンター差分不要)。
+# KV キャッシュ使用率は /slots から算出 (n_prompt_tokens / n_ctx)。
+# E2E / TTFT はこのバージョンでは未公開 (None → フロント "-" 表示)。
+
+
+def _is_llamacpp(base: str) -> bool:
+    """/v1/models の owned_by が "llamacpp" なら llama.cpp ネイティブサーバー。"""
+    txt = _http_get(f"{base}/v1/models", timeout=3)
+    if not txt:
+        return False
+    return '"owned_by":"llamacpp"' in txt or '"owned_by": "llamacpp"' in txt
+
+
+def _llamacpp_slots_kv(base: str) -> float | None:
+    """/slots から KV キャッシュ使用率 (%) を算出。"""
+    txt = _http_get(f"{base}/slots", timeout=3)
+    if not txt:
+        return None
+    try:
+        import json
+
+        slots = json.loads(txt)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(slots, list) or not slots:
+        return None
+    total_tokens = 0
+    total_ctx = 0
+    for s in slots:
+        total_tokens += s.get("n_prompt_tokens", 0) + s.get("n_generation_tokens", 0)
+        total_ctx += s.get("n_ctx", 0)
+    if total_ctx <= 0:
+        return None
+    return (total_tokens / total_ctx) * 100.0
+
+
+def _llamacpp_metrics(pm: dict, base: str) -> dict:
+    """llama.cpp の Prometheus 系列を vLLM と同じ構造にマッピング。"""
+    m = {
+        "requests_running": pm.get("llamacpp:requests_processing"),
+        "requests_waiting": pm.get("llamacpp:requests_deferred"),
+        "kv_cache_usage_pct": _llamacpp_slots_kv(base),
+        "e2e_latency_s": None,
+        "ttft_s": None,
+    }
+    # スループット: ゲージとして直接公開 (カウンター差分不要)
+    if "llamacpp:prompt_tokens_seconds" in pm:
+        m["prompt_tokens_per_s"] = pm["llamacpp:prompt_tokens_seconds"]
+        m["prompt_tps_held"] = False
+    if "llamacpp:predicted_tokens_seconds" in pm:
+        m["generation_tokens_per_s"] = pm["llamacpp:predicted_tokens_seconds"]
+        m["generation_tps_held"] = False
+    return m
+
+
 # ---------------------------------------------------------------- TabbyAPI (ログ解析メトリクス)
 # TabbyAPI は /metrics が 404 のため、docker logs のリクエスト毎統計を解析する。
 # ログ形式 (common/gen_logging.py、commit de76ff88 で検証済み):
@@ -599,12 +657,22 @@ def get_status() -> dict:
         # SGLang (--enable-metrics 有効)。系列名マッピングは _sglang_metrics 参照
         _reset_tabby_state()
         active["metrics"] = _sglang_metrics(pm)
+    elif any(k.startswith("llamacpp:") for k in pm):
+        # llama.cpp (--metrics 有効)。系列名マッピングは _llamacpp_metrics 参照
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _llamacpp_metrics(pm, base)
+    elif _is_llamacpp(base):
+        # llama.cpp (--metrics 未有効): /slots のみで基本状態を取得
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _llamacpp_metrics({}, base)
     elif _is_tabbyapi(base):
         # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析
         _reset_token_state()
         active["metrics"] = _tabbyapi_metrics(base, info["container"])
     else:
-        # /metrics が無い(SGLang の --enable-metrics 未導入時・llama.cpp 等) →
+        # /metrics が無い(SGLang の --enable-metrics 未導入時) →
         # SGLang の /get_load で実行中・待機リクエスト数を取得。これもない場合は None
         _reset_token_state()
         _reset_tabby_state()
