@@ -245,6 +245,13 @@ def job_status() -> dict:
                 for ln in f.readlines()[-60:]
             ]
         tail = [ln for ln in raw if ln.strip()][-12:]
+        # switch_models.sh rag の上書き表示フレーム(ヘッダー+ログ4行)はファイル上では
+        # 毎秒追記されるため、末尾に複数コピーが残る。最後の === ヘッダー行以降の
+        # 1フレーム分のみを保持して、ヘッダーが1行だけになるようにする(vllm.py と同一)。
+        for i in range(len(tail) - 1, -1, -1):
+            if tail[i].startswith("===") and tail[i].endswith("==="):
+                tail = tail[i : i + 5]
+                break
     except OSError:
         pass
 
