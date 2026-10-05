@@ -60,7 +60,7 @@ section > h2 {
   gap: 10px;
 }
 .gauge {
-  flex: 0 0 218px; /* 固定幅: 6枚/行 × 218px + gap5 × 10px = 1358px (main内側1360pxに収まる) */
+  flex: 0 0 176px; /* 固定幅: 7枚/行 × 176px + gap6 × 10px = 1292px (main内側1360pxに収まる) */
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -69,7 +69,8 @@ section > h2 {
 }
 .gauge .gtitle { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .gauge .gtitle .gdot { display: inline-block; width: 12px; height: 12px; margin-right: 6px; }
-.gauge .gcanvas { position: relative; height: 96px; }
+.gauge .gcanvas { position: relative; height: 76px; } /* 96px → 80% (4の倍数) */
+.gauge.dual .gcanvas { height: 56px; } /* 二重メーター: 2行テキストをゲージ下に置くため描画領域を縮小 (単一メーターとカード高さを揃える) */
 .gauge .gcanvas canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
 .gauge .gval {
   position: absolute;
@@ -77,13 +78,14 @@ section > h2 {
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 22px;
+  font-size: 16px;
   font-weight: 600;
   pointer-events: none;
 }
-.gauge .gval .unit { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
-.gauge .gval.gval-dual { font-size: 12px; line-height: 1.3; top: 77%; }
-.gauge .gval .gval-line { white-space: nowrap; }
+.gauge .gval .unit, .gauge .gval-dual-out .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+/* 二重メーターの 2 行値: 縮小後 canvas (150×60) 内では内側アーチと交差するためゲージ下に配置 */
+.gauge .gval-dual-out { font-size: 11px; line-height: 1.3; margin-top: 2px; }
+.gauge .gval .gval-line, .gauge .gval-dual-out .gval-line { white-space: nowrap; }
 .gauge .gval .gval-sub { position: absolute; top: 100%; left: 0; right: 0; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text); }
 .gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 4px; min-height: 14px; }
 .ok { color: var(--green); }
@@ -110,7 +112,7 @@ section > h2 {
   border-radius: 8px;
   padding: 8px 10px 6px;
 }
-.chart-card .cwrap { position: relative; height: 360px; }
+.chart-card .cwrap { position: relative; height: 288px; } /* 360px → 80% (4の倍数) */
 /* ---- Tier 3 ---- */
 #vllm-panel {
   background: var(--card);
@@ -569,9 +571,16 @@ class Gauge {
     const card = wrap.parentElement; // .gauge
     this.cardEl = card; // 項目未提供時の非表示制御用
     this.valEl = document.createElement("div");
-    this.valEl.className = def.dual ? "gval gval-dual" : "gval";
-    wrap.appendChild(this.valEl);
     this.subEl = card.querySelector(".gsub");
+    if (def.dual) {
+      // 二重メーター: 80% 縮小後の canvas (150×60) 内で 2 行テキストが内側アーチと交差するため
+      // 値表示はゲージ下 (canvas 外) に配置する
+      this.valEl.className = "gval-dual-out";
+      card.insertBefore(this.valEl, this.subEl);
+    } else {
+      this.valEl.className = "gval";
+      wrap.appendChild(this.valEl);
+    }
     this._last = null;
   }
   set(v, m) {
@@ -609,13 +618,15 @@ class Gauge {
     ctx.clearRect(0, 0, w, h);
     const cx = w / 2;
     const cy = h - 2;
-    const R = Math.min(w / 2, h) - 6;   // ゾーン帯の外半径 (コンテナ内に収まる)
     const dual = !!this.def.dual;
+    const R = Math.min(w / 2, h) - 6;   // ゾーン帯の外半径 (コンテナ内に収まる)
     // アーチの半径/厚み (dual: 外側=A / 内側=B)
+    // 二重メーターの 2 行値はゲージ下 (canvas 外) に表示するため、内外アーチの間隔は 1px に縮小 (テキスト交渉なし)
+    const gapAB = 1;
     const lwA = Math.max(8, R * 0.16);
     const rA = R - lwA / 2 - 4;
     const lwB = dual ? Math.max(6, R * 0.12) : 0;
-    const rB = dual ? rA - lwA / 2 - lwB / 2 - 3 : 0;
+    const rB = dual ? rA - lwA / 2 - lwB / 2 - gapAB : 0;
     // 背景アーチ
     ctx.beginPath();
     ctx.arc(cx, cy, rA, Math.PI, 2 * Math.PI);
@@ -735,7 +746,7 @@ function buildHostCards() {
     const dots = d.dual
       ? `<span class="gdot" style="background:${d.colorA}"></span><span class="gdot" style="background:${d.colorB}"></span>`
       : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
-    return `<div class="gauge"${d.bg ? ` style="background:${d.bg}"` : ""}>
+    return `<div class="gauge${d.dual ? " dual" : ""}"${d.bg ? ` style="background:${d.bg}"` : ""}>
        <div class="gtitle">${dots}${d.title}</div>
        <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
        <div class="gsub"></div>
@@ -823,7 +834,7 @@ function buildMainChart() {
       interaction: { mode: "index", intersect: false },
       plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
       scales: {
-        x: { ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } } },
+        x: { ticks: { maxTicksLimit: 10, maxRotation: 0, font: { size: 10 } } },
         y: { min: 0, max: 100, ticks: { callback: (v) => v + "%" } },
       },
     },
