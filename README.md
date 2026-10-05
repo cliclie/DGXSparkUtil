@@ -290,6 +290,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - 三段目のポップアップ内の「切替」ボタン → サーバ側で `switch_models.sh <profile>` を実行
 - 切替時は現在稼働中のモデルを停止し、新モデルをロード(時間がかかる。スクリプトが所要時間を報告)
 - 同時稼働は 1 モデル(既存スクリプトの挙動)
+- ポップアップ内のジョブログ(`log_tail`)は実行中**最新フレーム(ヘッダー1行+直近4ログ行)のみ**を表示する。
+  `switch_models.sh` の `display_frame()` は端末上書き表示のためヘッダー+ログ4行を ANSI カーソル移動付きで
+  毎秒出力し、API 側は stdout をファイルにリダイレクトするため、`api/vllm.py` の `job_status()` が
+  最後の `=== ... ===` ヘッダー行以降の1フレーム分のみを返す(実装メモ 2026-08-30)
 
 **パラメータ表示・編集**
 - 表示: 稼働コンテナの起動引数(`docker inspect` の Config.Cmd/Args)または docker-compose.yml の定義を解析
@@ -342,12 +346,17 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - 起動: `docker compose --env-file .env -f compose.yaml up -d` (バックグラウンドジョブ)
   - コマンド自体は数秒で完了。モデルロードはコンテナ内でバックグラウンド実行
   - 既に稼働中の場合は何もしない(冪等)
+  - 排他環境 (atom2 / VRAM 32GB) では `switch_models.sh rag` を経由し、稼働中 LLM を停止してから
+    embedding を起動する(スクリプトが API 応答まで待機)→ 完了後 `up -d` で Qdrant を補完起動
 - 停止: `docker compose --env-file .env -f compose.yaml stop` (バックグラウンドジョブ)
   - Qdrant のデータは volume (`QDRANT_STORAGE_DIR`) に永続化済みなので安全
   - `docker stop` は `restart: unless-stopped` を無効化するため、停止後自動再起動しない
   - `down` (コンテナ削除) は使わない
 - ジョブ状態は `api/vllm.py` のジョブと独立(`api/rag.py` 独自) →
   モデル切替と RAG 起動/停止の並行実行を許可。RAG 起動/停止の同時実行は拒否(409)
+- ジョブログ(`log_tail`)はモデル切替と同一の最新フレーム表示(ヘッダー1行+直近4ログ行)。
+  `api/rag.py` の `job_status()` が `switch_models.sh rag` の上書き表示フレームから
+  最後の `=== ... ===` ヘッダー行以降の1フレーム分のみを返す(実装メモ 2026-10-06)
 - API: `GET /api/rag/status` / `POST /api/rag/start` / `POST /api/rag/stop` / `GET /api/rag/job`
 
 ### 実装方式の選択肢
@@ -939,3 +948,19 @@ cd /home/cliclie/DGXSparkUtil/api
   二重: 全アーチ帯が canvas 内で、頂部 y=4px、テキストは canvas 下)。
   稼働中の `dgx-spark-api` (port 8080) から配信される HTML に新値 (176px / 76px / 56px / 288px /
   `gval-dual-out`) が含まれることを curl で確認。フロントはブラウザのリロードのみで反映。
+
+## 実装メモ(2026-10-06)
+
+- **RAG 起動ジョブログのヘッダー行重複表示を修正**: 「RAG 起動」モーダルの実行画面で
+  「=== 起動中です。直近4件のログを表示中 ... ===」行とログが複数フレーム分重複表示される不具合を修正。
+  2026-08-30 に `api/vllm.py` の `job_status()` へ入れた「最後の `=== ... ===` ヘッダー行以降の
+  1フレーム分(最大5行)のみを返す」ロジックが `api/rag.py` の `job_status()` に入っておらず、
+  排他環境 (atom2) の RAG 起動は `switch_models.sh rag` を経由するため同じ原因
+  (`display_frame()` が端末上書き用にヘッダー+ログ4行のフレームを ANSI カーソル移動付きで毎秒出力し、
+  stdout リダイレクト後は各フレームが新規行として追記される)で末尾12行窓に複数コピーが残っていた。
+  `api/rag.py` に vllm.py と同一のロジックを追加(スクリプト側・フロント側は変更なし)。
+  完了時は「=== 起動完了: rag ===」+ 起動処理時間 + API/Models 行のブロックが表示され、
+  `===` 行のない `compose up -d` のみの従来ジョブ(dgx-spark 環境)は挙動不変。
+  検証: 実物ログと同形式(ANSI/`\r` 込み)のダミーログによる隔離テスト3ケース(起動中3フレーム/
+  完了ブロック+compose 出力/ヘッダーなし) + 実環境での実切替(atom2: qwen38gguf 切替 → RAG 起動)で
+  ポーリングごとにヘッダー1行+直近4ログ行のみとなることを確認。RAG は healthy に復旧済み。
