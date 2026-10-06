@@ -1003,10 +1003,11 @@ function renderModelList() {
     const isTarget = sw && sw.profile === c.profile;
     let cls = "", meta;
     if (isTarget) {
-      // 切替対象 B: 未起動=停止中(灰) / 起動中かつAPI未応答=切替中…(赤) / API応答=現在稼働中(緑)
-      if (!c.running) meta = "停止中";
-      else if (!sw.ready) { cls = "switching"; meta = "切替中…"; }
-      else { cls = "current"; meta = "現在稼働中"; }
+      // 切替対象 B: API応答(sw.ready)=現在稼働中(緑)。Magnitude はコンテナを立たせないため
+      // running は常に false → sw.ready を優先して稼働判定する
+      if (sw.ready) { cls = "current"; meta = "現在稼働中"; }
+      else if (!c.running) meta = "停止中";
+      else { cls = "switching"; meta = "切替中…"; }
     } else if (isCurrent) {
       cls = "current";
       meta = "現在稼働中";

@@ -180,10 +180,14 @@ def _run(cmd: list[str], timeout: float = 10) -> str:
         return ""
 
 
-def _http_get(url: str, timeout: float = 5) -> str:
+def _http_get(url: str, timeout: float = 5, headers: list[str] | None = None) -> str:
+    cmd = ["curl", "--silent", "--fail", "--max-time", str(timeout)]
+    if headers:
+        cmd += headers
+    cmd.append(url)
     try:
         r = subprocess.run(
-            ["curl", "--silent", "--fail", "--max-time", str(timeout), url],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout + 2,
@@ -210,6 +214,30 @@ def _http_ok(url: str, timeout: float = 5) -> bool:
 def _fmt_elapsed(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+# ---------------------------------------------------------------- Magnitude (magn)
+# Magnitude はホストインストールの deb (systemd user unit の headless serve)。コンテナは立たない。
+# /health と /metrics は存在しない。健全性は /inference/v1/models (API key 必須)。
+# 稼働判定は systemd unit active + API 応答 (idle でモデルを unload するため Ready を要求しない)。
+
+def _magn_headers() -> list[str]:
+    if config.MAGN_API_KEY:
+        return ["-H", f"x-api-key: {config.MAGN_API_KEY}"]
+    return []
+
+
+def _magn_models_url(port: int) -> str:
+    return f"http://localhost:{port}/{config.MAGN_BASE_PATH}/models"
+
+
+def _magn_active(port: int) -> bool:
+    """Magnitude headless serve の稼働判定 (/inference/v1/models 応答)。
+    api service は root で稼働するため systemctl --user は使わない
+    (root の user session では cliclie の magn-headless.service が見えない)。
+    serve 自体は systemd user unit で常駐するが、稼働判定は API 応答のみで行う。
+    """
+    return bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
 
 
 # ---------------------------------------------------------------- 状態
@@ -547,7 +575,11 @@ def _switching_info() -> dict | None:
     info = _load_profiles().get(_job["profile"])
     ready = False
     if info and info.get("port"):
-        ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
+        # Magnitude は /health 無し (健全性は /inference/v1/models + API key)
+        if _job["profile"] == "magn":
+            ready = bool(_http_get(_magn_models_url(info["port"]), 3, _magn_headers()))
+        else:
+            ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
     return {"kind": _job["kind"], "profile": _job["profile"], "ready": ready}
 
 
@@ -578,6 +610,10 @@ def get_status() -> dict:
     # 早期 return より前に付与する)
     out["switching"] = _switching_info()
 
+    # Magnitude はホスト serve (コンテナは立たない)。稼働判定は systemd unit + API 応答
+    if running_profile is None and "magn" in profiles and _magn_active(profiles["magn"]["port"]):
+        running_profile = "magn"
+
     if running_profile is None:
         return out
 
@@ -593,6 +629,15 @@ def get_status() -> dict:
         "api_url": base,
     }
     active.update(_container_state(info["container"]))
+
+    # Magnitude: /health と /metrics は無い。健全性は /inference/v1/models (API key 必須)、
+    # サーブ中モデル名は MAGN_MODEL_ID。スループットは /metrics 無しで None
+    if running_profile == "magn":
+        active["api_url"] = f"{base}/{config.MAGN_BASE_PATH}"
+        active["health"] = bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
+        active["model_name"] = config.MAGN_MODEL_ID
+        out["active"] = active
+        return out
 
     # API 健全性 (vLLM の /health は本文空・HTTP 200 が正常)
     active["health"] = _http_ok(f"{base}/health", timeout=3)
