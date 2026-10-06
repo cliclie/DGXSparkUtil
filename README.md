@@ -998,3 +998,20 @@ cd /home/cliclie/DGXSparkUtil/api
     ※ 作業途中、`g-net` 定義行のオブジェクト閉じ `}` を欠落させページがほぼ空白に
     (構文エラーで `<script>` 全体が未実行 → `PLAT is not defined`) なったため、
     フロント編集後は必ず構文チェックとブラウザ表示確認を行うこと。
+
+## Magnitude (magn) 切替運用 (2026-10-06)
+
+- Magnitude はホストインストールの deb (systemd user unit `magn-headless.service` の headless serve、port 10100)。
+  compose プロファイルではないため `~/LLM/compose/docker-compose.yml` にプレースホルダ service
+  (`magn`、alpine sleep、port 10100) を置き、profiles 対応表に `magn` を表示する。実稼働は systemd serve で、コンテナは立たない
+- 稼働判定は API 応答のみ (`api/vllm.py` の `_magn_active()`)。api service は root で稼働するため
+  `systemctl --user` は cliclie の unit を見ない。`/health` と `/metrics` は Magnitude に存在しない
+  → 健全性は `/inference/v1/models` + API key、サーブ中モデル名は `MAGN_MODEL_ID` (既定 `qwen3.8-27b:gguf:q6`)
+- 切替は `switch_models.sh magn` が systemd serve 起動 + `magnitude models load MAGN_MODEL_ID` を行う
+  (Q6 のみ運用。Q4/gemma は gfx1201 Vulkan の repack qualify を通さないため削除済み)
+- `.env` の MAGN_* (MAGN_PORT / MAGN_BASE_PATH / MAGN_API_KEY / MAGN_MODEL_ID / MAGN_SYSTEMD_UNIT) を
+  `api/config.py` が読む。切替完了判定は `sw.ready` (API 応答)。Magnitude は running が常に false なので
+  フロントの切替対象表示は `sw.ready` を優先する (`front/index.html` 1006行附近)
+- 検証 (2026-10-06): `GET /api/vllm/status` で active=magn (health true、model_name=qwen3.8-27b:gguf:q6)、
+  `POST /api/vllm/switch {profile:magn}` で切替完了 (switching None → active=magn) を確認
+

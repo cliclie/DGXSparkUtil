@@ -105,3 +105,29 @@ def info() -> dict:
         "compose_dir": str(COMPOSE_DIR),
         "rag_dir": str(RAG_DIR),
     }
+
+
+# ---------------------------------------------------------------- Magnitude (magn)
+# Magnitude はホストインストールの deb (headless serve)。compose プロファイルではないが
+# docker-compose.yml にプレースホルダ service を置いて profiles 対応表に出す。
+# 稼働判定は systemd user unit + API 応答、健全性は /inference/v1/models (API key 必須)。
+# /health と /metrics は存在しない。
+
+def _read_compose_env() -> dict:
+    """compose_dir の .env を読む (MAGN_* 設定)。"""
+    env: dict[str, str] = {}
+    p = COMPOSE_DIR / ".env"
+    if p.is_file():
+        for ln in p.read_text().splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
+
+MAGN_ENV = _read_compose_env()
+MAGN_PORT = int(MAGN_ENV.get("MAGN_PORT", "10100"))
+MAGN_BASE_PATH = MAGN_ENV.get("MAGN_BASE_PATH", "inference/v1")
+MAGN_API_KEY = MAGN_ENV.get("MAGN_API_KEY", "")
+MAGN_MODEL_ID = MAGN_ENV.get("MAGN_MODEL_ID", "qwen3.8-27b:gguf:q6")
+MAGN_SYSTEMD_UNIT = MAGN_ENV.get("MAGN_SYSTEMD_UNIT", "magn-headless.service")
