@@ -1166,16 +1166,24 @@ first_token_ms/completed_at/model`) に保存されていることを発見し�
   RAG を本機で併走させると 6 GiB 前後になり危険域(10 GiB 未満では NVRM OOM 実績あり)。
   `context_max=1048576` の根拠: needle テスト 823,282 token で PASS(prefill 1,317 T/s)。
   実測: decode 47.71 T/s(ウォーム)・prefill 1,032〜1,076 T/s(短文)・MTP 受入 57.7%・coding 8/8。
-- **検証 (2026-10-07)**: `qwen38flashnextexl3_4p05` 稼働中に venv の python で `vllm.get_cline_config()` を
-  直接呼び、`base_url=http://WhitebearATOM1.local:8016/v1/`・`model_id=qwen3.8_flashnext_exl3_4p05bpw`・
-  `supports_images=true`・`context_recommended=1048576`・`context_max=1048576`・
-  `max_output_recommended=8192`・`max_output_max=32768`・`temperature=0.6` を実測。
-  `vllm._load_profiles()` は compose から
-  `qwen38flashnextexl3_4p05 → service=tabbyapi_flashnext_4p05 / container=tabbyapi-flashnext-4p05 / port=8016`
-  を自動認識し、`get_status()` は `health=true`・metrics に needle 実行の prefill 1,317 T/s を返す。
-  **systemd service は再起動していない**(`sudo` にパスワードが必要)。`GET /api/vllm/cline` が新テーブルを
-  返すには `sudo systemctl restart dgx-spark-api` が必要(再起動前は `supports_images=false`・
-  `context_max=null` だった)。
+- **検証 (2026-10-07)**: 稼働モデル `qwen38flashnextexl3_4p05` で `sudo systemctl restart dgx-spark-api` を
+  実行し、API 実測で以下を確認。
+  - `GET /api/vllm/cline` → `base_url=http://WhitebearATOM1.local:8016/v1/`・
+    `model_id=qwen3.8_flashnext_exl3_4p05bpw`・`supports_images=true`・
+    `context_recommended=1048576`・`context_max=1048576`・`max_output_recommended=8192`・
+    `max_output_max=32768`・`temperature=0.6`（再起動前は `supports_images=false`・
+    `context_recommended/context_max=null` だった）
+  - `GET /api/vllm/params?profile=qwen38flashnextexl3_4p05` → 単一行 `command` を
+    `main.py`・`--host 0.0.0.0`・`--port 5000`（`editable=false`）として表示（従来は 409）
+  - `GET /api/vllm/status` → `active=qwen38flashnextexl3_4p05`・port 8016・`health=true`・
+    `model_name=qwen3.8_flashnext_exl3_4p05bpw`。`containers` は 17 プロファイルで
+    `qwen38flashnextexl3_4p05` を含む（フロントのモデル一覧に自動表示）
+  - venv の python で `vllm._load_profiles()` は compose から
+    `qwen38flashnextexl3_4p05 → service=tabbyapi_flashnext_4p05 /
+    container=tabbyapi-flashnext-4p05 / port=8016` を自動認識し、`get_status()` は
+    `health=true`・metrics に needle 実行の prefill 1,317 T/s を返す。
+    `get_params()` は 4p05 / 3p05 / 2p05 で成功、`qwen38swift` / `mimo9b`（折り返しブロック）の
+    出力は変更なし（回帰なし）。
 - **未修正の既知の staleness(今回変更せず)**: `CLINE_MODEL_TABLE` の `qwen38flashnextexl3` と
   `qwen38flashnextexl3_3p05` は `context_max=524288` のまま。両者は YaRN factor 4.0 で 1,048,576
   運用(`config.yml`/`config_3p05.yml` の `cache_size 1048576`、README のモデル一覧は 1048576)。
