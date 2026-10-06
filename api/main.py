@@ -88,8 +88,13 @@ def api_metrics() -> dict:
 
 @app.get("/api/platform")
 def api_platform() -> dict:
-    """プラットフォーム情報 (フロントの表示切替用)。"""
-    return config.info()
+    """プラットフォーム情報 (フロントの表示切替用)。
+
+    net_max_mbps は既定値 (config.PLATFORMS) ではなく実リンク速度を優先する。
+    """
+    info = config.info()
+    info["net_max_mbps"] = host_metrics.net_gauge_max_mbps()
+    return info
 
 
 @app.get("/api/vllm/status")

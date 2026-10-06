@@ -7,6 +7,8 @@
 - GPU負荷/温度/電力/クロック: config.GPU_BACKEND に応じ nvidia-smi または amdgpu sysfs
 - ストレージ使用率: shutil.disk_usage
 - ストレージ負荷: /proc/diskstats 差分 (ルート FS の親デバイスを自動導出)
+- ネットワーク負荷: /proc/net/dev 差分 (デフォルトルートIF) / 上限=リンク速度
+  (/sys/class/net/<iface>/speed、無ければ ethtool、さらに無ければ config.NET_MAX_MBPS)
 """
 
 from __future__ import annotations
@@ -124,6 +126,52 @@ def _read_net_stats(iface: str):
     except (OSError, ValueError, IndexError):
         pass
     return None
+
+
+# リンク速度キャッシュ (リンク再ネゴシエーション追従のため TTL で再取得)
+_LINK_SPEED_TTL_S = 10.0
+_link_speed_cache: dict = {"iface": None, "ts": 0.0, "mbps": None}
+
+
+def link_speed_mbps() -> int | None:
+    """デフォルトルート IF の実リンク速度 (Mbps) — `ethtool` の Speed と同値。
+
+    1. /sys/class/net/<iface>/speed を優先読取 (root 権限不要。link down だと 0/エラー)
+    2. 取れなければ `ethtool <iface>` の "Speed: 1000Mb/s" 行をパース
+    どちらも失敗時は None (呼び出し側で config.NET_MAX_MBPS の既定値にフォールバック)。
+    """
+    iface = _default_iface()
+    if iface is None:
+        return None
+    now = time.monotonic()
+    cache = _link_speed_cache
+    if (cache["iface"] == iface and cache["mbps"] is not None
+            and now - cache["ts"] < _LINK_SPEED_TTL_S):
+        return cache["mbps"]  # type: ignore[return-value]
+
+    mbps: int | None = None
+    try:
+        speed = int(Path(f"/sys/class/net/{iface}/speed").read_text().strip())
+        if speed > 0:
+            mbps = speed
+    except (OSError, ValueError):
+        mbps = None
+    if mbps is None:
+        try:
+            r = subprocess.run(["ethtool", iface], capture_output=True,
+                               text=True, timeout=2.0)
+            m = re.search(r"Speed:\s*(\d+(?:\.\d+)?)\s*([MG])b/s", r.stdout)
+            if m:
+                mbps = int(float(m.group(1)) * (1000 if m.group(2) == "G" else 1))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            mbps = None
+    cache.update(iface=iface, ts=now, mbps=mbps)
+    return mbps
+
+
+def net_gauge_max_mbps() -> int:
+    """ネットワーク負荷ゲージの上限 (100% 相当)。実測リンク速度、無ければ既定値。"""
+    return link_speed_mbps() or int(config.NET_MAX_MBPS)
 
 
 def _read_cpu_temp_c() -> float | None:
@@ -399,8 +447,10 @@ def collect() -> dict:
         out["disk_await_ms"] = None
 
     # --- ネットワーク負荷 (/proc/net/dev 差分, デフォルトルートIF) ---
-    # Mbps = 10^6 bits/s (10 Gbps = 10000 Mbps)
+    # Mbps = 10^6 bits/s。ゲージ上限(100%相当)は実リンク速度 (ethtool Speed 相当)
     iface = _default_iface()
+    out["net_link_mbps"] = link_speed_mbps()
+    out["net_max_mbps"] = out["net_link_mbps"] or int(config.NET_MAX_MBPS)
     n = _read_net_stats(iface) if iface else None
     if n is not None:
         rx, tx = n
