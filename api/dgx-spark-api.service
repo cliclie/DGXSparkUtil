@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 Group=__USER__
+# magn-headless.service (systemd user unit) の稼働時間/ログを読むため、
+# ユーザセッションバス (XDG_RUNTIME_DIR) をサービス環境に与える
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 WorkingDirectory=__API_DIR__
 ExecStartPre=/bin/sh -c 'test -x __API_DIR__/venv/bin/python || (cd __API_DIR__ && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
 ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080

@@ -902,7 +902,7 @@ function renderVllm(st) {
     return;
   }
   const stopJob = st.switching && st.switching.kind === "stop" ? st.switching : null;
-  setV("v-model", a.model_name || a.profile);
+  setV("v-model", a.profile);
   setV("v-port", a.port != null ? String(a.port) : "-");
   if (swJob) {
     // 切替中: 旧モデルがまだ稼働中 / 新モデルのAPI未応答の遷移期間も動作状況を表示
@@ -1077,7 +1077,7 @@ document.getElementById("btn-stop").onclick = () => {
   const logEl = document.getElementById("stop-log");
   logEl.textContent = "";
   logEl.style.display = "none";
-  document.getElementById("stop-msg").textContent = `${a.model_name || a.profile} を停止しますか?`;
+  document.getElementById("stop-msg").textContent = `${a.profile} を停止しますか?`;
   document.getElementById("stop-cancel").style.display = "";
   document.getElementById("stop-go").disabled = false;
   openModal("modal-stop");
@@ -1231,7 +1231,7 @@ document.getElementById("btn-log").onclick = () => {
   input.value = "";
   input.classList.add("hidden");
   document.getElementById("log-title").textContent =
-    (a.model_name || a.profile) + "の実行ログ";
+    a.profile + "の実行ログ";
   loadLog();
   openModal("modal-log");
 };

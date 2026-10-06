@@ -1015,3 +1015,82 @@ cd /home/cliclie/DGXSparkUtil/api
 - 検証 (2026-10-06): `GET /api/vllm/status` で active=magn (health true、model_name=qwen3.8-27b:gguf:q6)、
   `POST /api/vllm/switch {profile:magn}` で切替完了 (switching None → active=magn) を確認
 
+## Magnitude (magn) 表示の不整合修正 (2026-10-06)
+
+qwen3.8-27b:gguf:q6 (magn) を追加後、vLLM/モデル段の表示に不整合があったため修正。
+
+- **稼働モデル名称の整合**: モデルボタン押下後の一覧は profile 名 (`magn`) を出す一方、稼働モデル表示は
+  `model_name` (`qwen3.8-27b:gguf:q6`) を出していて不一致だった。`front/index.html` の稼働モデル表示
+  (`v-model`)・停止ダイアログ (`stop-msg`)・ログタイトル (`log-title`) を **profile 名に統一**し、
+  モデルボタン一覧と同名にした。
+- **稼働時間**: Magnitude はコンテナを立てないため `docker inspect` の uptime が常に None だった。
+  `api/vllm.py` の `_magn_uptime_str()` が systemd user unit `magn-headless.service` の
+  `ActiveEnterTimestamp` から稼働時間を算出する。api service は cliclie で稼働するがユーザセッションバスが
+  無いため、`dgx-spark-api.service` に `Environment=XDG_RUNTIME_DIR=/run/user/1000` を追加し
+  `systemctl --user` / `journalctl --user` が接続できるようにした (テンプレート + インストール済み unit)。
+- **ログボタン**: Magnitude はコンテナの docker logs が無い。`api/vllm.py` の `get_log()` と
+  `get_status()` の magn 分岐で `journalctl --user -u magn-headless.service` を読むようにした。
+- **実行/待機 ～ 出力スループット**: Magnitude に `/metrics` は無い。`api/vllm.py` の `_magn_metrics()` が
+  GPU 負荷 (`metrics._read_gpu()` の `gpu_load_pct` が閾値 10% 超) から実行中 (1/0) を推定し、待機は単一要求で 0。
+  KVCache/E2E/TTFT は取得源なし (None → フロント "-" 表示)。スループットはカウンタ/ゲージが無いため
+  **held ロジック (`_apply_tps`) で前回値を維持** (atom1 と同じ挙動)。新規計測は None。
+- 検証 (2026-10-06): `GET /api/vllm/status` で active=magn (uptime_str=00:2x:xx、running=1/0 が推論中の
+  GPU 負荷 80-100% で 1、logs 30 件)。`GET /api/vllm/log?profile=magn` が journal 行を返すことを確認。
+  フロントは `<script>` 全 7 ブロックを gjs (SpiderMonkey) で構文チェック OK。api service 再起動後 active。
+
+## Magnitude (magn) の Cline 接続・外部公開設定 (2026-10-06)
+
+qwen3.8-27b:gguf:q6 を Cline で使う際 `http://whitebearatom2.local:10100/v1/` が反応しなかった。原因は 3 つ。
+
+1. **base path**: Magnitude は `/inference/v1/` でサーブする (`/v1/` は 404)。`api/vllm.py` の
+   `get_cline_config()` は magn に対して base_url を `http://<host>.local:<port>/v1/` で生成していた
+   → `config.MAGN_BASE_PATH` (`inference/v1`) を使うよう修正。
+2. **API key**: `network.requireApiKey=true` で **ループバック以外の機器からのアクセスは API key 必須**
+   (`Authorization: Bearer <key>`)。Cline 設定は「認証なし(任意の値でOK)」を返していた → magn は
+   `config.MAGN_API_KEY` を返すよう修正 (localhost は key 不要、LAN 機器は必須)。
+3. **Host ヘッダ検証**: Magnitude は Host ヘッダを検証し `whitebearatom2.local` を **421 Invalid Host
+   header** で拒否 (許可: IP・ローカル名・`*.ts.net`・`config.json` の `network.allowedHosts`)。
+   → `~/.magnitude/config.json` の `network` に `allowedHosts: ["whitebearatom2.local"]` を追加し、
+   `systemctl --user restart magn-headless.service` で反映。`.local` が Host として通るようになった。
+   - バインドは `0.0.0.0` (IPv4 のみ)。`.local` は mDNS で IPv6 にも解決されるが IPv6 listen は無い
+     (IPv4 経由で Host ヘッダ検証を通す)。
+4. **context**: compose の command にコンテキストフラグが無い magn は `/inference/v1/models` の
+   `context_length` (262144) を Cline 設定に補完 (`_magn_context_length()`)。
+
+Cline 設定値 (稼働モデル=magn) の正しい値:
+- API Provider: OpenAI Compatible
+- Base URL: `http://whitebearatom2.local:10100/inference/v1/`
+- API Key: `MAGN_API_KEY` (Bearer)。LAN 機器からのアクセスでは必須
+- Model ID: `qwen3.8-27b:gguf:q6` / context 262144
+
+検証 (2026-10-06): `GET /api/vllm/cline` が base_url=`.../inference/v1/`・api_key=MAGN_API_KEY・
+context_max=262144 を返すことを確認。`POST http://whitebearatom2.local:10100/inference/v1/chat/completions`
+(Bearer key) が 200 で生成を返すことを確認 (Host 検証 421 → allowedHosts 追加後 200)。
+
+### API key の指定 (2026-10-06)
+
+Magnitude の API key は `~/.magnitude/config.json` の `network.apiKey` に保存される (自動生成ではなく編集可能)。
+指定値 `c3f3437cb524c2564fb014919d09d868` に変更し、`systemctl --user restart magn-headless.service` で反映。
+併せて `~/LLM/compose/.env` と `magn.env.example` の `MAGN_API_KEY` を同一値に更新 (DGXSparkUtil の健全性
+判定・Cline 設定が読む)。検証: 旧キー 401 / 新キー 200、`GET /api/vllm/cline` が新キーを返す。
+
+## Magnitude (magn) の KVCache・E2E・TTFT・スループット表示 (2026-10-06)
+
+Magnitude に `/metrics` は無いため KVCache・E2E・TTFT・入出力スループットが全て "-" だった。
+リクエスト統計が `~/.magnitude/serving-usage.sqlite` の `usage` 表 (`input/cached/output/generation_ms/
+first_token_ms/completed_at/model`) に保存されていることを発見し、そこから算出するよう `api/vllm.py` を拡張。
+
+- `config.MAGN_USAGE_DB` (既定 `~/.magnitude/serving-usage.sqlite`、`MAGN_USAGE_DB` で上書き可) を追加。
+- `_magn_usage_stats(model_id)`: usage 表の直近 `complete=1` の完了リクエストを読み取り専用で取得。
+- `_magn_metrics(port, model_id)` の算出:
+  - E2E = first_token_ms + generation_ms (秒)
+  - TTFT = first_token_ms (秒)
+  - 入力スループット = input / (first_token_ms/1000) (プリフィル=初回トークンまでの時間)
+  - 出力スループット = output / (generation_ms/1000)
+  - KVCache 使用率 = (input + output) / context_length * 100 (context_length は API から)
+  - 実行中 = GPU 負荷 (gpu_load_pct > 10%)、待機 = 0 (単一要求)
+  - 新規完了 (`completed_at` 変化) が無ければ `*_tps_held=True` → フロント灰色 (atom1 と同じ保持挙動)
+- 検証 (2026-10-06): 稼働モデル=magn で `GET /api/vllm/status` が kv/e2e/ttft/tps_in/tps_out を返す
+  (例: prompt 9425+output 1871 で kv 4.31%・e2e 56.2s・ttft 2.05s・入力 4608 tok/s・出力 34.5 tok/s)。
+  新規完了時に値が更新され held が切り替わることを確認。api service 再起動後 active、server.log にエラーなし。
+

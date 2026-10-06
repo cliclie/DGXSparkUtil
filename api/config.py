@@ -131,3 +131,8 @@ MAGN_BASE_PATH = MAGN_ENV.get("MAGN_BASE_PATH", "inference/v1")
 MAGN_API_KEY = MAGN_ENV.get("MAGN_API_KEY", "")
 MAGN_MODEL_ID = MAGN_ENV.get("MAGN_MODEL_ID", "qwen3.8-27b:gguf:q6")
 MAGN_SYSTEMD_UNIT = MAGN_ENV.get("MAGN_SYSTEMD_UNIT", "magn-headless.service")
+# Magnitude は /metrics が無いが、リクエスト統計 (~/.magnitude/serving-usage.sqlite の usage 表)
+# に input/cached/output/generation_ms/first_token_ms を保持する。KVCache・E2E・TTFT・スループットをここから算出する。
+MAGN_USAGE_DB = Path(
+    MAGN_ENV.get("MAGN_USAGE_DB", str(Path.home() / ".magnitude" / "serving-usage.sqlite"))
+).expanduser()
