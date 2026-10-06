@@ -240,6 +240,169 @@ def _magn_active(port: int) -> bool:
     return bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
 
 
+def _magn_journal(tail: int) -> list[str]:
+    """Magnitude headless serve の直近ログ (systemd journal)。
+    コンテナを立てないため docker logs は使えない。稼働判定と同じ systemd user unit を読む。
+    api service は cliclie で稼働するため systemctl --user / journalctl --user が直接使える。
+    """
+    out = _run(
+        [
+            "journalctl",
+            "--user",
+            "-u",
+            config.MAGN_SYSTEMD_UNIT,
+            "-n",
+            str(tail),
+            "--no-pager",
+        ],
+        timeout=10,
+    )
+    return out.splitlines()[-tail:]
+
+
+def _magn_uptime_str(unit: str) -> str | None:
+    """systemd user unit の ActiveEnterTimestamp から稼働時間文字列を算出する。
+    api service は cliclie で稼働するため systemctl --user が直接使える。
+    応答形式: ActiveState=active / ActiveEnterTimestamp=Tue 2026-10-06 11:44:40 JST
+    """
+    out = _run(
+        [
+            "systemctl",
+            "--user",
+            "show",
+            unit,
+            "-p",
+            "ActiveState",
+            "-p",
+            "ActiveEnterTimestamp",
+        ],
+        timeout=5,
+    )
+    if not out:
+        return None
+    active = ts = None
+    for ln in out.splitlines():
+        if ln.startswith("ActiveState="):
+            active = ln.split("=", 1)[1].strip()
+        elif ln.startswith("ActiveEnterTimestamp="):
+            ts = ln.split("=", 1)[1].strip()
+    if active != "active" or not ts:
+        return None
+    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", ts)
+    if not m:
+        return None
+    from datetime import datetime
+
+    try:
+        t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    uptime = max(0.0, time.time() - t.timestamp())
+    return _fmt_elapsed(uptime)
+
+
+def _magn_usage_stats(model_id: str) -> dict | None:
+    """serving-usage.sqlite の usage 表から直近の完了リクエスト統計を読む (読み取り専用)。
+    Magnitude は /metrics が無いが、リクエスト毎の input/cached/output/generation_ms/first_token_ms を
+    この DB に保持する。KVCache・E2E・TTFT・入出力スループットの算出に使う。
+    """
+    import sqlite3
+
+    db = config.MAGN_USAGE_DB
+    if not db.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", timeout=1.5)
+        try:
+            row = con.execute(
+                "SELECT completed_at, input, cached, output, generation_ms, first_token_ms "
+                "FROM usage WHERE model=? AND complete=1 ORDER BY completed_at DESC LIMIT 1",
+                (model_id,),
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    completed_at, inp, cached, out, gen_ms, ft_ms = row
+    return {
+        "completed_at": completed_at,
+        "input": inp,
+        "cached": cached,
+        "output": out,
+        "gen_ms": gen_ms,
+        "ft_ms": ft_ms,
+    }
+
+
+# 直近完了リクエストの completed_at (新規完了検知 → held フラグ)
+_magn_last_completed_at: float | None = None
+
+
+def _magn_metrics(port: int, model_id: str) -> dict:
+    """Magnitude のメトリクス (/metrics 無し)。GPU 負荷で実行中を推定し、
+    serving-usage.sqlite の直近完了リクエストから KVCache・E2E・TTFT・入出力スループットを算出する。
+    - E2E = first_token_ms + generation_ms (秒)
+    - TTFT = first_token_ms (秒)
+    - 入力スループット = input / (first_token_ms/1000)  (プリフィル=初回トークンまでの時間)
+    - 出力スループット = output / (generation_ms/1000)
+    - KVCache 使用率 = (input + output) / context_length * 100
+    新規完了が無ければ held=True (前回値を維持、フロント灰色表示 = atom1 と同じ挙動)。
+    """
+    global _magn_last_completed_at
+    gpu: dict = {}
+    try:
+        import metrics
+
+        gpu = metrics._read_gpu()
+    except Exception:
+        gpu = {}
+    load = gpu.get("gpu_load_pct")
+    running = 1 if load is not None and load > 10.0 else 0
+    m = {
+        "requests_running": running,
+        "requests_waiting": 0,
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": None,
+    }
+    stats = _magn_usage_stats(model_id)
+    if stats:
+        ft_s = stats["ft_ms"] / 1000.0
+        gen_s = stats["gen_ms"] / 1000.0
+        m["e2e_latency_s"] = ft_s + gen_s
+        m["ttft_s"] = ft_s
+        m["prompt_tokens_per_s"] = stats["input"] / ft_s if ft_s > 0 else None
+        m["generation_tokens_per_s"] = stats["output"] / gen_s if gen_s > 0 else None
+        ctx = _magn_context_length(port)
+        if ctx:
+            m["kv_cache_usage_pct"] = min(
+                100.0, (stats["input"] + stats["output"]) / ctx * 100.0
+            )
+        new = stats["completed_at"] != _magn_last_completed_at
+        m["prompt_tps_held"] = not new
+        m["generation_tps_held"] = not new
+        _magn_last_completed_at = stats["completed_at"]
+    else:
+        p_val, p_held = _apply_tps("prompt", None)
+        g_val, g_held = _apply_tps("generation", None)
+        m["prompt_tokens_per_s"] = p_val
+        m["prompt_tps_held"] = p_held
+        m["generation_tokens_per_s"] = g_val
+        m["generation_tps_held"] = g_held
+    return m
+
+
+def _magn_context_length(port: int) -> int | None:
+    """Magnitude の /inference/v1/models から context_length を読む (Cline 設定補完用)。"""
+    txt = _http_get(_magn_models_url(port), 5, _magn_headers())
+    if not txt:
+        return None
+    m = re.search(r'"context_length"\s*:\s*(\d+)', txt)
+    return int(m.group(1)) if m else None
+
+
 # ---------------------------------------------------------------- 状態
 
 def _parse_vllm_metrics(text: str) -> dict:
@@ -636,6 +799,12 @@ def get_status() -> dict:
         active["api_url"] = f"{base}/{config.MAGN_BASE_PATH}"
         active["health"] = bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
         active["model_name"] = config.MAGN_MODEL_ID
+        # 稼働時間: コンテナは立たないため systemd user unit の ActiveEnterTimestamp から算出
+        active["uptime_str"] = _magn_uptime_str(config.MAGN_SYSTEMD_UNIT)
+        # メトリクス: /metrics 無し → GPU 負荷から実行中を推定 + usage DB から KVCache・E2E・TTFT・スループット算出
+        active["metrics"] = _magn_metrics(port, config.MAGN_MODEL_ID)
+        # 直近ログ: docker logs 無し → systemd journal
+        active["logs"] = _magn_journal(30)
         out["active"] = active
         return out
 
@@ -736,12 +905,24 @@ def get_log(profile: str, tail: int = 500) -> dict:
 
     停止済みコンテナでもログファイルが残っている限り取得できる。
     コンテナの stdout/stderr 両方を取得するため _run ではなく直接 subprocess。
+    Magnitude はコンテナを立てないため systemd journal (journalctl --user) を読む。
     """
     profiles = _load_profiles()
     if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
     p = profiles[profile]
-    cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
+    if profile == "magn":
+        cmd = [
+            "journalctl",
+            "--user",
+            "-u",
+            config.MAGN_SYSTEMD_UNIT,
+            "-n",
+            str(tail),
+            "--no-pager",
+        ]
+    else:
+        cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         text = r.stdout + r.stderr
@@ -1126,7 +1307,18 @@ def get_cline_config() -> dict:
     # 動的: モデル名・ポート・hostname
     model_id = active.get("model_name") or profile
     hostname = socket.gethostname()
-    base_url = f"http://{hostname}.local:{port}/v1/"
+
+    # Magnitude は base path が inference/v1 (vLLM/llama.cpp とは違う)で、
+    # 外部機器からのアクセスは API key 必須 (network.requireApiKey=true)。
+    # Host ヘッダ検証に .local を通すため ~/.magnitude/config.json の
+    # network.allowedHosts に whitebearatom2.local を登録する (README 参照)。
+    is_magn = profile == "magn"
+    if is_magn:
+        base_url = f"http://{hostname}.local:{port}/{config.MAGN_BASE_PATH}/"
+        api_key = config.MAGN_API_KEY
+    else:
+        base_url = f"http://{hostname}.local:{port}/v1/"
+        api_key = "認証なし(任意の値でOK)"
 
     # 動的: コンテキストウィンドウ(推奨)
     ctx = _command_flag_value(service, ["--max-model-len", "--context-length", "--ctx-size"])
@@ -1159,6 +1351,12 @@ def get_cline_config() -> dict:
     context_max = table.get("context_max", context_recommended)
     if context_recommended is None:
         context_recommended = context_max
+    # Magnitude は compose の command にコンテキストフラグが無い → API の context_length を使う
+    if is_magn:
+        magn_ctx = _magn_context_length(port)
+        if magn_ctx is not None:
+            context_recommended = magn_ctx
+            context_max = magn_ctx
     max_output_recommended = table.get("max_output_recommended", 8192)
     max_output_max = table.get("max_output_max", 32768)
     if temperature is None:
@@ -1167,7 +1365,7 @@ def get_cline_config() -> dict:
     return {
         "api_provider": "OpenAI Compatible",
         "base_url": base_url,
-        "api_key": "認証なし(任意の値でOK)",
+        "api_key": api_key,
         "model_id": model_id,
         "supports_images": images,
         "context_recommended": context_recommended,
