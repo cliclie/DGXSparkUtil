@@ -61,7 +61,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 | GPU温度 | GPU Temperature | 現在温度(例: `38°C`) | 上限(例: `100°C`) |
 | ストレージの使用率 | Storage | 使用量(例: `663 GiB`) | 容量(例: `3.6 TiB total`) |
 | ストレージの負荷 | Storage I/O | 読込/書込速度を2値表示(例: 読込 `120 MB/s` / 書込 `45 MB/s`) | 上限(例: `5 GB/s`) |
-| ネットワークの負荷 | Network | 下り/上り速度を2値表示(例: 下り `1200 Mbps` / 上り `300 Mbps`) | 上限(例: `10 Gbps`) |
+| ネットワークの負荷 | Network | 下り/上り速度を2値表示(例: 下り `1200 Mbps` / 上り `300 Mbps`) | 上限=**実測リンク速度**(例: `10 Gbps`、実装メモ 2026-10-06 参照) |
 
 - 色ゾーンの閾値は設定可能(デフォルト: 緑 < 60%、オレンジ 60〜85%、赤 > 85%)
 - ストレージの使用率は、下部に空き容量を2行目で表示可能(例: `free 2.8 TiB`)
@@ -246,7 +246,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │      /sys/class/thermal/*, /proc/diskstats,           │
 │      nvidia-smi(subprocess) / amdgpu sysfs,           │
 │      docker CLI(ps/inspect/logs), vLLM /health,       │
-│      /v1/models, /metrics                              │
+│      /v1/models, /metrics, /proc/net/dev (差分),      │
+│      /sys/class/net/<if>/speed (NIC 実リンク速度)     │
 │  ② 表示: front/ (単一 index.html + JS)          │
 │     4段レイアウト(表示レイアウト(4段構成)参照)   │
 │     一段目: 現在値ゲージ行 / 二段目: 時系列グラフ  │
@@ -738,6 +739,7 @@ cd /home/cliclie/DGXSparkUtil/api
   1 つの半円ゲージ(`g-net`「ネットワーク負荷」)内に**外側アーチ=下り(青 #58a6ff) /
   内側アーチ=上り(紫 #bc8cff)**として 2 値を別々に表示(合計値ではない)。
   **10 Gbps = 100%** とし `max: 10000`(Mbps)で換算(10^6 bits/s 基準)。
+  ※ 上限の固定値運用は 2026-10-06 に実測リンク速度基準へ変更(下記 実装メモ(2026-10-06) 参照)。
   - API 側(`api/metrics.py`): `/proc/net/dev` の rx/tx バイト差分で `net_down_mbps` /
     `net_up_mbps` を算出。計測対象は `/proc/net/route` のデフォルトルートIF
     (実機では `enP7s7`)のみ。docker の `br-*`/`veth*`/`docker0` は内部トラフィックのため
@@ -820,7 +822,8 @@ cd /home/cliclie/DGXSparkUtil/api
   環境変数 `DGXUTIL_PLATFORM` / `DGXUTIL_COMPOSE_DIR` / `DGXUTIL_RAG_DIR` で上書き可):
   - `COMPOSE_DIR`: dgx-spark `/home/cliclie/llm/compose` / atom2 `/home/cliclie/LLM/compose`
   - `RAG_DIR`: dgx-spark `/home/cliclie/llm/compose/sociax-rag` / atom2 `/home/cliclie/RAG/compose`
-  - `MEMORY_MODE`: unified(統合メモリ 1 枚)/ discrete(RAM + VRAM 2 枚)、`NET_MAX_MBPS` 10000/1000、
+  - `MEMORY_MODE`: unified(統合メモリ 1 枚)/ discrete(RAM + VRAM 2 枚)、`NET_MAX_MBPS` 10000/1000
+    (2026-10-06 以降は**リンク速度が取れない時のフォールバック既定値**に格下げ)、
     `EXCLUSIVE_LLM_RAG`(atom2 のみ True: VRAM 32GB のため LLM ⇔ RAG embedding 排他)
 - **`api/metrics.py` GPU バックエンド分割**: `_read_gpu_nvidia`(現行) / `_read_gpu_amdgpu`
   (rocm-smi 未インストールのため sysfs 直接読み: `gpu_busy_percent`、hwmon `temp*_input`
@@ -836,7 +839,8 @@ cd /home/cliclie/DGXSparkUtil/api
   **RAM + VRAM の 2 ゲージ**(VRAM=シアン #39c5cf、書式は統合メモリと同じ: 使用率% +
   空き GiB / 使用・総量)、時系列グラフにも「VRAM使用率 %」系列を追加。
   GPU 電力/クロック/温度の上限はプラットフォーム既定値から実測値 (`*_cap_w` /
-  `*_max_mhz` / `*_crit_c`) へ自動補正。ネットワーク上限は 1Gbps/10Gbps 切替。
+  `*_max_mhz` / `*_crit_c`) へ自動補正。ネットワーク上限は 1Gbps/10Gbps 切替
+  (2026-10-06 にプラットフォーム既定値 → 実測リンク速度へ変更)。
   バックエンド未提供の項目 (`undefined`) はゲージ自体を非表示。
   ヘッダータイトルは dgx-spark が「DGX Spark Monitor」、atom2 が `<hostname> Monitor`。
 - **LLM ⇔ RAG 排他 (atom2)**:
@@ -964,3 +968,33 @@ cd /home/cliclie/DGXSparkUtil/api
   検証: 実物ログと同形式(ANSI/`\r` 込み)のダミーログによる隔離テスト3ケース(起動中3フレーム/
   完了ブロック+compose 出力/ヘッダーなし) + 実環境での実切替(atom2: qwen38gguf 切替 → RAG 起動)で
   ポーリングごとにヘッダー1行+直近4ログ行のみとなることを確認。RAG は healthy に復旧済み。
+
+- **ネットワーク負荷ゲージの上限を実測リンク速度に変更**: 従来は 100% 相当の上限が
+  `api/config.py` のプラットフォーム固定値 (dgx-spark 10000 / atom2 1000 Mbps) で、
+  atom2 は 1Gbps 固定表示になっていた。これを NIC の実リンク速度基準へ変更する。
+  - `api/metrics.py`: `link_speed_mbps()` を新規追加。デフォルトルート IF
+    (既存 `_default_iface()` = `/proc/net/route` から導出、`br-*`/`veth*`/`docker0` は対象外) について
+    1. `/sys/class/net/<iface>/speed` を優先読取 (root 権限不要。link down 時は 0/エラーなのでその場合は次へ)
+    2. 取れなければ `ethtool <iface>` の `Speed:` 行をパース (`1000Mb/s` / `2.5Gb/s` 形式に対応)
+    3. どちらも失敗時 `None`
+    2 秒間隔のポーリングで毎回 ethtool を叩かないよう **TTL 10 秒のキャッシュ**付き
+    (リンク再ネゴシエーションには最大 10 秒で追従)。併せて `net_gauge_max_mbps()`
+    (実測値、無ければ `config.NET_MAX_MBPS` にフォールバック) を追加。
+  - `/api/metrics` の返却に `net_link_mbps` (実測値、不明時 `null`) と
+    `net_max_mbps` (ゲージ上限として使う値 = 実測 or 既定値) を追加。
+  - `api/main.py` の `GET /api/platform` は `config.info()` の `net_max_mbps` を
+    実測リンク速度で上書きして返す (初回描画前の表示も実測基準に合わせる)。
+  - `api/config.py`: `NET_MAX_MBPS` の値自体は据え置きとし、コメントを
+    「実リンク速度が取れない時のフォールバック既定値」に更新。
+  - `front/index.html`: 既存の「上限の実測値補正」機構 `tuneGauge()` に `g-net` を追加
+    (`m.net_max_mbps` が来たら `d.max` を更新して再描画)。ゲージ下のラベルは
+    `sub: () => ...` (クロージャで固定値 `netMax` を参照) から `sub() { ... this.max ... }`
+    のメソッド記法に変更し、上限変更表示に追随させる。
+  - 検証 (whitebearatom2 実機): `ethtool enx8ca682716b1e` = `Speed: 10000Mb/s` に対し
+    `/api/metrics` が `net_link_mbps=10000` / `net_max_mbps=10000`、`/api/platform` が
+    `net_max_mbps=10000` を返すことを確認 (atom2 は実 10G リンクのため 100% = 10 Gbps 表示に)。
+    API 変更のため `sudo systemctl restart dgx-spark-api` 後 active を確認。
+    フロントは `<script>` 全ブロック (7 本) の構文チェックを gjs (SpiderMonkey) で実施。
+    ※ 作業途中、`g-net` 定義行のオブジェクト閉じ `}` を欠落させページがほぼ空白に
+    (構文エラーで `<script>` 全体が未実行 → `PLAT is not defined`) なったため、
+    フロント編集後は必ず構文チェックとブラウザ表示確認を行うこと。

@@ -53,7 +53,7 @@ PLATFORMS: dict[str, dict] = {
         # unified: CPU/GPU 共有メモリ(GB10 128GB) → 「統合メモリ」ゲージ 1 枚
         # discrete: RAM と VRAM 別 → 「RAM」「VRAM」ゲージ 2 枚
         "memory_mode": "unified",
-        "net_max_mbps": 10000,   # ゲージ上限 (10 Gbps)
+        "net_max_mbps": 10000,   # ゲージ上限の既定値 (実リンク速度が取れない時のフォールバック)
         # LLM と RAG embedding の排他有無 (atom2 は VRAM 32GB のため排他)
         "exclusive_llm_rag": False,
     },
@@ -63,7 +63,7 @@ PLATFORMS: dict[str, dict] = {
         "rag_dir": "/home/cliclie/RAG/compose",
         "gpu_backend": "amdgpu",
         "memory_mode": "discrete",
-        "net_max_mbps": 1000,    # ゲージ上限 (1 Gbps)
+        "net_max_mbps": 1000,    # ゲージ上限の既定値 (実リンク速度が取れない時のフォールバック)
         "exclusive_llm_rag": True,
     },
 }

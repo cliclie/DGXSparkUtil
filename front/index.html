@@ -732,7 +732,8 @@ function gaugeDefs() {
       colorA: "#58a6ff", colorB: "#bc8cff", labelA: "下り", labelB: "上り",
       getA: (m) => m.net_down_mbps, getB: (m) => m.net_up_mbps,
       fmt: (v) => v.toFixed(0),
-      sub: () => `上限 ${netMax >= 1000 ? netMax / 1000 + " Gbps" : netMax + " Mbps"}` },
+      // 上限は実測リンク速度 (/api/metrics の net_max_mbps で tuneGauge が随時更新)
+      sub() { const v = this.max; return `上限 ${v >= 1000 ? v / 1000 + " Gbps" : v + " Mbps"}` } },
   );
   return defs;
 }
@@ -755,13 +756,15 @@ function buildHostCards() {
   gages = defs.map((d) => new Gauge(d.id, d));
 }
 
-// 上限の実測値補正: amdgpu sysfs の cap/crit/max があればプラットフォーム既定値を上書き
+// 上限の実測値補正: amdgpu sysfs の cap/crit/max や NIC リンク速度が
+// プラットフォーム既定値があれば上書き
 function tuneGauge(g, m) {
   const d = g.def;
   let max = null;
   if (d.id === "g-gpu-power" && m.gpu_power_cap_w) max = m.gpu_power_cap_w;
   if (d.id === "g-gpu-clock" && m.gpu_clock_max_mhz) max = m.gpu_clock_max_mhz;
   if (d.id === "g-gpu-temp" && m.gpu_temp_crit_c) max = m.gpu_temp_crit_c;
+  if (d.id === "g-net" && m.net_max_mbps) max = m.net_max_mbps;
   if (max !== null && max !== d.max) {
     d.max = max;
     g._last = null; // 上限変更時はキャッシュ無効化で再描画
