@@ -882,9 +882,23 @@ function setV(id, text, cls) {
 }
 
 // 入力/出力スループットの最終更新時刻(ms)。
-// 「更新」= API が held=false で非 null を返した場合。null 値は更新とみなさない。
+// 「更新」= API が非ゼロの新しい計測値を返した場合。0/null は更新とみなさない(前回値を保持)。
 // 同時更新(同じポーリング)なら等値 → 両方白。
 let tpsLastUpdate = { in: null, out: null };
+
+// E2E・TTFT・入力/出力スループットの前回値保持(front 側)。
+// API の算出値が 0/None のとき前回値を維持表示する。稼働モデル消失・モデル切替でリセット。
+let heldMetrics = { e2e: null, ttft: null, in: null, out: null };
+let heldProfile = null;
+
+// 算出値が非ゼロなら保持値を更新して返す。0/null は保持値を返す(4 値共通)。
+function pickMetric(cur, key) {
+  if (cur != null && cur > 0) {
+    heldMetrics[key] = cur;
+    return cur;
+  }
+  return heldMetrics[key];
+}
 
 function renderVllm(st) {
   const a = st.active;
@@ -897,6 +911,10 @@ function renderVllm(st) {
   // 切替ジョブ実行中は動作状況をコンテナ状態に同期する("切替中…" 赤)
   const swJob = st.switching && st.switching.kind === "switch" ? st.switching : null;
   if (!a) {
+    // 稼働モデル消失: 保持値・白/灰状態をリセット
+    heldMetrics = { e2e: null, ttft: null, in: null, out: null };
+    heldProfile = null;
+    tpsLastUpdate = { in: null, out: null };
     setV("v-model", "稼働中のモデルなし");
     setV("v-status", swJob ? "切替中…" : "停止中", swJob ? "hot" : "down");
     return;
@@ -914,25 +932,36 @@ function renderVllm(st) {
     setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
   }
   setV("v-uptime", a.uptime_str || "-");
+  // モデル切替(稼働 profile 変化)で保持値・白/灰状態をリセット(エンジン別で値が非連続)
+  if (a.profile !== heldProfile) {
+    heldMetrics = { e2e: null, ttft: null, in: null, out: null };
+    tpsLastUpdate = { in: null, out: null };
+    heldProfile = a.profile;
+  }
   const mt = a.metrics || {};
   const run = mt.requests_running != null ? Math.round(mt.requests_running) : "-";
   const wait = mt.requests_waiting != null ? Math.round(mt.requests_waiting) : "-";
   setV("v-rw", run === "-" && wait === "-" ? "-" : run + " / " + wait);
   setV("v-kv", mt.kv_cache_usage_pct != null ? mt.kv_cache_usage_pct.toFixed(1) + " %" : "-");
-  setV("v-e2e", mt.e2e_latency_s != null ? mt.e2e_latency_s.toFixed(1) + " s" : "-");
-  setV("v-ttft", mt.ttft_s != null ? mt.ttft_s.toFixed(2) + " s" : "-");
-  // スループットの白/灰: 最終更新が新しい側が白、古くなった側が灰。
+  // E2E・TTFT: 0/None のとき前回値を維持表示
+  const e2e = pickMetric(mt.e2e_latency_s, "e2e");
+  const ttft = pickMetric(mt.ttft_s, "ttft");
+  setV("v-e2e", e2e != null ? e2e.toFixed(1) + " s" : "-");
+  setV("v-ttft", ttft != null ? ttft.toFixed(2) + " s" : "-");
+  // スループットの白/灰: 最終更新(非ゼロ計測)が新しい側が白、古くなった側が灰。
   // 同じポーリングで両方更新なら(同一時刻)次更新まで両白、片方が更新されなければ前回の色を維持。
   const nowTs = Date.now();
-  const inUpdated = mt.prompt_tokens_per_s != null && !mt.prompt_tps_held;
-  const outUpdated = mt.generation_tokens_per_s != null && !mt.generation_tps_held;
+  const tpsIn = pickMetric(mt.prompt_tokens_per_s, "in");
+  const tpsOut = pickMetric(mt.generation_tokens_per_s, "out");
+  const inUpdated = mt.prompt_tokens_per_s != null && mt.prompt_tokens_per_s > 0;
+  const outUpdated = mt.generation_tokens_per_s != null && mt.generation_tokens_per_s > 0;
   if (inUpdated) tpsLastUpdate.in = nowTs;
   if (outUpdated) tpsLastUpdate.out = nowTs;
   const inWhite = tpsLastUpdate.in != null && tpsLastUpdate.in >= tpsLastUpdate.out;
   const outWhite = tpsLastUpdate.out != null && tpsLastUpdate.out >= tpsLastUpdate.in;
-  setV("v-tps-in", mt.prompt_tokens_per_s != null ? mt.prompt_tokens_per_s.toFixed(1) + " tok/s" : "-",
+  setV("v-tps-in", tpsIn != null ? tpsIn.toFixed(1) + " tok/s" : "-",
     inWhite ? "" : "stale");
-  setV("v-tps-out", mt.generation_tokens_per_s != null ? mt.generation_tokens_per_s.toFixed(1) + " tok/s" : "-",
+  setV("v-tps-out", tpsOut != null ? tpsOut.toFixed(1) + " tok/s" : "-",
     outWhite ? "" : "stale");
 }
 
