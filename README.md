@@ -286,6 +286,9 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   `--metrics` 未有効時は `/slots` のみで基本状態を取得。E2E/TTFT は v0.5.0 では未公開(実装メモ 2026-10-04 参照)
 - TabbyAPI は `/metrics` が無いが、docker logs のリクエスト毎統計から実行/待機・KVCache(推定)・
   E2E・TTFT・入力/出力スループットを取得する(実装メモ 2026-09-14 参照)
+- **E2E・TTFT・入力/出力スループットの前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
+  `front/index.html` の `pickMetric()` が直近の非ゼロ値を保持し、API が 0/None を返した間は前回値を維持表示する(実装メモ 2026-10-06)。
+  稼働モデル消失・モデル切替(profile 変化)で保持値をリセット。スループットの白/灰は「API が非ゼロの新しい計測値を返した」側を白とする相対判定
 
 **モデル切替**
 - 三段目のポップアップ内の「切替」ボタン → サーバ側で `switch_models.sh <profile>` を実行
@@ -1093,4 +1096,31 @@ first_token_ms/completed_at/model`) に保存されていることを発見し�
 - 検証 (2026-10-06): 稼働モデル=magn で `GET /api/vllm/status` が kv/e2e/ttft/tps_in/tps_out を返す
   (例: prompt 9425+output 1871 で kv 4.31%・e2e 56.2s・ttft 2.05s・入力 4608 tok/s・出力 34.5 tok/s)。
   新規完了時に値が更新され held が切り替わることを確認。api service 再起動後 active、server.log にエラーなし。
+
+## E2E・TTFT・スループットの前回値保持をフロント側へ移行 (2026-10-06)
+
+運用要求: E2E・TTFT・入力スループット・出力スループットは、ポーリング時の更新値が 0 や空値(null)のとき
+前回値を保持して表示する。従来はスループットのみバックエンド(`api/vllm.py` の `_apply_tps` と `*_tps_held`)で
+保持していた。E2E・TTFT に拡張しつつ、保持をフロント側へ移し、バックエンドの保持ロジックを撤去した。
+
+- **バックエンド(生値返却)**:
+  - `_last_metrics` / `_apply_metric`(および従来の `_last_tps` / `_apply_tps`)を削除。`_tps_of()` は差分 tok/s の
+    生値(0/None を含む)を返すだけ。`*_tps_held` / `*_held` フラグは返さない。
+  - vLLM / SGLang / Magnitude / TabbyAPI / llama.cpp の各メトリクス生成で E2E・TTFT・入出力スループットを
+    算出値そのまま返す。使われなくなった `_magn_last_completed_at`(global)・`last_id_before` と held 言及の docstring を掃除。
+  - `_reset_token_state()` はトークンカウンタ差分のみ初期化(保持値の概念は廃止)。
+- **フロント(前回値保持)**:
+  - `front/index.html` に `heldMetrics`(e2e/ttft/in/out)と `heldProfile` を追加。`pickMetric(cur, key)` は
+    算出値が非ゼロなら保持値を更新して返す。0/null は保持値を返す(4 値共通)。
+  - `renderVllm` で E2E・TTFT・入力/出力スループットを `pickMetric` 経由で表示。稼働モデル消失時と稼働 profile 変化
+    (モデル切替)時に保持値・白/灰状態(`tpsLastUpdate`)をリセットし、エンジン間の非連続な値が混ざらないようにする。
+  - スループットの白/灰判定は「API が非ゼロの新しい計測値を返した」側を白(相対最終更新判定)。`*_tps_held` 依存を撤去。
+- **トレードオフ**: フロント側保持はブラウザ内存のみ。ページリロードで保持値はリセットされる(バックエンド保持と異なり
+  リロード後も残らない)。API を直接見るツール(curl 等)は 0/null の生値が見える。保持は表示層にのみ効く。
+- **置き換える従来メモ**: 実装メモ 2026-08-27 の「スループットの前回値保持(`_apply_tps`)」、2026-08-31 の
+  「held値を灰色表示(`*_tps_held`)」、2026-09-14 の TabbyAPI held、2026-10-06 の Magnitude `*_tps_held` は
+  いずれもバックエンド保持に基づく記述であり、本メモでフロント側保持へ置き換えられた(`*_tps_held` は API から消滅)。
+- **検証 (2026-10-06)**: バックエンドは SGLang 完了無しで e2e/ttft=None・throughput=0.0 を返し `*_held` キーを持たないことを
+  実測(モック pm で `_sglang_metrics` / `_llamacpp_metrics` を呼んで確認)。フロントの波括弧対応を目視検証(`pickMetric` と
+  `renderVllm` の閉じ)。JS エンジン(node/deno/bun)は環境に無く、フロント実行検証は未実施。api service は未稼働(手動起動時に反映)。
 

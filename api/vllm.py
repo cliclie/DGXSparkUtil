@@ -135,38 +135,22 @@ _job: dict | None = None
 # /metrics のトークンカウンタ差分(スループット算出用: 入力/出力分離)
 _prev_metrics: dict = {"ts": None, "prompt": None, "generation": None}
 
-# 直近の非ゼロスループットを保持(入力/出力別)。SGLang/vLLM のトークンカウンタはリクエスト完了時のみ
-#増加するため、完了が無い間差分が 0 になる → 運用要求により前回値を維持表示する。
-_last_tps: dict = {"prompt": None, "generation": None}
 
+def _tps_of(key: str, metric: str, pm: dict, now: float) -> float | None:
+    """key に対応する系列の差分 tok/s を算出する。
 
-def _apply_tps(key: str, tokens_per_s: float | None) -> tuple[float | None, bool]:
-    """算出スループットが非ゼロなら保持値を更新し、それ以外は保持値を返す。
-
-    戻り値: (表示値, 前回値を保持(held)しているか)。
-    held=True は「今この瞬間の新規計測値ではなく、直近の非ゼロ値を引き継いでいる」ことを示す。
-    """
-    if tokens_per_s and tokens_per_s > 0:
-        _last_tps[key] = tokens_per_s
-        return tokens_per_s, False
-    return _last_tps[key], True
-
-
-def _reset_token_state() -> None:
-    """カウンタ差分・保持スループットを初期化(メトリクス無効/エンジン切替時)。"""
-    _prev_metrics["ts"], _prev_metrics["prompt"], _prev_metrics["generation"] = None, None, None
-    _last_tps["prompt"], _last_tps["generation"] = None, None
-
-
-def _tps_of(key: str, metric: str, pm: dict, now: float) -> tuple[float | None, bool]:
-    """key に対応する系列の差分 tok/s を算出(保持値ロジック適用)。
-
-    直前値が無い・系列が今回存在しない場合は保持値(未設定なら None)をそのまま返す。
+    直前値が無い・系列が今回存在しない場合は None。前回値保持は front 側で行うため
+    バックエンドは算出値(0/None を含む)をそのまま返す。
     """
     if _prev_metrics[key] is not None and metric in pm:
         dt = max(now - _prev_metrics["ts"], 1e-9)
-        return _apply_tps(key, max(0.0, (pm[metric] - _prev_metrics[key]) / dt))
-    return _apply_tps(key, None)
+        return max(0.0, (pm[metric] - _prev_metrics[key]) / dt)
+    return None
+
+
+def _reset_token_state() -> None:
+    """カウンタ差分を初期化(メトリクス無効/エンジン切替時)。"""
+    _prev_metrics["ts"], _prev_metrics["prompt"], _prev_metrics["generation"] = None, None, None
 
 
 # ---------------------------------------------------------------- 基本ユーティリティ
@@ -336,8 +320,6 @@ def _magn_usage_stats(model_id: str) -> dict | None:
     }
 
 
-# 直近完了リクエストの completed_at (新規完了検知 → held フラグ)
-_magn_last_completed_at: float | None = None
 
 
 def _magn_metrics(port: int, model_id: str) -> dict:
@@ -348,9 +330,8 @@ def _magn_metrics(port: int, model_id: str) -> dict:
     - 入力スループット = input / (first_token_ms/1000)  (プリフィル=初回トークンまでの時間)
     - 出力スループット = output / (generation_ms/1000)
     - KVCache 使用率 = (input + output) / context_length * 100
-    新規完了が無ければ held=True (前回値を維持、フロント灰色表示 = atom1 と同じ挙動)。
+    前回値保持は front 側で行うため、ここでは直近完了リクエストの算出値をそのまま返す。
     """
-    global _magn_last_completed_at
     gpu: dict = {}
     try:
         import metrics
@@ -380,17 +361,6 @@ def _magn_metrics(port: int, model_id: str) -> dict:
             m["kv_cache_usage_pct"] = min(
                 100.0, (stats["input"] + stats["output"]) / ctx * 100.0
             )
-        new = stats["completed_at"] != _magn_last_completed_at
-        m["prompt_tps_held"] = not new
-        m["generation_tps_held"] = not new
-        _magn_last_completed_at = stats["completed_at"]
-    else:
-        p_val, p_held = _apply_tps("prompt", None)
-        g_val, g_held = _apply_tps("generation", None)
-        m["prompt_tokens_per_s"] = p_val
-        m["prompt_tps_held"] = p_held
-        m["generation_tokens_per_s"] = g_val
-        m["generation_tps_held"] = g_held
     return m
 
 
@@ -462,12 +432,8 @@ def _sglang_metrics(pm: dict) -> dict:
     }
     if "sglang:prompt_tokens_total" in pm or "sglang:generation_tokens_total" in pm:
         now = time.time()
-        p_val, p_held = _tps_of("prompt", "sglang:prompt_tokens_total", pm, now)
-        g_val, g_held = _tps_of("generation", "sglang:generation_tokens_total", pm, now)
-        m["prompt_tokens_per_s"] = p_val
-        m["prompt_tps_held"] = p_held
-        m["generation_tokens_per_s"] = g_val
-        m["generation_tps_held"] = g_held
+        m["prompt_tokens_per_s"] = _tps_of("prompt", "sglang:prompt_tokens_total", pm, now)
+        m["generation_tokens_per_s"] = _tps_of("generation", "sglang:generation_tokens_total", pm, now)
         _prev_metrics["ts"] = now
         _prev_metrics["prompt"] = pm.get("sglang:prompt_tokens_total", _prev_metrics["prompt"])
         _prev_metrics["generation"] = pm.get("sglang:generation_tokens_total", _prev_metrics["generation"])
@@ -550,10 +516,8 @@ def _llamacpp_metrics(pm: dict, base: str) -> dict:
     # スループット: ゲージとして直接公開 (カウンター差分不要)
     if "llamacpp:prompt_tokens_seconds" in pm:
         m["prompt_tokens_per_s"] = pm["llamacpp:prompt_tokens_seconds"]
-        m["prompt_tps_held"] = False
     if "llamacpp:predicted_tokens_seconds" in pm:
         m["generation_tokens_per_s"] = pm["llamacpp:predicted_tokens_seconds"]
-        m["generation_tps_held"] = False
     return m
 
 
@@ -638,13 +602,12 @@ def _tabbyapi_metrics(base: str, container: str) -> dict:
     実行/待機: ログの req_id 追跡(開始あり・完了なし)。max_batch_size 超過分は待機。
     KVCache: (直近リクエストの prompt+gen トークン) / cache_size の推定値
     (TabbyAPI に直接使用率 API は無い。KV キャッシュは直近会話分を保持するため)。
-    E2E/TTFT/スループット: 直近完了リクエストの値。スループットは vLLM/SGLang と同じ
-    held ロジック(新規完了がなければ前回値を保持・フロントで灰色表示)。
+    E2E/TTFT/スループット: 直近完了リクエストの値。前回値保持は front 側で行うため
+    ここでは算出値(0/None を含む)をそのまま返す。
     入力スループットは全プロンプトトークン換算(prompt_tokens / prompt_time)で
     vLLM の prompt_tokens_per_s と同一セマンティクス。
     """
     now = time.time()
-    last_id_before = _tabby_last["req_id"]
     events = _tabbyapi_parse_logs(
         _run(["docker", "logs", "--tail", str(_TABBY_LOG_TAIL), container], timeout=10)
     )
@@ -686,13 +649,10 @@ def _tabbyapi_metrics(base: str, container: str) -> dict:
             )
         m["e2e_latency_s"] = stats["total_s"]
         m["ttft_s"] = stats["ttft_s"]
-        held = _tabby_last["req_id"] == last_id_before  # 前回ポーリング以降に新規完了が無いか
         m["prompt_tokens_per_s"] = (
             stats["prompt_tokens"] / stats["prompt_time"] if stats["prompt_time"] > 0 else None
         )
-        m["prompt_tps_held"] = held
         m["generation_tokens_per_s"] = stats["gen_tps"]
-        m["generation_tps_held"] = held
     return m
 
 
@@ -855,15 +815,11 @@ def get_status() -> dict:
         }
 
         # トークンスループット(カウンター差分・入力/出力分離)。系列が存在する場合のみ算出
-        # (vLLM、または --enable-metrics 有効の SGLang)。欠落側は前回保持値を維持。
+        # (vLLM、または --enable-metrics 有効の SGLang)。
         if "vllm:prompt_tokens_total" in pm or "vllm:generation_tokens_total" in pm:
             now = time.time()
-            p_val, p_held = _tps_of("prompt", "vllm:prompt_tokens_total", pm, now)
-            g_val, g_held = _tps_of("generation", "vllm:generation_tokens_total", pm, now)
-            active["metrics"]["prompt_tokens_per_s"] = p_val
-            active["metrics"]["prompt_tps_held"] = p_held
-            active["metrics"]["generation_tokens_per_s"] = g_val
-            active["metrics"]["generation_tps_held"] = g_held
+            active["metrics"]["prompt_tokens_per_s"] = _tps_of("prompt", "vllm:prompt_tokens_total", pm, now)
+            active["metrics"]["generation_tokens_per_s"] = _tps_of("generation", "vllm:generation_tokens_total", pm, now)
             _prev_metrics["ts"] = now
             _prev_metrics["prompt"] = pm.get("vllm:prompt_tokens_total", _prev_metrics["prompt"])
             _prev_metrics["generation"] = pm.get("vllm:generation_tokens_total", _prev_metrics["generation"])
