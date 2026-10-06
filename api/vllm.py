@@ -1009,6 +1009,19 @@ def _service_command_lines(service: str) -> list[str] | None:
                 in_command = True
                 indent = len(ln) - len(ln.lstrip())
                 continue
+            m = re.match(r"^    command:\s*(\S.*?)\s*$", ln)  # 単一行 command (TabbyAPI 系)
+            if m and not in_command and not block:
+                toks = m.group(1).split()
+                out: list[str] = [toks[0]]  # プログラム名 (main.py)
+                i = 1
+                while i < len(toks):
+                    if toks[i].startswith("-"):
+                        nxt = toks[i + 1] if i + 1 < len(toks) and not toks[i + 1].startswith("-") else None
+                        out.append(toks[i] + (f" {nxt}" if nxt else ""))
+                        i += 2 if nxt else 1
+                    else:
+                        i += 1
+                return out
             if in_command:
                 if ln.strip() == "" or ln.lstrip().startswith("#"):
                     continue
@@ -1179,6 +1192,13 @@ CLINE_MODEL_TABLE = {
     "qwen38flashnextexl3_3p05": {
         "images": True,
         "context_max": 524288,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38flashnextexl3_4p05": {
+        "images": True,  # vision: true（vision_k6.safetensors・6bit 量子化）
+        "context_max": 1048576,  # YaRN factor 4.0（cache_size 1048576・Q8）
         "max_output_recommended": 8192,
         "max_output_max": 32768,
         "temperature": 0.6,

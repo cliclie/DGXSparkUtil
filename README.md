@@ -183,10 +183,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   - 動作: 対象が既に起動中で健全なら何もしない → 既存のモデルコンテナを全停止 →
     `docker compose --profile <profile> up -d --force-recreate <service>` →
     `/health` 応答を待機(タイムアウト 1800 秒、起動ログをライブ表示) → API URL とモデル名を報告
-  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | qwen38flashnextexl3_3p05 | qwen38swift | qwen38swift_dflash | muse | mimo_flash | mimo9b`
+  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | qwen38flashnextexl3_3p05 | qwen38flashnextexl3_4p05 | qwen38swift | qwen38swift_dflash | muse | mimo9b | glm53flash | qwen38flashnext_nvfp4`
   - 同時に稼働できるモデルは 1 つ(切替時は現モデルを停止)
 - `/home/cliclie/llm/compose/docker-compose.yml`
-  - モデルサービス 15 種(vLLM 6 + SGLang 5 + llama.cpp 1 + TabbyAPI 3)と起動パラメータの定義
+  - モデルサービス 17 種(vLLM 7 + SGLang 6 + llama.cpp 1 + TabbyAPI 3)と起動パラメータの定義
 - `/home/cliclie/llm/compose/sociax-rag/collect-dgx-info.sh`
   - 既存の read-only 収集スクリプト(hostname / docker / GPU / ポート / 稼働コンテナ / ストレージ)
 
@@ -205,10 +205,12 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | qwen38sglangdspark | sglang-qwen38-27b-nvfp4-dspark | 8008 | SGLang | 1000000 (YaRN) | 0.65 | fp8_e4m3 |
 | qwen38flashnextexl3 | tabbyapi-flashnext | 8009 | TabbyAPI (ExLlamaV3) | 1048576 (YaRN) | - | Q8 |
 | qwen38flashnextexl3_3p05 | tabbyapi-flashnext-3p05 | 8011 | TabbyAPI (ExLlamaV3) | 1048576 (YaRN) | - | Q8 |
+| qwen38flashnextexl3_4p05 | tabbyapi-flashnext-4p05 | 8016 | TabbyAPI (ExLlamaV3) | 1048576 (YaRN) | - | Q8 |
 | qwen38swift | vllm-swift-qwen38-27b | 8012 | vLLM 26.08 | 262144 | 0.70 | 24G (BF16) |
 | qwen38swift_dflash | sglang-swift-qwen38-27b | 8012 | SGLang | 262144 | 0.65 | fp8_e4m3 |
-| mimo_flash | tabbyapi-mimo-flash | 8013 | TabbyAPI (ExLlamaV3 1.5.1) | 262144 | - | Q8 |
 | mimo9b | vllm-mimo-9b | 8014 | vLLM 26.08 | 1010000 (YaRN) | 0.70 | 16G (fp8_e4m3) |
+| glm53flash | sglang-glm53-flash | 8013 | SGLang (GLM-5.3-Flash NVFP4) | 262144 | 0.65 | bfloat16 |
+| qwen38flashnext_nvfp4 | vllm-qwen38-flashnext-nvfp4 | 8015 | vLLM (qwen38-flash-dgx:v0.30-tp1) | 262144 | 0.72 | NVFP4 |
 
 - コンテキストサイズ: vLLM は `--max-model-len`、SGLang は `--context-length`
   (sglang dflash / dspark と TabbyAPI の qwen38flashnextexl3 系は YaRN で 1M 拡張、
@@ -1123,4 +1125,58 @@ first_token_ms/completed_at/model`) に保存されていることを発見し�
 - **検証 (2026-10-06)**: バックエンドは SGLang 完了無しで e2e/ttft=None・throughput=0.0 を返し `*_held` キーを持たないことを
   実測(モック pm で `_sglang_metrics` / `_llamacpp_metrics` を呼んで確認)。フロントの波括弧対応を目視検証(`pickMetric` と
   `renderVllm` の閉じ)。JS エンジン(node/deno/bun)は環境に無く、フロント実行検証は未実施。api service は未稼働(手動起動時に反映)。
+
+## 実装メモ(2026-10-07)
+
+- **`qwen38flashnextexl3_4p05`(EXL3 4.05bpw h6/ng6・ポート 8016)追加**:
+  `~/llm/compose` 側に TabbyAPI サービス `tabbyapi_flashnext_4p05` が追加された
+  (`switch_models.sh` の case と排他停止リスト、`download_models.sh` のダウンロード分岐、
+  `compose/tabbyapi/config_4p05.yml`、`compose/qwen38flashnextexl3_4p05.sh` と bashrc alias)。
+  設定は 3p05 と**完全同一**(YaRN factor 4.0/1,048,576・`cache_size 1048576`・`cache_mode Q8`・
+  `chunk_size 4096`・`max_batch_size 1`・`ngram_ram false`・`vision true`・`reasoning true`・
+  `tool_format qwen3_coder`・MTP `draft_num_tokens 8` + `dynamic_draft true`)。量子化は
+  `bits 4.05 / head_bits 6 / mtp_bits 4`。vision は 6bit 量子化で `vision_k6.safetensors` に
+  分離格納(ExLlamaV3 はモデルディレクトリの `*.safetensors` を glob 走査するため自動読込)。
+  `download_models.sh` は 4.05bpw ブランチに欠落している
+  `mtp_hyper_connection_mixer_patch.safetensors` を 3p05 からコピーし、YaRN factor 4.0 を
+  `config.json` にローカル適用する(3p05 と同一設定にするため必須)。
+- **`CLINE_MODEL_TABLE` に 1 エントリ追加**: モデル一覧・切替・監視は `_load_profiles()` が
+  compose を動的パースするため**自動追従**し、フロントは profile 非依存なので
+  `front/index.html` の変更は不要。追加したのは `api/vllm.py` の 1 エントリのみ。
+  - `qwen38flashnextexl3_4p05`: `images=True`(vision: true)・`context_max=1048576`(YaRN 4.0)、
+    `max_output_recommended=8192`・`max_output_max=32768`・`temperature=0.6`
+  - 反映: `CLINE_MODEL_TABLE` は import 時に読まれるため `sudo systemctl restart dgx-spark-api` が必要
+- **単一行 `command:` のパラメータ解析追加(`_service_command_lines`)**: TabbyAPI 系サービスは
+  `command: main.py --host 0.0.0.0 --port 5000` の単一行形式であり、従来は折り返しブロック
+  (`command: >`)しか解析せず `get_params()` が「command が見つかりません」で失敗していた
+  (TabbyAPI 3 サービス共通の既存挙動)。単一行を flag/value ペアへ分解する分岐を追加。
+  検証: `qwen38flashnextexl3_4p05` / `qwen38flashnextexl3_3p05` / `qwen38flashnextexl3` で
+  `get_params()` が成功(`main.py`・`--host 0.0.0.0`・`--port 5000`)、`qwen38swift` / `mimo9b`
+  (折り返しブロック)の出力は変更なし。TabbyAPI のフラグは `EDITABLE_FLAGS`(vLLM/SGLang 用)に
+  含まれないため `editable=false`。`get_cline_config()` は単一行に `--max-model-len` 等が無いため
+  従来どおり静的テーブルで補完される(動作変化なし)。
+- **README のモデル一覧・プロファイル列挙を 17 種へ更新**: `qwen38flashnextexl3_4p05`(ポート 8016)を
+  追加し、モデルサービス数を 17 種(vLLM 7 + SGLang 6 + llama.cpp 1 + TabbyAPI 3)に更新。
+  併せて `~/llm/compose` の現状を反映: 2026-09-25 に削除された `mimo_flash` をモデル一覧から除去し、
+  `glm53flash`(sglang-glm53-flash・8013)と `qwen38flashnext_nvfp4`(vllm-qwen38-flashnext-nvfp4・8015)を
+  追加した(プロファイル列挙も同一)。両者は `_load_profiles()` の自動追従で一覧・切替・監視に出るが、
+  `CLINE_MODEL_TABLE` のエントリは未追加(`get_cline_config()` は `context_max` を null で返す)。
+- **メモリ制約(運用前提)**: 4.05bpw は本体 63.6GiB + ngram ng6 36.4GiB で 3.05bpw 比 +21.5GiB。
+  **RAG を別 PC で運用している状態でのみ** MemAvailable 26.1 GiB(ウォーム直後)で起動する。
+  RAG を本機で併走させると 6 GiB 前後になり危険域(10 GiB 未満では NVRM OOM 実績あり)。
+  `context_max=1048576` の根拠: needle テスト 823,282 token で PASS(prefill 1,317 T/s)。
+  実測: decode 47.71 T/s(ウォーム)・prefill 1,032〜1,076 T/s(短文)・MTP 受入 57.7%・coding 8/8。
+- **検証 (2026-10-07)**: `qwen38flashnextexl3_4p05` 稼働中に venv の python で `vllm.get_cline_config()` を
+  直接呼び、`base_url=http://WhitebearATOM1.local:8016/v1/`・`model_id=qwen3.8_flashnext_exl3_4p05bpw`・
+  `supports_images=true`・`context_recommended=1048576`・`context_max=1048576`・
+  `max_output_recommended=8192`・`max_output_max=32768`・`temperature=0.6` を実測。
+  `vllm._load_profiles()` は compose から
+  `qwen38flashnextexl3_4p05 → service=tabbyapi_flashnext_4p05 / container=tabbyapi-flashnext-4p05 / port=8016`
+  を自動認識し、`get_status()` は `health=true`・metrics に needle 実行の prefill 1,317 T/s を返す。
+  **systemd service は再起動していない**(`sudo` にパスワードが必要)。`GET /api/vllm/cline` が新テーブルを
+  返すには `sudo systemctl restart dgx-spark-api` が必要(再起動前は `supports_images=false`・
+  `context_max=null` だった)。
+- **未修正の既知の staleness(今回変更せず)**: `CLINE_MODEL_TABLE` の `qwen38flashnextexl3` と
+  `qwen38flashnextexl3_3p05` は `context_max=524288` のまま。両者は YaRN factor 4.0 で 1,048,576
+  運用(`config.yml`/`config_3p05.yml` の `cache_size 1048576`、README のモデル一覧は 1048576)。
 
