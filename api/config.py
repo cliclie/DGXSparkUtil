@@ -110,8 +110,10 @@ def info() -> dict:
 # ---------------------------------------------------------------- Magnitude (magn)
 # Magnitude はホストインストールの deb (headless serve)。compose プロファイルではないが
 # docker-compose.yml にプレースホルダ service を置いて profiles 対応表に出す。
-# 稼働判定は systemd user unit + API 応答、健全性は /inference/v1/models (API key 必須)。
-# /health と /metrics は存在しない。
+# 稼働判定は serve の API 応答 (/inference/v1/models + API key) + magnitude CLI の
+# Runtime 列 (モデルが VRAM にロード済み = Ready)。/inference/v1/models は
+# インストール済みモデルを常時列挙するだけでロード状態を反映しない (OS 起動直後も応答する)。
+# /metrics は存在せず、/health は serve のライフサイクル状態のみを返す。
 
 def _read_compose_env() -> dict:
     """compose_dir の .env を読む (MAGN_* 設定)。"""

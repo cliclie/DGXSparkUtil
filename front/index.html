@@ -900,6 +900,18 @@ function pickMetric(cur, key) {
   return heldMetrics[key];
 }
 
+// 稼働モデルなしのときに "-" へ戻す項目 (ポート 〜 出力スループット)。
+// 前回値保持 (heldMetrics) はモデル稼働中だけのものなので、稼働モデルがいない状態で
+// 古いポート・稼働時間・メトリクスを残さない。
+const V_METRIC_IDS = [
+  "v-port", "v-uptime", "v-rw", "v-kv",
+  "v-e2e", "v-ttft", "v-tps-in", "v-tps-out",
+];
+
+function clearVllmMetrics() {
+  for (const id of V_METRIC_IDS) setV(id, "-");
+}
+
 function renderVllm(st) {
   const a = st.active;
   // 停止ボタン: 稼働中モデルがあり、かつジョブ実行中でないときのみ有効
@@ -911,10 +923,11 @@ function renderVllm(st) {
   // 切替ジョブ実行中は動作状況をコンテナ状態に同期する("切替中…" 赤)
   const swJob = st.switching && st.switching.kind === "switch" ? st.switching : null;
   if (!a) {
-    // 稼働モデル消失: 保持値・白/灰状態をリセット
+    // 稼働モデル消失: 保持値・白/灰状態をリセットし、ポート〜出力スループットを "-" にクリア
     heldMetrics = { e2e: null, ttft: null, in: null, out: null };
     heldProfile = null;
     tpsLastUpdate = { in: null, out: null };
+    clearVllmMetrics();
     setV("v-model", "稼働中のモデルなし");
     setV("v-status", swJob ? "切替中…" : "停止中", swJob ? "hot" : "down");
     return;
