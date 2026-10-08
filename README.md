@@ -111,6 +111,9 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
     (SGLang: `--enable-metrics` 指定時、llama.cpp: `--metrics` 指定時に `/metrics` を使用、
     TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析、実装メモ 2026-09-14 参照)
   - 直近ログの表示
+  - 稼働モデルなし(`active=null`)のときは「稼働モデル=稼働中のモデルなし」「コンテナ状態=停止中」を表示し、
+    ポート・稼働時間・実行/待機・KVCache・E2E・TTFT・入力/出力スループットは `"-"` にクリアする
+    (前回値保持はモデル稼働中のみ。実装メモ 2026-10-08)
 - セクションヘッダーに「モデル切替・ログ・パラメータ編集」ボタンを配置
   - ボタン押下で**ポップアップ(モーダル)表示**する(常設のフォーム欄は持たない)
   - ポップアップ内には以下を収める:
@@ -250,6 +253,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │      docker CLI(ps/inspect/logs), vLLM /health,       │
 │      /v1/models, /metrics, /proc/net/dev (差分),      │
 │      /sys/class/net/<if>/speed (NIC 実リンク速度)     │
+│      magnitude CLI(models status), ~/.magnitude/      │
+│      serving-usage.sqlite, journalctl --user          │
 │  ② 表示: front/ (単一 index.html + JS)          │
 │     4段レイアウト(表示レイアウト(4段構成)参照)   │
 │     一段目: 現在値ゲージ行 / 二段目: 時系列グラフ  │
@@ -281,16 +286,27 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | リクエスト数・キュー・KVキャッシュ使用率・スループット等 | `GET /metrics` (vLLM 組み込み Prometheus 形式) |
 | 同上(TabbyAPI) | `docker logs` (リクエスト毎統計の解析、実装メモ 2026-09-14 参照) |
 | 同上(llama.cpp) | `GET /metrics` (`--metrics` 指定時、Prometheus 形式) + `GET /slots` (KVキャッシュ使用率) |
-| 直近ログ | `docker logs --tail` |
+| 同上(Magnitude / magn) | `~/.magnitude/serving-usage.sqlite` (usage 表) + GPU 負荷から実行中を推定 (`/metrics` 無し、実装メモ 2026-10-06) |
+| 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`) |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
 
 - llama.cpp は `--metrics` 指定時に `/metrics` (実行/待機・スループット) + `/slots` (KVキャッシュ使用率) を利用。
   `--metrics` 未有効時は `/slots` のみで基本状態を取得。E2E/TTFT は v0.5.0 では未公開(実装メモ 2026-10-04 参照)
 - TabbyAPI は `/metrics` が無いが、docker logs のリクエスト毎統計から実行/待機・KVCache(推定)・
   E2E・TTFT・入力/出力スループットを取得する(実装メモ 2026-09-14 参照)
+- **Magnitude (magn) はホストの systemd user serve**(コンテナを立てない)。稼働判定は serve の API 応答
+  (`GET /inference/v1/models` + API key)**かつ** `magnitude models status <id>` の `Runtime` 列が `Ready`
+  (モデルが VRAM にロード済み)。`/inference/v1/models` はインストール済みモデルを常時列挙するだけで
+  ロード状態を反映しないため、API 応答単独では OS 起動直後に未ロードでも「稼働中」と誤表示する
+  (実装メモ 2026-10-08)。`/metrics` は無く、ルート `/health` は serve のライフサイクル状態のみを返す。
+  メトリクスは `~/.magnitude/serving-usage.sqlite` の usage 表と GPU 負荷から算出し、直近ログは
+  `journalctl --user` を読む(実装メモ 2026-10-06)
 - **E2E・TTFT・入力/出力スループットの前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
   `front/index.html` の `pickMetric()` が直近の非ゼロ値を保持し、API が 0/None を返した間は前回値を維持表示する(実装メモ 2026-10-06)。
   稼働モデル消失・モデル切替(profile 変化)で保持値をリセット。スループットの白/灰は「API が非ゼロの新しい計測値を返した」側を白とする相対判定
+- **前回値保持はモデル稼働中のみ**: 稼働モデルなし(`active=null`)のときは保持値をリセットするだけでなく、
+  `clearVllmMetrics()` がポート・稼働時間・実行/待機・KVCache・E2E・TTFT・入力/出力スループットを `"-"` に
+  戻す(前のモデルの実測値を残さない。実装メモ 2026-10-08)
 
 **モデル切替**
 - 三段目のポップアップ内の「切替」ボタン → サーバ側で `switch_models.sh <profile>` を実行
@@ -1012,6 +1028,10 @@ cd /home/cliclie/DGXSparkUtil/api
 - 稼働判定は API 応答のみ (`api/vllm.py` の `_magn_active()`)。api service は root で稼働するため
   `systemctl --user` は cliclie の unit を見ない。`/health` と `/metrics` は Magnitude に存在しない
   → 健全性は `/inference/v1/models` + API key、サーブ中モデル名は `MAGN_MODEL_ID` (既定 `qwen3.8-27b:gguf:q6`)
+  ※ **本項は 2026-10-08 に置き換え**: 稼働判定と `sw.ready` は「API 応答 + `magnitude models status` の
+  Runtime=Ready」に変更 (`_magn_active()` / `_magn_runtime_ready()`)。ルート `/health` は存在するが
+  serve のライフサイクル状態のみを返し、モデル未ロードでも Ready になる。
+  下記「Magnitude (magn) の OS 起動直後に「ロード済み」と誤表示する不具合修正 (2026-10-08)」参照
 - 切替は `switch_models.sh magn` が systemd serve 起動 + `magnitude models load MAGN_MODEL_ID` を行う
   (Q6 のみ運用。Q4/gemma は gfx1201 Vulkan の repack qualify を通さないため削除済み)
 - `.env` の MAGN_* (MAGN_PORT / MAGN_BASE_PATH / MAGN_API_KEY / MAGN_MODEL_ID / MAGN_SYSTEMD_UNIT) を
@@ -1187,4 +1207,75 @@ first_token_ms/completed_at/model`) に保存されていることを発見し�
 - **未修正の既知の staleness(今回変更せず)**: `CLINE_MODEL_TABLE` の `qwen38flashnextexl3` と
   `qwen38flashnextexl3_3p05` は `context_max=524288` のまま。両者は YaRN factor 4.0 で 1,048,576
   運用(`config.yml`/`config_3p05.yml` の `cache_size 1048576`、README のモデル一覧は 1048576)。
+
+## Magnitude (magn) の OS 起動直後に「ロード済み」と誤表示する不具合修正 (2026-10-08)
+
+`magn-headless.service` は `enabled` で OS 起動時に自動開始する。`api/vllm.py` の `_magn_active()` は
+`GET /inference/v1/models` の応答だけで稼働判定していたが、このエンドポイントは **model store の
+インストール済みモデルを常時列挙するだけ**で VRAM へのロード状態を反映しない。そのためモデルを
+ロードしていない起動直後でも `active=magn` (health=true, model_name=qwen3.8-27b:gguf:q6) を返し、
+フロントが「magn ロード済み」表示になっていた。
+
+実測 (2026-10-08, 起動 3h55m・モデル未ロード):
+- `GET /inference/v1/models` → `qwen3.8-27b:gguf:q6` を返す (応答あり)
+- `magnitude models status qwen3.8-27b:gguf:q6` → `Runtime  Unloaded`
+- VRAM 使用量 326MB / 32GB、`magnitude status` → `Active model  None`
+- `GET /api/vllm/status` → `active=magn` ← 誤表示
+
+`switch_models.sh` の `check_health()` は既に「API 応答 + magnitude CLI の Runtime 列」で二重判定しており、
+API 側 (`api/vllm.py`) だけ取り残されていた。
+
+- **修正**:
+  - `api/vllm.py` に `_magn_runtime_ready(model_id)` を追加。`magnitude models status <id>` を実行し
+    `Runtime` 列が `Ready` なら True、`Unloaded`/`Requested`/`Loading`/`Stopping`/`Failed` なら False、
+    CLI 実行失敗・出力解析不能なら None を返す。CLI は unix socket RPC で ~0.22s かかるため 2 秒 TTL の
+    結果キャッシュ (`_magn_runtime_cache`) を持つ (get_status 内の複数呼び出しも 1 回に集約)。
+  - `_magn_active(port)` を「API 応答 **かつ** Runtime=Ready」に変更。判定不能時は従来動作 (API 応答のみ) に
+    戻さない。`magnitude` CLI が存在しない環境 (Magnitude 未導入ホスト) では従来の API 応答判定のまま。
+  - `_switching_info()` の magn 分岐も `_magn_active()` を使うようにし、切替完了表示の判定を
+    `switch_models.sh` の完了判定と一致させた (serve 起動直後を「切替完了」と見なさない)。
+  - `api/config.py` / `api/vllm.py` のコメントを実態に合わせて修正。
+- **判明した副次的事実**: Magnitude にはルート `/health` が**存在する** (`{"service":"magnitude-acn",
+  "state":{"_tag":"Ready"}}`)。ただしこれは serve のライフサイクル状態で、モデル未ロードでも Ready を返す
+  ため稼働判定には使えない。`/metrics` は依然 404。ModelResidency の _tag は
+  `Unloaded / Requested / Loading / Ready / Stopping / Resident / Failed`。
+- **トレードオフ**: 稼働判定に CLI 実行が 1 回増える (~0.22s / 2s ポーリング)。CLI が unix socket
+  (`~/.magnitude/state/application.sock`) を読むため api service は magn と同一ユーザー (cliclie) で
+  稼働している必要がある (`dgx-spark-api.service` は `User=cliclie` + `XDG_RUNTIME_DIR=/run/user/1000`)。
+  serve 起動中・モデル未ロードのときは「稼働モデルなし」表示になる (serve 常駐自体は稼働時間に出ない)。
+- **置き換える従来メモ**: 2026-10-06 の「Magnitude (magn) 切替運用」の
+  「稼働判定は API 応答のみ (`_magn_active()`)」「`/health` と `/metrics` は Magnitude に存在しない」は
+  本メモに置き換え (稼働判定は API 応答 + Runtime=Ready。`/health` は存在するがロード状態は反映しない)。
+- **検証 (2026-10-08)**: 実機 (モデル未ロード) で `_magn_runtime_ready()=False`、`_magn_active()=False`、
+  2 回目呼び出しはキャッシュで 0.000s。`systemctl restart dgx-spark-api` 後、
+  `GET /api/vllm/status` が `active=None` になることを確認 (修正前は `active=magn`)。
+  陽性側 (ロード済みなら正しく稼働表示すること) は `Runtime       Ready` を返す `magnitude` の shim を
+  PATH 経由で立てて検証し `_magn_runtime_ready()=True` / `_magn_active()=True` を確認 (28.7GB の実ロードは行っていない)。
+  再起動後の server.log にエラーなし、`/api/vllm/status` は 200 を維持。
+
+## 稼働モデルなしのときポート〜出力スループットをクリア (2026-10-08)
+
+`active=None` (稼働モデルなし) 表示になった際、フロントの vLLM/モデル パネルは
+「稼働モデル」「コンテナ状態」だけを更新し、**ポート・稼働時間・実行/待機・KVCache・E2E・TTFT・
+入力/出力スループットを前のモデルの実測値のまま残していた**。前回値保持 (`heldMetrics`) は
+「モデル稼働中に 0/null を埋める」ための仕組みで、稼働モデルがいない状態で古い値を表示し続ける
+ものではないため、消失時に "-" へ戻す。
+
+- `front/index.html`:
+  - `V_METRIC_IDS` (`v-port`, `v-uptime`, `v-rw`, `v-kv`, `v-e2e`, `v-ttft`, `v-tps-in`, `v-tps-out`)
+    と `clearVllmMetrics()` を追加。`setV(id, "-")` は className も `"v"` に戻すため、スループットの
+    灰表示 (`stale`) も同時に解除される。
+  - `renderVllm()` の `if (!a)` 分岐で、既存の `heldMetrics` / `heldProfile` / `tpsLastUpdate`
+    リセットに続けて `clearVllmMetrics()` を呼ぶ (従来は保持値のメモリ上のリセットだけで、
+    DOM の表示は更新されていなかった)。
+  - 稼働中 (`active` あり) の前回値保持ロジック (`pickMetric`) はそのまま。モデル切替時
+    (`a.profile !== heldProfile`) のリセットも従来どおり、次のポーリングで新モデルの値が描画される。
+- **検証 (2026-10-08)**: JS エンジン (node/deno/bun) が無い環境のため、`index.html` から
+  `renderVllm` を含む Tier-3 script ブロックをそのまま抜き出したテストページを作り、
+  `firefox --headless --screenshot` で実行結果 (各要素の textContent と className) を読取り確認。
+  - ACTIVE (値あり): port=10100 / uptime=00:10:00 / rw=1 / 0 / kv=12.3 % / e2e=4.5 s / ttft=0.42 s /
+    in=300.0 tok/s / out=25.5 tok/s
+  - HELD (稼働中・メトリクス 0/null): e2e=4.5 s / ttft=0.42 s / in=300.0 / out=25.5 が前回値を維持 (従来動作を維持)
+  - NONE (`active:null`): **port / uptime / rw / kv / e2e / ttft / in / out すべて "-" (className="v")**、
+    稼働モデル=「稼働中のモデルなし」、コンテナ状態=「停止中」
 

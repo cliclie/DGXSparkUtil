@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -202,8 +203,11 @@ def _fmt_elapsed(seconds: float) -> str:
 
 # ---------------------------------------------------------------- Magnitude (magn)
 # Magnitude はホストインストールの deb (systemd user unit の headless serve)。コンテナは立たない。
-# /health と /metrics は存在しない。健全性は /inference/v1/models (API key 必須)。
-# 稼働判定は systemd unit active + API 応答 (idle でモデルを unload するため Ready を要求しない)。
+# 稼働判定は serve の API 応答 + magnitude CLI の Runtime 列 (モデルが VRAM にロード済み)。
+# /inference/v1/models はインストール済みモデルを常時列挙するため、これだけでは稼働判定にならない
+# (OS 起動直後、モデル未ロードでも応答する)。
+# ルート /health は serve のライフサイクル状態 (Ready/Starting 等) を返すだけで
+# モデルのロード状態は反映しない。/metrics も存在しない。
 
 def _magn_headers() -> list[str]:
     if config.MAGN_API_KEY:
@@ -215,13 +219,50 @@ def _magn_models_url(port: int) -> str:
     return f"http://localhost:{port}/{config.MAGN_BASE_PATH}/models"
 
 
-def _magn_active(port: int) -> bool:
-    """Magnitude headless serve の稼働判定 (/inference/v1/models 応答)。
-    api service は root で稼働するため systemctl --user は使わない
-    (root の user session では cliclie の magn-headless.service が見えない)。
-    serve 自体は systemd user unit で常駐するが、稼働判定は API 応答のみで行う。
+# magnitude CLI は unix socket 越しの RPC で 0.2s 程度かかるため、短時間キャッシュする
+_MAGN_RUNTIME_TTL = 2.0
+_magn_runtime_cache: tuple[float, bool | None] = (0.0, None)
+
+
+def _magn_runtime_ready(model_id: str) -> bool | None:
+    """magnitude CLI で model_id のロード状態 (Runtime 列) を確認する。
+
+    Returns:
+        True  ... Runtime=Ready (VRAM にロード済み)
+        False ... Unloaded / Requested / Loading / Stopping / Failed など (未ロード)
+        None  ... 判定不能 (CLI 実行失敗・出力形式不明)
+
+    ModelResidency の _tag は Unloaded / Requested / Loading / Ready / Stopping /
+    Resident / Failed。CLI は "  Runtime       Ready" のように表示する。
+    switch_models.sh の check_health() と同じ判定を API 側でも行う。
     """
-    return bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
+    global _magn_runtime_cache
+    now = time.time()
+    ts, cached = _magn_runtime_cache
+    if cached is not None and now - ts < _MAGN_RUNTIME_TTL:
+        return cached
+    out = _run(["magnitude", "models", "status", model_id], timeout=10)
+    m = re.search(r"Runtime\s+(\S+)", out) if out else None
+    ready: bool | None = None
+    if m:
+        ready = m.group(1) == "Ready"
+    _magn_runtime_cache = (now, ready)
+    return ready
+
+
+def _magn_active(port: int) -> bool:
+    """Magnitude headless serve の稼働判定 (API 応答 + モデルロード済み)。
+
+    api service は root の user session では cliclie の magn-headless.service が
+    見えないため systemctl --user の is-active は使わず、
+    serve 自身の API 応答 + magnitude CLI (unix socket) で判定する。
+    CLI が存在しない環境 (Magnitude 未導入) では従来の API 応答のみで判定する。
+    """
+    if not _http_get(_magn_models_url(port), 5, _magn_headers()):
+        return False
+    if shutil.which("magnitude") is None:
+        return True
+    return _magn_runtime_ready(config.MAGN_MODEL_ID) is True
 
 
 def _magn_journal(tail: int) -> list[str]:
@@ -698,9 +739,10 @@ def _switching_info() -> dict | None:
     info = _load_profiles().get(_job["profile"])
     ready = False
     if info and info.get("port"):
-        # Magnitude は /health 無し (健全性は /inference/v1/models + API key)
+        # Magnitude は /health が serve のライフサイクル状態しか返さないため、
+        # モデルロード済み (Runtime=Ready) を含めて稼働完了を判定する
         if _job["profile"] == "magn":
-            ready = bool(_http_get(_magn_models_url(info["port"]), 3, _magn_headers()))
+            ready = _magn_active(info["port"])
         else:
             ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
     return {"kind": _job["kind"], "profile": _job["profile"], "ready": ready}
@@ -733,7 +775,7 @@ def get_status() -> dict:
     # 早期 return より前に付与する)
     out["switching"] = _switching_info()
 
-    # Magnitude はホスト serve (コンテナは立たない)。稼働判定は systemd unit + API 応答
+    # Magnitude はホスト serve (コンテナは立たない)。稼働判定は API 応答 + モデルロード済み
     if running_profile is None and "magn" in profiles and _magn_active(profiles["magn"]["port"]):
         running_profile = "magn"
 
@@ -753,7 +795,8 @@ def get_status() -> dict:
     }
     active.update(_container_state(info["container"]))
 
-    # Magnitude: /health と /metrics は無い。健全性は /inference/v1/models (API key 必須)、
+    # Magnitude: /metrics は無い。/health は serve のライフサイクル状態のみでモデル未ロードでも
+    # Ready を返すため、健全性は /inference/v1/models (API key 必須) + Runtime=Ready で判定済み。
     # サーブ中モデル名は MAGN_MODEL_ID。スループットは /metrics 無しで None
     if running_profile == "magn":
         active["api_url"] = f"{base}/{config.MAGN_BASE_PATH}"
