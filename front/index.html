@@ -53,6 +53,50 @@ section > h2 {
   padding-left: 8px;
   margin: 0 0 10px;
 }
+/* ---- タブ (システム / モデル) ---- */
+.tabs {
+  display: flex;
+  gap: 22px;
+  padding: 0 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 10px 2px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.tabs button:hover { color: var(--text); border-bottom-color: var(--border); }
+.tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--green); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+/* ---- 現在値: vLLM 情報テキストカード (ゲージ描画なし・文字のみ) ---- */
+.gauge.vinfo-card { text-align: left; overflow: hidden; }
+.gauge.vinfo-card .vi-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.gauge.vinfo-card .vi-row .k { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.gauge.vinfo-card .vi-row .v { font-size: 13px; font-weight: 600; text-align: right; word-break: break-all; }
+/* モデル名は長い (例: qwen3.8_flashnext_exl3_4p05bpw) ため縦積み 2 行上限とし、他カードと高さを揃える。
+   -webkit-line-clamp は Firefox で display が flow-root に解決されて幅制約が効かないため、
+   max-height (2 行分) + overflow:hidden で切る (実装メモ 2026-10-11) */
+.gauge.vinfo-card .vi-row.name-row { display: block; }
+.gauge.vinfo-card .vi-row.name-row .k { display: block; }
+.gauge.vinfo-card .vi-row .v.name {
+  display: block; /* inline だと max-height が効かず行数上限が崩れる */
+  line-height: 1.3;
+  max-height: 2.6em; /* 行高 1.3em × 2 行 */
+  overflow: hidden;
+  text-align: left;
+}
 /* ---- Tier 1 (半円ゲージ) ---- */
 .grid {
   display: flex;
@@ -120,6 +164,22 @@ section > h2 {
   border-radius: 8px;
   padding: 12px 14px;
 }
+/* ---- モデル一覧 (vLLM パネル常設: モーダルと同じ .model-item を再利用) ---- */
+#panel-switch-warn {
+  display: none;
+  color: var(--red);
+  font-size: 12px;
+  margin-top: 10px;
+  white-space: pre-line;
+}
+#panel-model-list { margin-top: 10px; }
+/* 切替ログはモーダル廃止によりパネルのみ。従来同様 7 行固定でレイアウトの揺れを防ぐ */
+#panel-switch-log {
+  margin-top: 10px;
+  line-height: 14px;
+  height: 116px; /* 7行 × 14px + padding 16px + border 2px = 116px (border-box) */
+}
+#panel-switch-go { margin-top: 10px; }
 #vllm-headline, #rag-headline { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 8px; }
 #vllm-headline .item .k, #rag-headline .item .k { color: var(--muted); font-size: 11px; display: block; }
 #vllm-headline .item .v, #rag-headline .item .v { font-size: 15px; font-weight: 600; }
@@ -210,11 +270,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   display: none;
 }
 .job-log:empty::before { content: "ログ"; color: var(--muted); } /* 内容なし時のプレースホルダー */
-#switch-log {
-  display: block; /* 切替ログは常時表示(7行固定) */
-  line-height: 14px;
-  height: 116px; /* 7行 × 14px + padding 16px + border 2px = 116px (border-box) */
-}
 table.params { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.params th, table.params td {
   border-bottom: 1px solid var(--border);
@@ -320,7 +375,13 @@ table.params td input[readonly] { color: var(--muted); }
   <span id="clock"></span>
   <span id="pstate"></span>
 </header>
+<div class="tabs">
+  <button class="active" data-tab="system">システム</button>
+  <button data-tab="model">モデル</button>
+</div>
 <main>
+  <!-- タブ 1: システム (現在値 + 時系列) -->
+  <div class="tab-panel active" id="tab-system">
   <!-- Tier 1: 現在値カード -->
   <section>
     <h2>現在値 (ホスト)</h2>
@@ -342,7 +403,10 @@ table.params td input[readonly] { color: var(--muted); }
       <div class="cwrap"><canvas id="ch-main"></canvas></div>
     </div>
   </section>
+  </div>
 
+  <!-- タブ 2: モデル (vLLM / モデル + RAG) -->
+  <div class="tab-panel" id="tab-model">
   <!-- Tier 3: vLLM -->
   <section>
     <h2>vLLM / モデル</h2>
@@ -356,16 +420,20 @@ table.params td input[readonly] { color: var(--muted); }
         <div class="item"><span class="k">KVCache</span><span class="v" id="v-kv">-</span></div>
         <div class="item"><span class="k">E2E</span><span class="v" id="v-e2e">-</span></div>
         <div class="item"><span class="k">TTFT</span><span class="v" id="v-ttft">-</span></div>
-        <div class="item"><span class="k">入力スループット</span><span class="v" id="v-tps-in">-</span></div>
-        <div class="item"><span class="k">出力スループット</span><span class="v" id="v-tps-out">-</span></div>
+        <div class="item"><span class="k">prefill</span><span class="v" id="v-tps-in">-</span></div>
+        <div class="item"><span class="k">decode</span><span class="v" id="v-tps-out">-</span></div>
       </div>
       <div class="btns">
-        <button class="primary" id="btn-switch">モデル</button>
         <button id="btn-log">ログ</button>
         <button id="btn-params">パラメータ</button>
         <button id="btn-cline">Cline設定値</button>
         <button id="btn-stop" disabled>停止</button>
       </div>
+      <!-- モデル切替ポップアップと同じ一覧を常設表示し、この行の下から切替を実行できる -->
+      <div id="panel-switch-warn"></div>
+      <div class="model-list" id="panel-model-list"></div>
+      <button class="primary" id="panel-switch-go" disabled>切り替え実行</button>
+      <div class="job-log" id="panel-switch-log"></div>
     </div>
   </section>
 
@@ -383,21 +451,8 @@ table.params td input[readonly] { color: var(--muted); }
       </div>
     </div>
   </section>
-</main>
-
-<!-- モーダル: モデル切替 -->
-<div class="modal hidden" id="modal-switch">
-  <div class="modal-box">
-    <h3>モデル切替</h3>
-    <div id="switch-warn" style="display:none;color:var(--red);font-size:12px;margin:4px 0;white-space:pre-line;"></div>
-    <div class="model-list" id="model-list"></div>
-    <div class="job-log" id="switch-log"></div>
-    <div class="modal-actions">
-      <button id="switch-close">閉じる</button>
-      <button class="primary" id="switch-go">切り替え実行</button>
-    </div>
   </div>
-</div>
+</main>
 
 <!-- モーダル: パラメータ表示・編集 -->
 <div class="modal hidden" id="modal-params">
@@ -523,6 +578,9 @@ function pushPoint(ts, m) {
     for (const k of Object.keys(series)) series[k].shift();
   }
 }
+
+// 直近の /api/metrics レスポンス (システムタブへ戻ったときのゲージ再描画用)
+let lastMetrics = null;
 
 // 範囲切替用のフィルタ (ts 基準で先頭を切る)
 let rangeKey = "all";
@@ -740,6 +798,18 @@ function gaugeDefs() {
 
 let gages = [];
 
+// 現在値ゲージ行の末尾に追加する vLLM 情報のテキスト専用カード (ゲージ描画なし)。
+// ID は vLLM 行の #v-* と衝突させないため #vi-* とし、setV() のミラーで同一値を流し込む。
+const VINFO_CARD = `
+   <div class="gauge vinfo-card">
+     <div class="gtitle">vLLM / モデル</div>
+     <div class="vi-row name-row"><span class="k">モデル名</span><span class="v name" id="vi-model">-</span></div>
+     <div class="vi-row"><span class="k">ポート</span><span class="v" id="vi-port">-</span></div>
+     <div class="vi-row"><span class="k">コンテナ状態</span><span class="v" id="vi-status">-</span></div>
+     <div class="vi-row"><span class="k">prefill</span><span class="v" id="vi-prefill">-</span></div>
+     <div class="vi-row"><span class="k">decode</span><span class="v" id="vi-decode">-</span></div>
+   </div>`;
+
 // 半円ゲージ DOM 生成 (プラットフォーム確定後に呼ぶ)
 function buildHostCards() {
   const defs = gaugeDefs();
@@ -752,7 +822,7 @@ function buildHostCards() {
        <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
        <div class="gsub"></div>
      </div>`;
-  }).join("");
+  }).join("") + VINFO_CARD;
   gages = defs.map((d) => new Gauge(d.id, d));
 }
 
@@ -872,13 +942,53 @@ document.querySelectorAll("#range-btns button").forEach((btn) => {
     refreshMainChart();
   };
 });
+
+// ------------------------------------------------------------- タブ切替 (システム / モデル)
+// 非表示タブ内の canvas は clientWidth=0 のため Gauge.render() がスキップされる。
+// システムタブへ戻るときはゲージのキャッシュ(_last)を無効化して描画し直し、Chart.js はサイズを再計算する。
+function redrawSystemTab() {
+  if (!lastMetrics) return;
+  for (const g of gages) g._last = null;
+  renderGauges(lastMetrics);
+  if (mainChart) {
+    mainChart.resize();
+    refreshMainChart();
+  }
+}
+
+document.querySelectorAll(".tabs button").forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b === btn));
+    const key = btn.dataset.tab;
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + key));
+    if (key === "system") redrawSystemTab();
+  };
+});
 </script>
 <script>
 // ------------------------------------------------------------- Tier 3 (vLLM)
+// vLLM 行 (#v-*) の表示を現在値カードのテキスト表示 (#vi-*) へミラーする対応表。
+// setV() に集約するため、稼働モデルなしの "-" クリアや白/灰(stale)・up/down の色も両側へ同時に反映される。
+const V_MIRROR = {
+  "v-model": "vi-model",
+  "v-port": "vi-port",
+  "v-status": "vi-status",
+  "v-tps-in": "vi-prefill",
+  "v-tps-out": "vi-decode",
+};
+
 function setV(id, text, cls) {
+  const cls2 = "v" + (cls ? " " + cls : "");
   const el = document.getElementById(id);
   el.textContent = text;
-  el.className = "v" + (cls ? " " + cls : "");
+  el.className = cls2;
+  const mid = V_MIRROR[id];
+  if (!mid) return;
+  const mel = document.getElementById(mid);
+  if (!mel) return;
+  mel.textContent = text;
+  mel.className = cls2 + (mel.classList.contains("name") ? " name" : "");
+  if (mel.classList.contains("name")) mel.title = text; // 2行で省略されたモデル名の救済
 }
 
 // 入力/出力スループットの最終更新時刻(ms)。
@@ -988,6 +1098,7 @@ async function fetchJson(url) {
 async function poll() {
   try {
     const m = await fetchJson(API + "/api/metrics");
+    lastMetrics = m;
     pushPoint(m.timestamp, m);
     renderGauges(m);
     refreshMainChart();
@@ -999,10 +1110,8 @@ async function poll() {
     const st = await fetchJson(API + "/api/vllm/status");
     renderVllm(st);
     currentStatus = st;
-    // モデル切替モーダルが開いている間は状態表示をライブ更新する
-    if (!document.getElementById("modal-switch").classList.contains("hidden")) {
-      renderModelList();
-    }
+    // モデル一覧はパネル常設のため毎ポーリングで状態更新する (モーダルが開いていれば同じ描画が反映される)
+    renderModelList();
   } catch (e) {
     console.error("vllm poll failed", e);
   }
@@ -1019,76 +1128,75 @@ let currentStatus = null;
 </script>
 
 <script>
-// ------------------------------------------------------------- モデル切替モーダル
+// ------------------------------------------------------------- モデル切替 (パネル常設の一覧)
 let selectedProfile = null;
 
 function openModal(id) { document.getElementById(id).classList.remove("hidden"); }
 function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 
+// 1 件のコンテナ情報を .model-item 要素にする (モーダル一覧とパネル常設一覧で共通)
+function makeModelItem(c, st, sw) {
+  const isCurrent = st.active && st.active.profile === c.profile;
+  const isTarget = sw && sw.profile === c.profile;
+  let cls = "", meta;
+  if (isTarget) {
+    // 切替対象 B: API応答(sw.ready)=現在稼働中(緑)。Magnitude はコンテナを立たせないため
+    // running は常に false → sw.ready を優先して稼働判定する
+    if (sw.ready) { cls = "current"; meta = "現在稼働中"; }
+    else if (!c.running) meta = "停止中";
+    else { cls = "switching"; meta = "切替中…"; }
+  } else if (isCurrent) {
+    cls = "current";
+    meta = "現在稼働中";
+  } else if (c.running && sw) {
+    // 停止処理中の旧モデル A
+    cls = "stopping";
+    meta = "停止中…";
+  } else {
+    meta = (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
+  }
+  const div = document.createElement("div");
+  div.className = "model-item" + (cls ? " " + cls : "") + (c.profile === selectedProfile ? " selected" : "");
+  div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
+  div.onclick = () => { selectedProfile = c.profile; renderModelList(); };
+  return div;
+}
+
+// パネル常設の「切り替え実行」ボタン: ジョブ実行中 / 未選択 / すでに稼働中のモデル は不可
+function updateSwitchButtons(st) {
+  const btn = document.getElementById("panel-switch-go");
+  if (!btn) return;
+  const busy = !!(st && st.switching);
+  const active = st && st.active ? st.active.profile : null;
+  btn.disabled = busy || !selectedProfile || selectedProfile === active;
+  btn.textContent = selectedProfile ? "切り替え実行: " + selectedProfile : "切り替え実行";
+}
+
 function renderModelList() {
   const st = currentStatus || { containers: [], active: null };
   // 排他環境: RAG embedding 稼働中に LLM へ切替すると embedding が停止される警告
-  const warn = document.getElementById("switch-warn");
-  if (warn) {
-    const on = !!st.rag_running;
-    warn.style.display = on ? "" : "none";
-    warn.textContent = on
-      ? "注意: 稼働中の RAG embedding を停止して切り替えます (VRAM 排他)"
-      : "";
-  }
+  const on = !!st.rag_running;
+  const warn = document.getElementById("panel-switch-warn");
+  // "" ではなく "block": #panel-switch-warn は ID セレクタで display:none のため、
+  // inline を空にすると CSS の none が残り表示されない
+  warn.style.display = on ? "block" : "none";
+  warn.textContent = on
+    ? "注意: 稼働中の RAG embedding を停止して切り替えます (VRAM 排他)"
+    : "";
   // 切替ジョブ実行中なら kind=switch の情報のみ状態表示に使う
   const sw = st.switching && st.switching.kind === "switch" ? st.switching : null;
-  const list = document.getElementById("model-list");
+  const list = document.getElementById("panel-model-list");
   list.innerHTML = "";
-  for (const c of st.containers) {
-    const isCurrent = st.active && st.active.profile === c.profile;
-    const isTarget = sw && sw.profile === c.profile;
-    let cls = "", meta;
-    if (isTarget) {
-      // 切替対象 B: API応答(sw.ready)=現在稼働中(緑)。Magnitude はコンテナを立たせないため
-      // running は常に false → sw.ready を優先して稼働判定する
-      if (sw.ready) { cls = "current"; meta = "現在稼働中"; }
-      else if (!c.running) meta = "停止中";
-      else { cls = "switching"; meta = "切替中…"; }
-    } else if (isCurrent) {
-      cls = "current";
-      meta = "現在稼働中";
-    } else if (c.running && sw) {
-      // 停止処理中の旧モデル A
-      cls = "stopping";
-      meta = "停止中…";
-    } else {
-      meta = (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
-    }
-    const div = document.createElement("div");
-    div.className = "model-item" + (cls ? " " + cls : "") + (c.profile === selectedProfile ? " selected" : "");
-    div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
-    div.onclick = () => { selectedProfile = c.profile; renderModelList(); };
-    list.appendChild(div);
-  }
+  for (const c of st.containers) list.appendChild(makeModelItem(c, st, sw));
+  updateSwitchButtons(st);
 }
 
-document.getElementById("btn-switch").onclick = async () => {
-  selectedProfile = null;
-  try {
-    currentStatus = await fetchJson(API + "/api/vllm/status");
-  } catch (e) { /* 表示のみ続行 */ }
-  if (currentStatus && currentStatus.active) selectedProfile = currentStatus.active.profile;
-  // 切替ログは常時表示(7行固定): 開いたときは内容クリアでプレースホルダー("ログ")表示
-  document.getElementById("switch-log").textContent = "";
-  // ジョブ実行中の場合は実行ボタンを無効化(完了時は pollJob が復元する)
-  document.getElementById("switch-go").disabled = !!(currentStatus && currentStatus.switching);
-  renderModelList();
-  openModal("modal-switch");
-};
-
-document.getElementById("switch-close").onclick = () => closeModal("modal-switch");
-
-document.getElementById("switch-go").onclick = async () => {
+// モデル切替を実行する (一覧はパネル常設。モデル切替モーダルは廃止)
+document.getElementById("panel-switch-go").onclick = async () => {
   if (!selectedProfile) return;
-  const btn = document.getElementById("switch-go");
+  const btn = document.getElementById("panel-switch-go");
   btn.disabled = true;
-  const logEl = document.getElementById("switch-log");
+  const logEl = document.getElementById("panel-switch-log");
   logEl.style.display = "block";
   logEl.textContent = `切り替え開始: ${selectedProfile} ...\n`;
   try {
@@ -1557,7 +1665,16 @@ document.getElementById("cline-copy-all").onclick = () => {
 document.getElementById("cline-close").onclick = () => closeModal("modal-cline");
 
 // ------------------------------------------------------------- ジョブ進捗ポーリング
-const JOB_LOG_IDS = { switch: "switch-log", recreate: "recreate-log", stop: "stop-log" };
+const JOB_LOG_IDS = {
+  switch: ["panel-switch-log"],
+  recreate: ["recreate-log"],
+  stop: ["stop-log"],
+};
+
+// kind に対応する進捗ログ要素を配列で返す (モーダルとパネル常設の両方)
+function jobLogEls(kind) {
+  return (JOB_LOG_IDS[kind] || []).map((id) => document.getElementById(id)).filter(Boolean);
+}
 
 async function pollJob() {
   let job;
@@ -1571,12 +1688,14 @@ async function pollJob() {
       // ジョブ終了(切替/再作成/停止): ログを非表示にし、ボタン復元 / モーダル閉じる
       if (job.kind) onJobDone(job);
     } else {
-      const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
-      logEl.style.display = "block";
       // 空行を詰めて表示する(スクリプトの上書き表示用の空行が多い)
       const lines = (job.log_tail || []).filter((l) => l.trim()).join("\n");
-      logEl.textContent = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
-      logEl.scrollTop = logEl.scrollHeight;
+      const text = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
+      for (const logEl of jobLogEls(job.kind)) {
+        logEl.style.display = "block";
+        logEl.textContent = text;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
     }
   }
   // RAG ジョブ (vLLM ジョブと独立)
@@ -1607,14 +1726,17 @@ function onRagJobDone(job) {
 
 function onJobDone(job) {
   const isSwitch = job.kind === "switch";
-  const logEl = document.getElementById(JOB_LOG_IDS[job.kind]);
   // 切替ログは完了後も表示を維持。再作成/停止のみ従来どおり非表示化
-  if (!isSwitch && logEl.style.display !== "none") logEl.style.display = "none";
-  if (isSwitch) {
-    document.getElementById("switch-go").disabled = false;
-    if (!document.getElementById("modal-switch").classList.contains("hidden")) {
-      renderModelList();
+  if (!isSwitch) {
+    for (const logEl of jobLogEls(job.kind)) {
+      if (logEl.style.display !== "none") logEl.style.display = "none";
     }
+  }
+  if (isSwitch) {
+    // パネル常設の進捗ログはジョブ完了で閉じる (結果は vLLM 行の状態表示に反映される)
+    document.getElementById("panel-switch-log").style.display = "none";
+    // パネル常設一覧の選択状態・実行ボタン可否を最新化する
+    renderModelList();
   } else if (job.kind === "stop") {
     // 停止完了で確認ダイアログを自動閉じる
     closeModal("modal-stop");

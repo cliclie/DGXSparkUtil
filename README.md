@@ -68,7 +68,14 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 
 ## 表示レイアウト(4段構成)
 
-ダッシュボード全体は上下 4 段の構成とする。
+ダッシュボード全体は上下 4 段の構成とし、**4 段は 2 つのタブに分割して表示する**(実装メモ 2026-10-11)。
+
+- **システム**タブ(既定): 一段目(現在値ゲージ行) + 二段目(時系列グラフ)
+- **モデル**タブ: 三段目(vLLM / モデル) + 四段目(RAG)
+- タブバーは header 直下の `.tabs`(テキスト + アクティブ下線)。`.tab-panel` を `display` で切り替える
+- 非表示タブ内の canvas は `clientWidth=0` のため `Gauge.render()` がスキップされる。
+  システムタブへ戻る際は `redrawSystemTab()` がゲージのキャッシュ(`_last`)を無効化して再描画し、
+  `mainChart.resize()` + `refreshMainChart()` でグラフのサイズを復元する
 
 ### 一段目: 現在値ゲージ行
 
@@ -80,6 +87,15 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
     実装メモ(2026-10-05)参照)
 - 折り返し時にも各ゲージの幅は揃え、間隔を一定にする
 - 各ゲージは「表示スタイル(ゲージ)」に定義した共通スタイル(タイトル・色ゾーン・中央に現在値・直下に総量/容量)をそのまま使用する
+- ゲージ行の末尾に **vLLM 情報のテキスト専用カード**(`.gauge.vinfo-card`)を 1 枚追加する。
+  ゲージ描画(canvas)は持たず、**文字のみ**で次を表示する:
+  `モデル名` / `ポート` / `コンテナ状態` / `prefill` / `decode`
+  - 値は三段目の `#v-*` と同じ `setV()` 経由で `#vi-*` へミラーする(`V_MIRROR` 対応表)。
+    稼働モデルなしの `"-"` クリア、スループットの白/灰(held)、`up`/`down` の色分けも両側で同期される
+  - モデル名は長い profile 名に備え縦積み 2 行上限(`display:block` + `line-height:1.3` +
+    `max-height:2.6em` + `overflow:hidden`)+ `title` にフル名。`-webkit-line-clamp` は
+    Firefox で `display` が `flow-root` に解決されて幅制約が効かずカード幅 176px を超えて
+    はみ出したため不採用。他項目はラベルと値を横並びにし、既存ゲージカードと高さを揃える
 
 ### 二段目: 時系列グラフ
 
@@ -112,16 +128,21 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
     TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析、実装メモ 2026-09-14 参照)
   - 直近ログの表示
   - 稼働モデルなし(`active=null`)のときは「稼働モデル=稼働中のモデルなし」「コンテナ状態=停止中」を表示し、
-    ポート・稼働時間・実行/待機・KVCache・E2E・TTFT・入力/出力スループットは `"-"` にクリアする
+    ポート・稼働時間・実行/待機・KVCache・E2E・TTFT・prefill/decode は `"-"` にクリアする
     (前回値保持はモデル稼働中のみ。実装メモ 2026-10-08)
-- セクションヘッダーに「モデル切替・ログ・パラメータ編集」ボタンを配置
-  - ボタン押下で**ポップアップ(モーダル)表示**する(常設のフォーム欄は持たない)
-  - ポップアップ内には以下を収める:
-    - **モデル切替**: 対象モデル(profile)の選択 + 「切替」ボタン(サーバ側で `switch_models.sh <profile>` を実行)
-    - **実行ログ**: 稼働モデルの docker logs を三段構成(タイトル/ログ表示/閉じる)のモーダルで表示。
-      検索(行フィルタ)・再読み込み・`.log` ダウンロードに対応
-    - **パラメータ表示・編集**: 稼働モデルのパラメータ値の一覧表示、編集可能項目の編集 + 「保存」ボタン(編集後はコンテナ再作成して反映)
-  - 切替・保存は時間がかかる処理のため、ポップアップ内に進捗/状態を返し、完了後に閉じる(結果は三段目の状態表示に反映)
+  - スループットの表示ラベルは **`prefill`(入力) / `decode`(出力)**。API 側のキー名は
+    `prompt_tokens_per_s` / `generation_tokens_per_s` のまま(表示のみ改名。実装メモ 2026-10-11)
+- セクションヘッダーに「ログ・パラメータ・Cline設定値・停止」ボタンを配置(押下で**ポップアップ(モーダル)表示**)
+  - **実行ログ**: 稼働モデルの docker logs を三段構成(タイトル/ログ表示/閉じる)のモーダルで表示。
+    検索(行フィルタ)・再読み込み・`.log` ダウンロードに対応
+  - **パラメータ表示・編集**: 稼働モデルのパラメータ値の一覧表示、編集可能項目の編集 + 「保存」ボタン(編集後はコンテナ再作成して反映)
+  - **モデル切替はモーダルを持たない**(一覧を vLLM 行の下に常設表示するため重複。実装メモ 2026-10-11):
+    `renderModelList()` が `#panel-model-list` へ `.model-item` を描画し、対象モデル(profile)を選択して
+    常設の「切り替え実行」(`#panel-switch-go`)でサーバ側 `switch_models.sh <profile>` を実行する。
+    実行ボタンは ジョブ実行中 / 未選択 / すでに稼働中のモデル では無効。VRAM 排他警告は `#panel-switch-warn`、
+    進捗は `#panel-switch-log`(従来モーダルの 7 行固定高さを踏襲)に出し、完了で非表示化する。
+    一覧は毎ポーリングで更新する(現在稼働中=緑 `current`、`switching`/`stopping` も表示)
+  - 切替・保存は時間がかかる処理のため、進捗/状態を返し、完了後に閉じる(結果は三段目の状態表示に反映)
 - 三段目の状態表示は 2 秒毎ポーリングで更新する(モデル切替中は「切替中」状態を明示)
 
 ### 四段目: RAG (sociax-rag) 起動/停止
@@ -258,8 +279,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │  ② 表示: front/ (単一 index.html + JS)          │
 │     4段レイアウト(表示レイアウト(4段構成)参照)   │
 │     一段目: 現在値ゲージ行 / 二段目: 時系列グラフ  │
-│     三段目: vLLM状態 + 「モデル切替・パラメータ   │
-│      編集」ボタン(押下でポップアップ表示)          │
+│     三段目: vLLM状態 + モデル一覧を常設表示、     │
+│      「ログ・パラメータ」はポップアップ表示       │
 │     四段目: RAG (sociax-rag) 状態 + 起動/停止      │
 │     fetch を 2秒毎ポーリングしてビジュアル表示     │
 │     (既存 vLLM/Qdrant に依存しない独立ポート)      │
@@ -273,8 +294,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 
 ### vLLM関連機能の設計
 
-- UI 配置: 三段目(vLLM 状態モニタリング)に状態を常時表示。「モデル切替」・「パラメータ表示・編集」は
-  三段目の「モデル切替・パラメータ編集」ボタンから**ポップアップ(モーダル)表示**する(詳細は「表示レイアウト(4段構成)」参照)
+- UI 配置: 三段目(vLLM 状態モニタリング)に状態を常時表示。「パラメータ表示・編集」・「実行ログ」・「Cline設定値」は
+  三段目のボタンから**ポップアップ(モーダル)表示**する(詳細は「表示レイアウト(4段構成)」参照)。
+  **モデル切替だけはモーダルを持たず**、vLLM 行の下の常設一覧 + 「切り替え実行」ボタンで操作する
+  (一覧常設によりモーダルが完全な重複となったため廃止。実装メモ 2026-10-11)
 
 **状態モニタリング**
 
@@ -301,18 +324,19 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   (実装メモ 2026-10-08)。`/metrics` は無く、ルート `/health` は serve のライフサイクル状態のみを返す。
   メトリクスは `~/.magnitude/serving-usage.sqlite` の usage 表と GPU 負荷から算出し、直近ログは
   `journalctl --user` を読む(実装メモ 2026-10-06)
-- **E2E・TTFT・入力/出力スループットの前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
+- **E2E・TTFT・入力/出力スループット(表示ラベルは `prefill` / `decode`)の前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
   `front/index.html` の `pickMetric()` が直近の非ゼロ値を保持し、API が 0/None を返した間は前回値を維持表示する(実装メモ 2026-10-06)。
   稼働モデル消失・モデル切替(profile 変化)で保持値をリセット。スループットの白/灰は「API が非ゼロの新しい計測値を返した」側を白とする相対判定
 - **前回値保持はモデル稼働中のみ**: 稼働モデルなし(`active=null`)のときは保持値をリセットするだけでなく、
-  `clearVllmMetrics()` がポート・稼働時間・実行/待機・KVCache・E2E・TTFT・入力/出力スループットを `"-"` に
-  戻す(前のモデルの実測値を残さない。実装メモ 2026-10-08)
+  `clearVllmMetrics()` がポート・稼働時間・実行/待機・KVCache・E2E・TTFT・prefill/decode を `"-"` に
+  戻す(前のモデルの実測値を残さない。実装メモ 2026-10-08)。`#v-*` と `#vi-*`(現在値カード)の両側へ
+  同時に反映される(実装メモ 2026-10-11)
 
 **モデル切替**
-- 三段目のポップアップ内の「切替」ボタン → サーバ側で `switch_models.sh <profile>` を実行
+- 三段目の常設一覧で profile を選択 → 「切り替え実行」ボタン → サーバ側で `switch_models.sh <profile>` を実行
 - 切替時は現在稼働中のモデルを停止し、新モデルをロード(時間がかかる。スクリプトが所要時間を報告)
 - 同時稼働は 1 モデル(既存スクリプトの挙動)
-- ポップアップ内のジョブログ(`log_tail`)は実行中**最新フレーム(ヘッダー1行+直近4ログ行)のみ**を表示する。
+- パネルのジョブログ(`#panel-switch-log`)は実行中**最新フレーム(ヘッダー1行+直近4ログ行)のみ**を表示する。
   `switch_models.sh` の `display_frame()` は端末上書き表示のためヘッダー+ログ4行を ANSI カーソル移動付きで
   毎秒出力し、API 側は stdout をファイルにリダイレクトするため、`api/vllm.py` の `job_status()` が
   最後の `=== ... ===` ヘッダー行以降の1フレーム分のみを返す(実装メモ 2026-08-30)
@@ -446,7 +470,9 @@ cd /home/cliclie/DGXSparkUtil/api
 - モデル切替・パラメータ編集はバックグラウンドジョブとして実行し、`GET /api/vllm/job` で進捗(ログ末尾)を取得。同時実行は 1 件
 - パラメータ編集は `/home/cliclie/llm/compose/docker-compose.yml` の対象サービス command の値部分を書き換えた後 `docker compose up -d --force-recreate`
 - 動作検証時は稼働中の qwen38bf16 への影響を避けるため、切替・コンテナ再作成は実行していない(読み取り系 API のみ検証済み)
-- 一段目は半円ゲージ 10 種(Canvas 自前描画)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 5 GB/s)
+- 表示は 2 タブ(システム=現在値+時系列 / モデル=vLLM+RAG)に分割。モデル切替はモーダルを持たず、
+  vLLM 行下の常設一覧 + 「切り替え実行」で操作する(実装メモ 2026-10-11)
+- 一段目は半円ゲージ 10 種 + vLLM 情報のテキストカード 1 枚(計 11 枚、7枚/行で折り返し)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 5 GB/s)
 - ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz。調整は `index.html` の `GAUGE_DEFS[].max` と `NORM` のみ
 - 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=5 GB/s で割って倍率 100)。横軸は「直近30分 / 直近3時間 / すべて」で切替可能
 - 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
@@ -1278,4 +1304,73 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
   - HELD (稼働中・メトリクス 0/null): e2e=4.5 s / ttft=0.42 s / in=300.0 / out=25.5 が前回値を維持 (従来動作を維持)
   - NONE (`active:null`): **port / uptime / rw / kv / e2e / ttft / in / out すべて "-" (className="v")**、
     稼働モデル=「稼働中のモデルなし」、コンテナ状態=「停止中」
+
+## UI タブ化・現在値の vLLM テキストカード・prefill/decode 表記・モデル一覧の常設表示 (2026-10-11)
+
+要件: (1) 「現在値・時系列」と「vLLM/モデル・RAG」を添付(Home/Updates/Settings)風のタブ切り替えにする
+(2) 現在値のゲージ行に vLLM のモデル名・ポート・コンテナ状態・入出力スループットを**文字だけ**表示する
+(3) 入力スループットは `prefill`、出力スループットは `decode` と表記する
+(4) タブ分け後の vLLM/モデル 行の下に、切替ポップアップの一覧を表示しそこから切替できるようにする
+
+- **タブ化** (`front/index.html`):
+  - header 直下に `.tabs`(システム / モデル)、`<main>` 内を `#tab-system`(現在値+時系列) と
+    `#tab-model`(vLLM+RAG) の `.tab-panel` に分割。既定はシステム。
+    `.tab-panel { display: none }` / `.tab-panel.active { display: block }` で切り替える
+  - 非表示タブ内の canvas は `clientWidth=0` のため `Gauge.render()` がスキップされる。
+    poll 時に `lastMetrics` へ直近 metrics を保持し、システムタブ復帰時に `redrawSystemTab()` が
+    ゲージの `_last` を無効化して `renderGauges()` + `mainChart.resize()` + `refreshMainChart()` を実行する
+- **現在値のテキストカード** (要件2):
+  - `buildHostCards()` の innerHTML 末尾に `VINFO_CARD`(`.gauge.vinfo-card`) を連結。
+    canvas を持たず `モデル名 / ポート / コンテナ状態 / prefill / decode` を文字表示する
+  - ID は vLLM 行と衝突させないため `#vi-*`。`setV()` に `V_MIRROR` 対応表を追加し、`#v-*` へ書いた
+    textContent と className を `#vi-*` へも同じ値で流し込む → `clearVllmMetrics()` の "-" クリア、
+    held の灰(`stale`)、`up`/`down` の色分けも自動的に両側同期される(追加の分岐は不要)
+  - モデル名は `display:block` + `line-height:1.3` + `max-height:2.6em` + `overflow:hidden` で 2 行上限。
+    `-webkit-line-clamp` は Firefox で `display` が `flow-root` に解決されて幅制約が効かず、
+    カード幅 176px を超えて描画がはみ出したため不採用(`title` にフル名を持たせる)
+- **表記変更** (要件3): vLLM 行の `.k` を `入力スループット`→`prefill`、`出力スループット`→`decode`。
+  API 側のキー名(`prompt_tokens_per_s` / `generation_tokens_per_s`)と held/白灰ロジックはそのまま
+- **モデル一覧の常設表示** (要件4):
+  - `#vllm-panel` の `.btns` の直下に `#panel-switch-warn` / `#panel-model-list` /
+    `#panel-switch-go` / `#panel-switch-log` を追加
+  - `renderModelList()` を「1 品目の生成(`makeModelItem()`)」と「描画先ループ」に分離し、
+    `#model-list`(モーダル)と `#panel-model-list`(パネル)へ同じ `.model-item` を描画する。
+    `selectedProfile` を共有するのでモーダル・パネルどちらからでも同じ対象を切替できる
+    (現在稼働中=緑 `current`、`switching`/`stopping` の状態表示もそのまま流用)
+    ※ この段階ではモーダルと併存。下記の廃止でパネル単一描画になった
+  - `updateSwitchButtons()`: ジョブ実行中 / 未選択 / すでに稼働中の profile では「切り替え実行」を無効。
+    ボタン文言は選択時に「切り替え実行: <profile>」
+  - 切替実行は `startSwitch(btnId, logId)` に共通化(従来 `#switch-go` にインラインだった処理を関数化)
+  - `JOB_LOG_IDS` を配列化し `jobLogEls(kind)` で解決。`pollJob()` の進捗をモーダルとパネル両方へ書き、
+    `onJobDone()` は switch 完了時に `#panel-switch-log` を閉じる(結果は状態表示に反映される)
+  - poll の `renderModelList()` は「モーダル表示中のみ」の条件を撤去し毎ポーリングに変更(パネル常設のため)
+  - 排他警告は `style.display` を `""` ではなく `"block"` にする(`#panel-switch-warn` は ID セレクタで
+    `display:none` のため、inline を空にすると CSS の none が残って表示されなかった)
+- **モデル切替モーダルの廃止** (同要件の続報): 一覧・警告・進捗ログがパネル側に出揃い
+  `#modal-switch` が完全な重複になったため撤去した。
+  - HTML: `#btn-switch`(「モデル」ボタン)と `#modal-switch` 全体を削除。vLLM 行のボタン列は
+    「ログ・パラメータ・Cline設定値・停止」の4つになった。残るモーダルは params/cline/log/stop/rag の5種
+  - CSS: `#switch-log`(7行固定)を削除し、`#panel-switch-log` へ `line-height:14px; height:116px` を移設
+    (パネル側も従来同様 7 行固定で、切替中のレイアウト揺れを防ぐ)
+  - JS: `renderModelList()` の描画先・警告を `#panel-model-list` / `#panel-switch-warn` の単一参照に簡素化。
+    `btn-switch` / `switch-close` ハンドラを削除。2箇所共用のために関数化していた `startSwitch(btnId, logId)` は
+    呼び出し元が1つになったので `#panel-switch-go` のインラインハンドラへ戻した。
+    `JOB_LOG_IDS.switch` は `["panel-switch-log"]`。`onJobDone()` の `#switch-go` 復元は撤去
+    (実行ボタンの可否は `updateSwitchButtons()` が毎ポーリングで判定するため不要)
+  - 検証: 同一の検証ページで `items=5 sel=OK selected=qwen38radiance go.disabled=false` を確認。
+    `btn-switch` / `modal-switch` / `switch-go` / `switch-log` / `switch-warn` / `model-list` / `startSwitch`
+    への残存参照がゼロであることも grep で確認
+
+- **検証 (2026-10-11)**: JS エンジン(node/deno/bun)が無い環境のため、起動 IIFE を同期 XHR 版に置換した
+  検証専用ページ `front/_v_new.html` を作り、`firefox --headless --screenshot` で実描画と DBG 行を読み取り確認
+  (検証ファイルとスクショは確認後に削除済み)。
+  - システムタブ: ゲージ 11 枚 + `vLLM / モデル` カード。
+    `vi-model=[稼働中のモデルなし] vi-port=[-] vi-status=[停止中] vi-prefill=[-] vi-decode=[-]`、
+    カード `w=176 h=166`(既存ゲージと同一幅)
+  - 長いモデル名(`qwen3.8_flashnext_exl3_4p05bpw_extra_long_name_for_wrap_test`):
+    `vm h=34 w=150 cardH=183` → カード幅内に 2 行で収まる
+  - モデルタブ: vLLM 行の下に 5 品目(`items=5`)、クリックで `sel=OK selected=qwen38radiance`、
+    `go.disabled=false`、ボタン文言「切り替え実行: qwen38radiance」。RAG セクションも同タブ内に表示
+  - タブ切り替え自体が起動スクリプトの実行を要するため、モデルタブ表示に成功したことで
+    例外無く完了していることも確認
 
