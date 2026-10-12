@@ -85,16 +85,14 @@ section > h2 {
 }
 .gauge.vinfo-card .vi-row .k { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .gauge.vinfo-card .vi-row .v { font-size: 13px; font-weight: 600; text-align: right; word-break: break-all; }
-/* モデル名は長い (例: qwen3.8_flashnext_exl3_4p05bpw) ため縦積み 2 行上限とし、他カードと高さを揃える。
-   -webkit-line-clamp は Firefox で display が flow-root に解決されて幅制約が効かないため、
-   max-height (2 行分) + overflow:hidden で切る (実装メモ 2026-10-11) */
-.gauge.vinfo-card .vi-row.name-row { display: block; }
-.gauge.vinfo-card .vi-row.name-row .k { display: block; }
+/* モデル名はラベルなしで値のみ。176px のカード幅に収め、他カードと高さを揃えるため
+   1 行省略 (…) とし、フル名は title に入れる (setV が設定) */
 .gauge.vinfo-card .vi-row .v.name {
-  display: block; /* inline だと max-height が効かず行数上限が崩れる */
-  line-height: 1.3;
-  max-height: 2.6em; /* 行高 1.3em × 2 行 */
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
   text-align: left;
 }
 /* ---- Tier 1 (半円ゲージ) ---- */
@@ -802,10 +800,9 @@ let gages = [];
 // ID は vLLM 行の #v-* と衝突させないため #vi-* とし、setV() のミラーで同一値を流し込む。
 const VINFO_CARD = `
    <div class="gauge vinfo-card">
-     <div class="gtitle">vLLM / モデル</div>
-     <div class="vi-row name-row"><span class="k">モデル名</span><span class="v name" id="vi-model">-</span></div>
+     <div class="vi-row"><span class="v name" id="vi-model">-</span></div>
      <div class="vi-row"><span class="k">ポート</span><span class="v" id="vi-port">-</span></div>
-     <div class="vi-row"><span class="k">コンテナ状態</span><span class="v" id="vi-status">-</span></div>
+     <div class="vi-row"><span class="k">状態</span><span class="v" id="vi-status">-</span></div>
      <div class="vi-row"><span class="k">prefill</span><span class="v" id="vi-prefill">-</span></div>
      <div class="vi-row"><span class="k">decode</span><span class="v" id="vi-decode">-</span></div>
    </div>`;
@@ -988,7 +985,7 @@ function setV(id, text, cls) {
   if (!mel) return;
   mel.textContent = text;
   mel.className = cls2 + (mel.classList.contains("name") ? " name" : "");
-  if (mel.classList.contains("name")) mel.title = text; // 2行で省略されたモデル名の救済
+  if (mel.classList.contains("name")) mel.title = text; // 1行省略されたモデル名の救済
 }
 
 // 入力/出力スループットの最終更新時刻(ms)。
