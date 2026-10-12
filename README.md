@@ -89,13 +89,13 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - 各ゲージは「表示スタイル(ゲージ)」に定義した共通スタイル(タイトル・色ゾーン・中央に現在値・直下に総量/容量)をそのまま使用する
 - ゲージ行の末尾に **vLLM 情報のテキスト専用カード**(`.gauge.vinfo-card`)を 1 枚追加する。
   ゲージ描画(canvas)は持たず、**文字のみ**で次を表示する:
-  `モデル名` / `ポート` / `コンテナ状態` / `prefill` / `decode`
+  `モデル名(値のみ・ラベルなし)` / `ポート` / `状態` / `prefill` / `decode`
   - 値は三段目の `#v-*` と同じ `setV()` 経由で `#vi-*` へミラーする(`V_MIRROR` 対応表)。
     稼働モデルなしの `"-"` クリア、スループットの白/灰(held)、`up`/`down` の色分けも両側で同期される
-  - モデル名は長い profile 名に備え縦積み 2 行上限(`display:block` + `line-height:1.3` +
-    `max-height:2.6em` + `overflow:hidden`)+ `title` にフル名。`-webkit-line-clamp` は
-    Firefox で `display` が `flow-root` に解決されて幅制約が効かずカード幅 176px を超えて
-    はみ出したため不採用。他項目はラベルと値を横並びにし、既存ゲージカードと高さを揃える
+  - カード内にタイトルは置かない。モデル名はラベルを省略して値だけを表示し、176px のカード幅に
+    収めるため 1 行省略(`white-space:nowrap` + `overflow:hidden` + `text-overflow:ellipsis`)、
+    フル名は `title` に入れる(`setV()` が設定)。5 行でも既存ゲージカードと高さが揃う
+    (flex の stretch で全カード同高になる)
 
 ### 二段目: 時系列グラフ
 
@@ -1369,8 +1369,33 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
     カード `w=176 h=166`(既存ゲージと同一幅)
   - 長いモデル名(`qwen3.8_flashnext_exl3_4p05bpw_extra_long_name_for_wrap_test`):
     `vm h=34 w=150 cardH=183` → カード幅内に 2 行で収まる
+    ※ 2026-10-12 の変更でこのカードのタイトル行 `vLLM / モデル` と `モデル名` ラベルは削除、
+    モデル名は値のみ 1 行省略、`コンテナ状態` は `状態` に改称 (下記 2026-10-12 を参照)
   - モデルタブ: vLLM 行の下に 5 品目(`items=5`)、クリックで `sel=OK selected=qwen38radiance`、
     `go.disabled=false`、ボタン文言「切り替え実行: qwen38radiance」。RAG セクションも同タブ内に表示
   - タブ切り替え自体が起動スクリプトの実行を要するため、モデルタブ表示に成功したことで
     例外無く完了していることも確認
+
+## 現在値の vLLM テキストカード: タイトルとモデル名ラベルを削除・「状態」表記 (2026-10-12)
+
+要件: 現在値(システムタブ)の vLLM/モデル パネルが他のゲージカードより高くなるため、
+タイトルラベル `vLLM / モデル` と `モデル名` ラベルを削除する(モデル名**値**は表示する)。
+`コンテナ状態` は `状態` に改称する。
+
+※ 2026-10-11 メモの「vLLM / モデル」カード表記(タイトル行・モデル名 2 行 clamp・`cardH=183`)は
+本メモで置き換え
+
+- `VINFO_CARD`: `gtitle`(`vLLM / モデル`)と `モデル名` ラベルを削除。先頭行は
+  `<span class="v name" id="vi-model">` のだけで、モデル名の値のみを表示する。
+  行は `モデル名 / ポート / 状態 / prefill / decode` の 5 行
+- CSS: 旧 `.vi-row.name-row` と 2 行 clamp(`line-height:1.3` + `max-height:2.6em`)は削除。
+  新 `.vi-row .v.name` は `flex:1 1 auto` + `min-width:0` + `white-space:nowrap` +
+  `overflow:hidden` + `text-overflow:ellipsis` の 1 行省略(176px のカード幅に収める)
+- JS: `V_MIRROR` の `"v-model": "vi-model"` と、`setV()` の `name` クラス維持 +
+  `title` 設定(1 行省略されたモデル名の救済)は残す
+- `コンテナ状態` → `状態` は現在値カードのみ(モデルタブの vLLM 行 `#v-status` は従来表記)
+- 検証(headless chrome で実描画): 長いモデル名
+  (`qwen3.8_flashnext_exl3_4p05bpw_extra_long_name_for_wrap_test`)で
+  `vinfoH=135` / 他カード 10 枚も全て 135(同高)、`nameClientW=150 nameScrollW=439`(1 行省略)、
+  `title` にフル名、ラベルは `ポート|状態|prefill|decode`
 
