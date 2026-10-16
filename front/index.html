@@ -113,7 +113,8 @@ section > h2 {
   padding: 10px 12px 8px;
   text-align: center;
 }
-/* GPU サーマルガード発動中: 監視対象(GPU温度)と制限対象(GPU電力/クロック)のカード枠線を
+/* GPU サーマルガード発動中: 監視対象 (atom2/R9700=GPU温度、atom1/GB10=CPU温度・GPU温度の
+   うち制限値に引っかかった方) と制限対象 (atom2=GPU電力、atom1=GPUクロック) のカード枠線を
    着色する。復帰 (上限=最大 / クロック解除) でクラスが外れ var(--border) の灰色に戻る。
    太さは変えない (他カードとの高さを揃えたまま色だけで判別させる) */
 .gauge.thr-high { border-color: var(--thr-yellow); }
@@ -1788,9 +1789,14 @@ function renderPstate(m) {
 
 // ------------------------------------------------------------- GPU サーマルガード表示
 // /api/thermal から「発動中か」を引く。発動中はヘッダにインジケータを出し、
-// 監視対象 (GPU 温度) と制限対象 (atom2=GPU 電力 / GB10=GPU クロック) のカード枠線を
-// 着色する。段は制限値そのもので判定 (power: cap_crit_w に達したら赤、clock:
-// lock_crit_mhz 以下なら赤)。復帰 (上限=最大 / locked_mhz=0) は null = 灰色に戻る。
+// 監視対象 (watchId) と制限対象 (limitId) のカード枠線を着色する。
+//   atom2 (mode=power / R9700): 監視 = GPU 温度のみ、制限 = GPU 電力
+//   atom1 (mode=clock  / GB10) : 監視 = CPU(acpitz)・GPU 温度の両方。thermal_guard.sh は
+//       max(acpitz, GPU) を見るので temp_c (=max) を生んだセンサーが制限値に引っかかった
+//       犯人 = その側のパネルだけ着色する (同値なら共有ダイの acpitz = CPU 側)。
+//       制限 = GPU クロック
+// 段は制限値そのもので判定 (power: cap_crit_w 以下で赤、clock: lock_crit_mhz 以下で赤)。
+// 復帰 (上限=最大 / locked_mhz=0) は null = 灰色に戻る。
 function thermalState() {
   const t = THERMAL;
   if (!t || !t.enabled) return null;
@@ -1799,15 +1805,21 @@ function thermalState() {
     if (t.power_cap_w >= t.power_max_w) return null; // 300W (最大) は制限なし
     return {
       crit: t.cap_crit_w != null && t.power_cap_w <= t.cap_crit_w,
+      watchId: "g-gpu-temp",
       limitId: "g-gpu-power",
       text: `電力制限 ${t.power_cap_w}W (GPU ${Math.round(t.temp_c ?? 0)}℃)`,
     };
   }
   if (!t.locked_mhz) return null; // 0 = nvidia-smi -rgc 解除
+  // 監視対象が 2 つ (CPU/GPU 温度) なので、制限値に引っかかった = temp_c (=max) を生んだ方
+  const a = Math.round(t.acpitz_c ?? 0);
+  const g = Math.round(t.gpu_c ?? 0);
+  const cpuSide = a >= g;
   return {
     crit: t.lock_crit_mhz != null && t.locked_mhz <= t.lock_crit_mhz,
+    watchId: cpuSide ? "g-cpu-temp" : "g-gpu-temp",
     limitId: "g-gpu-clock",
-    text: `クロック制限 ${t.locked_mhz}MHz (${Math.round(t.temp_c ?? 0)}℃)`,
+    text: `クロック制限 ${t.locked_mhz}MHz (${cpuSide ? "CPU" : "GPU"} ${cpuSide ? a : g}℃)`,
   };
 }
 
@@ -1822,7 +1834,7 @@ function renderThermal() {
     const c = g.cardEl;
     if (!c) continue;
     c.classList.remove("thr-crit", "thr-high");
-    if (st && (g.def.id === "g-gpu-temp" || g.def.id === st.limitId)) {
+    if (st && (g.def.id === st.watchId || g.def.id === st.limitId)) {
       c.classList.add(st.crit ? "thr-crit" : "thr-high");
     }
   }

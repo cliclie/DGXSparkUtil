@@ -102,10 +102,15 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
     収めるため 1 行省略(`white-space:nowrap` + `overflow:hidden` + `text-overflow:ellipsis`)、
     フル名は `title` に入れる(`setV()` が設定)。5 行でも既存ゲージカードと高さが揃う
     (flex の stretch で全カード同高になる)
-- **GPU サーマルガード発動中**は、監視対象の「GPU 温度」と制限対象の「GPU 電力」
-  (GB10 は「GPU クロック」) のカード枠線を暗め黄 (250W) / 暗め赤 (210W) に着色する。
-  復帰 (上限=最大) と unit 停止時は灰色 (`--border`) に戻る
-  (「atom2 サーマルガード」節のフロント表示参照)
+- **GPU サーマルガード発動中**は、監視対象と制限対象のカード枠線を暗め黄 / 暗め赤に着色する。
+  対象パネルはプラットフォームで異なる(2026-10-17):
+  - atom2 (R9700 / power モード): 監視「GPU 温度」+ 制限「GPU 電力」(250W=黄 / 210W=赤)
+  - atom1 (GB10 / clock モード): 監視「CPU 温度」または「GPU 温度」のうち**制限値に
+    引っかかった方**(`temp_c` は `max(acpitz, GPU)` なので、その max を生んだセンサー)+
+    制限「GPU クロック」(1665MHz=黄 / 1000MHz=赤)。ヘッダのインジケータも
+    `クロック制限 1665MHz (CPU 92℃)` のように犯人側を明記する
+  復帰 (上限=最大 / クロック解除) と unit 停止時は灰色 (`--border`) に戻る
+  (各節の「フロント表示」参照)
 
 ### 二段目: 時系列グラフ
 
@@ -1435,6 +1440,8 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
 > `api/thermal-guard.service` は両機で同一ファイルを使い、起動時に
 > **clock(GB10 = GPU クロック) / power(R9700 = GPU 電力上限)** を自動判定する。
 > 本節の clock 経路のロジックは変更していない。R9700 側は次節「atom2 サーマルガード」参照。
+> `front/index.html` も両機同一で、**発動中に表示するパネルだけが異なる**
+> (atom1 は監視 CPU/GPU 温度・制限 GPU クロック。下記「フロント表示」参照)。
 
 ### 背景
 
@@ -1554,6 +1561,31 @@ run1 req=220000 -> prompt=223739 comp=80 elapsed=147.4s prefill=1517.9 tok/s
 修正後は 90℃→1500MHz、80℃ 以下で 10 秒→解除の周期運動になる(推定 90 秒周期)。
 `-lgc` 連打は無害と確認済みなので、速度を優先するなら `THERMAL_LOW_C=85` のように
 `LOW` を上げて解除を速める選択肢がある。
+
+### フロント表示 (2026-10-17)
+
+`front/index.html` は両機で同一ファイル。2 秒ポーリングで `/api/thermal` を引き、発動中に
+着色するパネルは `thermalState()` が返す `watchId`(監視対象)と `limitId`(制限対象)が決め、
+**atom1 と atom2 で対象が違う**(要求仕様):
+
+| モード | 監視対象 `watchId` | 制限対象 `limitId` |
+|---|---|---|
+| atom1 = clock (GB10) | `acpitz_c >= gpu_c` → **CPU 温度**、それ以外 → **GPU 温度** | **GPU クロック** |
+| atom2 = power (R9700) | **GPU 温度** | **GPU 電力** |
+
+- **ヘッダ (P-State の右) のインジケータ**: `クロック制限 1500MHz (CPU 90℃)` /
+  `クロック制限 1000MHz (GPU 99℃)`。温度は**犯人側だけ**を表示し `CPU`/`GPU` を明記する
+- 段は**制限値そのもの**で決める(clock 側はクロック値そのもの)。
+  `locked_mhz <= lock_crit_mhz`(1000MHz)→ 暗め赤 `--thr-red: #9e3b3b`、
+  それ以外の発動 → 暗め黄 `--thr-yellow: #9a7b1f`
+- **復帰**(`locked_mhz = 0` = `-rgc` 解除)と unit 停止時(`{"enabled": false}`)はクラスが
+  外れて灰色(`--border: #30363d`)に戻る。`/api/thermal` 取得失敗時も同じく無表示
+- 枠線の**太さは変えない**(他カードと高さを揃えたまま色だけで判別させる)
+
+監視対象が 2 枚ある理由: GB10 は CPU/GPU 同一ダイ共有冷却で、`thermal_guard.sh` の clock
+ループが見るのは `max(acpitz, GPU温度)`。状態 JSON の `temp_c` はその max なので、
+`acpitz_c` と `gpu_c` を比較して**制限値に引っかかった側**を特定できる(同値は共有ダイ側の
+acpitz = CPU 温度パネル)。atom1 の「GPU 電力」パネルは監視・制限対象ではないので着色しない。
 
 ### インストール
 
@@ -1682,9 +1714,10 @@ GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したも�
 
 復帰 (上限 = 最大 300W) と unit 停止時 (`{"enabled": false}`) はクラスが外れて灰色
 (`--border: #30363d`) に戻る。判定は `thermalState()` が担い、段は**制限値そのもの**
-(`power_cap_w <= cap_crit_w`) で決める。GB10 (clock モード) は対称に
-「GPU 温度」+「GPU クロック」パネルが対象で、`locked_mhz <= lock_crit_mhz` が赤、
-それ以外の発動が黄、`locked_mhz = 0` (解除) は灰色。
+(`power_cap_w <= cap_crit_w`) で決める。GB10 (clock モード) は**監視対象が CPU 温度 / GPU 温度の
+2 枚**で**制限対象は GPU クロック**と対象パネルが異なる (色段は `locked_mhz <= lock_crit_mhz`
+が赤、それ以外の発動が黄、`locked_mhz = 0` = 解除は灰色)。詳細は前節
+「GB10 サーマルガード → フロント表示」の表参照。
 
 ### 旧 `llm-gpu-powercap.service` を無効化
 
@@ -1739,4 +1772,78 @@ thermal-guard start: mode=power high=80 crit=90 caps=300/250/210W release=2s int
   "cap_max_w":300,"release_secs":2,...}` を返す
 - `sh -n` / `bash -n` / `python -m py_compile` 通過。clock モード (`loop_clock`) は
   前節のロジックそのまま (インデント変更のみ) で、atom1 側の挙動は不変
+
+
+## atom1 フロントのサーマルガード表示: 監視対象を CPU/GPU 温度の 2 枚に (2026-10-17)
+
+atom2 側で実装されたフロントのサーマルガード表示(`c9125f1`)を atom1(WhitebearATOM1 /
+GB10)へ pull して反映した。ただし**監視対象とガード制限対象が両機で違う**ため、
+着色・インジケータ対象のパネルを atom1 向けに変えた。
+
+| | 監視対象(表示するパネル) | 制限対象 |
+|---|---|---|
+| atom2 (R9700 / power) | GPU 温度 | GPU 電力 |
+| atom1 (GB10 / clock) | **CPU 温度 と GPU 温度**(制限値に引っかかった方だけ) | **GPU クロック** |
+
+### 実装
+
+`thermalState()` が監視対象 ID を `watchId` として返し(`limitId` は制限対象)、
+`renderThermal()` は `g-gpu-temp` 固定ではなく **`st.watchId` と `st.limitId` の 2 枚だけ**
+着色する。
+
+```js
+const a = Math.round(t.acpitz_c ?? 0);
+const g = Math.round(t.gpu_c ?? 0);
+const cpuSide = a >= g;
+// watchId: cpuSide ? "g-cpu-temp" : "g-gpu-temp" / limitId: "g-gpu-clock"
+```
+
+- 犯人の決め手: `loop_clock()` は `t = max(acpitz, GPU温度)` を見るので、状態 JSON の
+  `temp_c` はその max。`acpitz_c` と `gpu_c` を比較して max を生んだ側が制限値に
+  引っかかったセンサー(同値は共有ダイ側の acpitz = CPU 温度パネル)
+- ヘッダのインジケータも犯人側を明記: `クロック制限 1665MHz (CPU 92℃)` /
+  `クロック制限 1000MHz (GPU 99℃)`。色段は従来と同一で `locked_mhz <= lock_crit_mhz`
+  (1000MHz)= 暗め赤、それ以外の発動 = 暗め黄、`locked_mhz = 0`(解除)= 灰色
+- atom1 の「GPU 電力」パネルは監視・制限対象ではないので着色しない(atom2 では制限対象)
+- power 分岐にも `watchId: "g-gpu-temp"` を入れて**atom2 の表示は変更なし**
+
+### 検証
+
+- **inline script 7 ブロックを esprima(4.0.1)でパース** — 全ブロック OK(`??` は
+  esprima 4.0.1 が ES2020 非対応なので `||` へ置換して parse。null 系で意味は同じ)
+- **`thermalState()` / `renderThermal()` を dukpy(Duktape)で実行**し、`thermal_guard.sh` の
+  実 JSON 形状で判定表を確認:
+
+| 入力 | ヘッダ | 着色されるパネル |
+|---|---|---|
+| `locked_mhz=1665, acpitz=92, gpu=77` | `クロック制限 1665MHz (CPU 92℃)` 黄 | CPU 温度 + GPU クロック |
+| `locked_mhz=1665, acpitz=88, gpu=91` | `… (GPU 91℃)` 黄 | GPU 温度 + GPU クロック |
+| `locked_mhz=1000, acpitz=95, gpu=99` | `… (GPU 99℃)` 赤 | GPU 温度 + GPU クロック(crit) |
+| `locked_mhz=1665, acpitz=gpu=90` | `… (CPU 90℃)` 黄 | CPU 温度 + GPU クロック |
+| `locked_mhz=0`(解除)/ `{enabled:false}` | 空 | なし(全カード灰色) |
+| `mode=power, 250W` | `電力制限 250W (GPU 85℃)` 黄 | GPU 温度 + GPU 電力(atom2 のまま) |
+
+  どのケースも**着色は監視対象 1 枚 + 制限対象 1 枚の計 2 枚**で、他のカード
+  (CPU 負荷 / GPU 電力 など)は灰色のまま
+- **atom1 実機**: `thermal-guard` と `dgx-spark-api` は `active`。
+  `curl -s localhost:8080/api/thermal` は
+  `{"enabled":true,"temp_c":42,"acpitz_c":42,"gpu_c":41,"locked_mhz":0,"low_c":85,
+  "lock_high_mhz":1665,"lock_crit_mhz":1000,...}`(`mode` キー無し = clock 経路)を返し、
+  `curl -s localhost:8080/` の配信 HTML が作業ツリーと**完全一致**(front は静的配信なので
+  `dgx-spark-api` の再起動は不要)。発動中は `acpitz_c` が `gpu_c` を上回ることが多く
+  (Nemotron prefill は CPU 側が先に 90℃ に達する)CPU 温度パネルが着色される
+
+### 反映手順(atom1)
+
+```bash
+cd ~/DGXSparkUtil && git pull --ff-only          # front は静的配信なので即反映
+sudo bash api/install_service.sh                 # unit 変更 (power 用 Environment と
+                                                 #  amdgpu 待ち ExecStartPre) を反映
+systemctl restart thermal-guard                  # enable --now は稼働中 unit を再起動しない
+curl -s localhost:8080/api/thermal | python3 -m json.tool
+```
+
+GB10 では `thermal_guard.sh` の clock 経路(`loop_clock`)は**ロジック変更なし**。unit の
+追記分は power 用の環境変数と `ExecStartPre`(GB10 は `nvidia-smi` を見つけて即通過)だけで、
+既存の `THERMAL_LOW_C=85` / `THERMAL_LOCK_HIGH_MHZ=1665` はそのまま有効。
 
