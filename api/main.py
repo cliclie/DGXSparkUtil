@@ -13,7 +13,7 @@
 - POST /api/rag/start     RAG環境起動 (バックグラウンド)
 - POST /api/rag/stop      RAG環境停止 (バックグラウンド)
 - GET  /api/rag/job       RAG 起動/停止ジョブの進捗
-- GET  /api/thermal       GB10 サーマルガード (root unit) の状態
+- GET  /api/thermal       GPU サーマルガード (root unit) の状態
 - GET  /                  front/ の静的ファイル
 """
 
@@ -185,10 +185,11 @@ def api_rag_job() -> dict:
 
 @app.get("/api/thermal")
 def api_thermal() -> dict:
-    """GB10 サーマルガード (thermal-guard.service) の状態を返す。
+    """GPU サーマルガード (thermal-guard.service) の状態を返す。
 
-    状態ファイルは root 特権の unit が書く。API は読むだけで、
-    nvidia-smi -lgc を叩く権限は持たない。unit 停止時は enabled=false。
+    状態ファイルは root 特権の unit が書く。API は読むだけで、nvidia-smi -lgc
+    (GB10 / clock モード) も power1_cap (R9700 / power モード) も叩かない。
+    unit 停止時は enabled=false。mode キーでどちらかを判別できる。
     """
     try:
         return json.loads(config.THERMAL_STATE_FILE.read_text())

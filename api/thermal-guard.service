@@ -1,14 +1,16 @@
 [Unit]
-Description=GB10 thermal guard (nvidia-smi -lgc only)
-After=docker.service
+Description=GPU thermal guard (GB10 clock cap / R9700 power cap)
+After=docker.service systemd-modules-load.service
 Wants=docker.service
 
 [Service]
 Type=simple
 # 特権はこの unit だけに限局する。dgx-spark-api.service は cliclie 権限のまま。
 # 実行するコマンドは読み取り (sysfs / nvidia-smi --query / docker ps) と
-# nvidia-smi -lgc / -rgc だけ。
+# nvidia-smi -lgc / -rgc (GB10) もしくは power1_cap 書き込み (R9700) だけ。
+# モードは起動時に自動判定する (THERMAL_MODE=clock|power で上書き可)。
 ExecStart=__API_DIR__/thermal_guard.sh
+# --- clock (GB10) ---------------------------------------------------------------
 # 解除しきい値を 85℃ にする (80℃ まで冷やすのを待たない)。
 # 実測: 10〜29 秒周期で -lgc を叩いても vLLM は壊れなかった (Xid 0 件 / prefill PASS)。
 # 90℃ までフルクロックで走る分、速度は固定ロックより出る。
@@ -17,6 +19,17 @@ Environment=THERMAL_LOW_C=85
 # 1500 -> 1475MHz は base 1665MHz の「以下」で、prefill を 2285→1110 T/s (49%) まで
 # 落としていた。1644MHz なら acpitz は 90℃ 未満で飽和し、発振なしに速度が上がる見込み。
 Environment=THERMAL_LOCK_HIGH_MHZ=1665
+# --- power (R9700 / atom2) ------------------------------------------------------
+# GPU 温度 (junction) のみを見る 3 段電力上限。80℃ 以下は最大 300W、80℃ 超 250W、
+# 90℃ 超 210W (sysfs power1_cap_min = 210W が書ける下限)。ロード中の LLM は問わない。
+Environment=THERMAL_POWER_HIGH_C=80
+Environment=THERMAL_POWER_CRIT_C=90
+Environment=THERMAL_CAP_HIGH_W=250
+Environment=THERMAL_CAP_CRIT_W=210
+Environment=THERMAL_CAP_MAX_W=300
+# 電力制限の解放 (電力を上げる) は、温度が下がった状態が 2 秒以上続いてから適用。
+# 下げる方向は即時。監視間隔は power モードの既定 1 秒 (2 サンプルで判定)。
+Environment=THERMAL_POWER_RELEASE_SECS=2
 Restart=always
 RestartSec=5
 # /run/thermal を自動作成 (unit 停止時に自動削除)。state は 0644 で書かれ
@@ -25,6 +38,10 @@ RuntimeDirectory=thermal
 RuntimeDirectoryMode=0755
 # 温度監視なので CPU 優先度を落とさない (nice すると prefill 中に後回しにされる)
 Nice=0
+# atom2: amdgpu モジュールロード完了 (power1_cap sysfs 出現) を最大 120 秒待つ
+# (実装メモ 2026-10-03 の llm-gpu-powercap.service と同じ教訓)。
+# GB10 は nvidia-smi が PATH にあれば即通過する。
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 120); do command -v nvidia-smi >/dev/null 2>&1 && exit 0; ls /sys/class/drm/card*/device/hwmon/hwmon*/power1_cap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "neither nvidia-smi nor amdgpu power1_cap appeared after 120s" >&2; exit 1'
 
 [Install]
 WantedBy=multi-user.target
