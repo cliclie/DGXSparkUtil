@@ -1399,3 +1399,186 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
   `vinfoH=135` / 他カード 10 枚も全て 135(同高)、`nameClientW=150 nameScrollW=439`(1 行省略)、
   `title` にフル名、ラベルは `ポート|状態|prefill|decode`
 
+
+## GB10 サーマルガード: 温度連動の GPU クロック制御 (2026-10-16)
+
+### 背景
+
+GB10 は CPU/GPU 同一ダイ・共有冷却で、`acpitz` が **104℃ に達すると本体が落ちる**
+(ログなしの即時電源断)。NVIDIA-Nemotron-3.5-Super-VL-120B-A12B の長大 prefill で再現した。
+
+**発熱源は GPU であって CPU ではない**(交差比較で確定):
+
+| | Qwen 4p05 259K prefill | Nemotron 196K prefill |
+|---|---|---|
+| CPU %user+%system | **8.34%** (idle 90.68%) | 7.06% (idle 92.90%) |
+| load1 ピーク | **3.87** | 2.07 |
+| GPU 電力 peak | 71 W | **83 W** |
+| acpitz peak | 88℃ | **94℃** |
+
+CPU 負荷は Qwen の方が高いのに acpitz は 6℃ 低い。`acpitz` は SoC 内 7 ポイントの総合で
+GPU 熱が直結する。GB10 には CPU 電力センサーが存在しない(`hwmon` に `power*_input` なし、
+`/sys/class/powercap` も空)ため、GPU 電力が唯一の可視変数。
+
+**GPU 側の制限可否**: `nvidia-smi -pl`(電力)と `-rac`(メモリクロック)は `not supported`。
+`-lgc`(GPU クロック)は一般ユーザーで `does not have permission to change clocks` =
+**権限エラーであって非対応ではない**。root で受理される:
+
+```
+sudo nvidia-smi -lgc 1500,1500   ->  実クロック 1475 MHz
+```
+
+**効果(実測)**:
+
+| | 2398 MHz | 1475 MHz |
+|---|---|---|
+| GPU 電力 | peak 83 W | peak 26 W (avg 21.4) |
+| GPU 温度 | peak 85℃ | peak 54℃ |
+| **acpitz peak** | **94℃** (196K) → 259K で本体停止 | **72℃** (254K PASS) |
+| prefill 速度 | 2285 T/s | 1110 T/s (49%) |
+
+94℃ 到達時にも GPU の throttle reason は `0x0`(`sw_thermal_slowdown`/`hw_thermal_slowdown`
+とも Not Active)。GPU は温度で減速しないので、自動保護は当てにできない。
+
+### 設計: root 特権を `thermal-guard.service` だけに限局
+
+API を root にすると `vllm.py` が使う `systemctl --user` / `journalctl --user`
+(Magnitude 情報、271・290 行のコメント参照)が壊れ、かつ CORS `*` + 0.0.0.0 + 認証なしの
+API に root を載せることになる。**cliclie への NOPASSWD 付与も望まない。**
+
+そこで **root で動くのは `thermal_guard.sh` 1 本だけ**にした:
+
+```
+thermal-guard.service (root)  ── 2 秒ループ ──> nvidia-smi -lgc / -rgc
+        └─> /run/thermal/state (0644)  ──> API /api/thermal (cliclie) が読むだけ
+```
+
+- `dgx-spark-api.service` は `User=cliclie` のまま**一切変えない**
+- root unit が実行するコマンドは読み取り(sysfs / `nvidia-smi --query` / `docker ps`)と
+  `-lgc` / `-rgc` のみ
+- 制御ループが API と独立なので、**フロント更新で API を再起動しても制御が途切れない**
+  (`RestartSec=5` の穴が開かない)
+- `switch_models.sh` 側の GPU 制御は削除した(二重制御回避)。cpufreq 側は残す
+
+### 3 段ヒステリシス
+
+制御変数は `max(acpitz 最高値, GPU温度)`。
+
+| 条件 | 動作 |
+|---|---|
+| `>= CRIT` (98℃) | `-lgc 1000,1000` — 104℃ 停止への最後の弁 |
+| `>= HIGH` (90℃) | `-lgc 1500,1500` |
+| `<= LOW` (80℃) が 10 秒継続 | `-rgc` で解除 |
+
+- **下げるのは即時、上げるのは 10 秒継続**。GB10 の熱時定数が約 100 秒あるので対称条件は発振する
+- 熱応答実測: 70→80℃ を 28 秒、80→90℃ を 24 秒(=0.4℃/秒)。**2 秒制御で余裕がある**
+- 1475 MHz では 68〜72℃ で**飽和**するので 90℃ に届かない(制御の安定性はこれに支えられている)
+- **nemotron 稼働時のみ作動**。ExLlama 系は CPU/RAM 主体で 88℃/71W 圏外なので絞らない
+- **終了時は必ず `-rgc`**(`trap ... EXIT TERM INT`)。低クロック固定で性能を失い続ける方が害が大きい
+- 全しきい値は環境変数で上書き可(`THERMAL_HIGH_C` / `THERMAL_CRIT_C` / `THERMAL_LOW_C` /
+  `THERMAL_LOW_SECS` / `THERMAL_LOCK_HIGH_MHZ` / `THERMAL_LOCK_CRIT_MHZ` /
+  `THERMAL_INTERVAL_S` / `THERMAL_CONTAINER`)
+
+### 追加ファイル
+
+- `api/thermal_guard.sh` — 制御ループ(上記)
+- `api/thermal-guard.service` — `RuntimeDirectory=thermal` で `/run/thermal` を自動作成・自動削除
+- `api/config.py` — `THERMAL_STATE_FILE`(`DGXUTIL_THERMAL_STATE` で上書き可)
+- `api/main.py` — `GET /api/thermal`(状態ファイルを読むだけ。unit 停止時は `{"enabled": false}`)
+- `api/install_service.sh` — thermal-guard unit をレンダリングして `enable --now`
+
+### 検証
+
+**机上(しきい値を下げた擬似発熱)**: CRIT→1000MHz / HIGH→1500MHz / 通常→解除 を確認。
+nemotron 非稼働(コンテナ名不一致)では 90℃ 相当でも `locked_mhz=0` を維持。
+`GET /api/thermal` が全フィールドを JSON で返し、既存 `GET /api/metrics` も 200。
+`systemd-analyze verify` 通過。
+
+**実戦(2026-10-16 11:08、220K 目標を 2398MHz 起点で投入)**:
+
+```
+11:10:38  thermal-guard: 90C -> 1500MHz (acpitz=90C gpu=77C running=1)
+11:10:48  thermal-guard: 84C -> 0MHz    (acpitz=84C gpu=66C running=1)
+run1 req=220000 -> prompt=223739 comp=80 elapsed=147.4s prefill=1517.9 tok/s
+```
+
+- **発動は実測で機能した**。90℃ 検知で 1500MHz に下がり、acpitz は **90℃ で頭打ち**(94℃ に到達せず)
+- **10 秒周期で `-lgc` を叩いても vLLM は壊れなかった**(Xid 再発 0 件、コンテナ生存、prefill PASS)。
+  クロック変更が CUDA コンテキストを乱す懸念は実測で否定された
+- **prefill 1517.9 T/s** は 1475MHz 固定の 1110 T/s より **37% 速い**。90℃ までフルクロックで
+  走り、超えた分だけ落とす挙動は、固定ロックより速度面で有利
+
+**実戦で発見した 2 つの不具合(修正済み)**:
+
+1. **起動時に解除されない** — `current=0`(解除済み)で開始するが、実 GPU は手で `-lgc` した
+   1475MHz にロックされている。`want=0 == current=0` で `apply` が走らず、`low_count=67`
+   (134 秒)でも永久に解除されなかった。→ 起動時に 1 回 `-rgc` して既知の状態から始めるよう修正
+2. **80〜90℃ のヒステリシス帯域が欠落** — `target_mhz()` が `HIGH(90)` 未満で 0 を返すだけで
+   `LOW(80)` を見ていなかった。90℃ で下げる → 84℃ で解除 → 即 90℃ → 発動の **10 秒発振**に
+   なった(上記ログがそれ)。→ `LOW < t <= HIGH` では `current` を維持する分岐を追加
+
+修正後は 90℃→1500MHz、80℃ 以下で 10 秒→解除の周期運動になる(推定 90 秒周期)。
+`-lgc` 連打は無害と確認済みなので、速度を優先するなら `THERMAL_LOW_C=85` のように
+`LOW` を上げて解除を速める選択肢がある。
+
+### インストール
+
+```bash
+sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh
+systemctl status thermal-guard.service   # 起動確認
+curl -s localhost:8080/api/thermal       # 状態 JSON
+journalctl -u thermal-guard.service -f   # 発動ログ
+```
+
+**`install_service.sh` の再実行で unit 変更は自動反映されない**(2026-10-16 に実測):
+`systemctl enable --now` は**稼働中 unit を再起動しない**。`Environment=` のしきい値変更は
+`systemctl restart thermal-guard` をしないと旧環境変数のまま動き続ける。実際に
+`THERMAL_LOW_C=85` を unit に入れた後も `/api/thermal` は `"low_c":80` を返し、稼働
+プロセスの起動時刻は変更前のままだった。→ `install_service.sh` に `restart` を追加した。
+反映の確認は `/api/thermal` の `low_c` / `lock_high_mhz` を**数値で見る**こと。
+
+### クロック段と採用値(2026-10-16 実測)
+
+`-lgc` の指定値は下位の段に丸められる。`--query-supported-clocks=graphics` は `[N/A]`
+で段テーブルを公開しないため、実測に頼る:
+
+| 指定 | 実クロック | 丸め幅 |
+|---|---|---|
+| `1500,1500` | **1475 MHz** | -25 |
+| `1665,1665` | **1644 MHz** | -21 |
+| `2400,2400` | 2398 MHz | -2 |
+
+公称 base 1665 MHz / boost 2418 MHz に対して、実測は prefill 中 **2457/2463/2496/2515 MHz**
+まで出る(**2418 MHz 説は実測と合わない**)。`clocks.max.gr` の報告は 3003 MHz。
+
+**`1500` 指定は base 1665 MHz の「以下」**で、prefill を 2285→1110 T/s(49%)まで落として
+いた。速度を 49% 殺す理由がなかった。→ `THERMAL_LOCK_HIGH_MHZ=1665`(実 1644 MHz)を採用。
+
+**実測した(2026-10-16 11:39、220K、`-lgc` なし、thermal-guard のみ)**:
+
+| 発動時ロック | prefill | acpitz peak | 発動/解除 |
+|---|---|---|---|
+| 1475 MHz(`-lgc 1500`) | 1517.9 T/s | 90℃ | 4 回 |
+| **1651 MHz(`-lgc 1665`)** | **1493.5 T/s** | 90℃ | 3 回 |
+
+**速度の優位性はなかった(1.6% 遅い)。** 1651 MHz は 1475 より 11.5% 速いが発熱も速く、
+90℃ 到達が早まって発動状態の占比が増えるため相殺される。**90℃ 到達までの時間が支配的**
+なので、ロック値を上げる戦略は速度に効かない。
+
+発動時の実測: クロック 1651 MHz、**消費電力 77W→31W**、acpitz 86℃ まで低下。
+1651 MHz には acpitz を **64℃ まで下げる**冷却力があり `LOW=85` を下回って解除される
+→ 発振は残るが周期は延びた(4 回→3 回)。
+
+**速度を上げるには 90℃ 到達を遅らせる(=平均電力を下げる)しかない**が、2398 MHz 固定は
+259K で 94℃ 到達により **48 秒で本体を停止させた**実績がある。`HIGH=90` はこの事故の
+実測値から決めた値であり、上げる余地は乏しい。**現行設定(HIGH=90 / LOCK=1665 / LOW=85)
+で概ね最適**。
+
+### 未解決(別件)
+
+1475 MHz 維持下で 1 回 `Xid 31`(MMU Fault / `FAULT_PDE ACCESS_TYPE_VIRT_READ`)を観測したが、
+同条件の再投では再現せず 254K が通った。KV 容量は棄却済み(`GPU KV cache size: 380,487 tokens`)。
+残る疑いは **`--max-num-batched-tokens 2048` < attention block size `4544`**
+(Mamba2 混成で attention/mamba ページサイズを揃えた結果)。詳細は
+`/home/cliclie/llm/README.md` の Nemotron 節。
+

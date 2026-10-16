@@ -91,6 +91,12 @@ NET_MAX_MBPS: int = _cfg("net_max_mbps", 10000)
 EXCLUSIVE_LLM_RAG: bool = bool(_cfg("exclusive_llm_rag", False))
 LABEL: str = _cfg("label", "DGX Spark")
 
+# GB10 サーマルガード (thermal-guard.service / root 特権はこの unit だけ) が書く
+# 状態ファイル。API は読むだけで、クロック書き込みの権限は持たない。
+THERMAL_STATE_FILE: Path = Path(
+    os.environ.get("DGXUTIL_THERMAL_STATE", "/run/thermal/state")
+)
+
 
 def info() -> dict:
     """フロントの表示切替用 (/api/platform)。"""
