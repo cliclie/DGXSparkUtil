@@ -1581,4 +1581,112 @@ journalctl -u thermal-guard.service -f   # 発動ログ
 残る疑いは **`--max-num-batched-tokens 2048` < attention block size `4544`**
 (Mamba2 混成で attention/mamba ページサイズを揃えた結果)。詳細は
 `/home/cliclie/llm/README.md` の Nemotron 節。
+---
+
+## atom2 サーマルガード: 温度連動の GPU 電力上限制御 (2026-10-17)
+
+GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したもの。**同一の
+`api/thermal_guard.sh` / `api/thermal-guard.service` を両機で共有**し、GPU の種類で
+制御手段だけを切り替える。
+
+| | atom1 (GB10) | atom2 (R9700) |
+|---|---|---|
+| モード | `clock` | `power` |
+| 書き込み先 | `nvidia-smi -lgc / -rgc` (GPU クロック) | sysfs `power1_cap` (GPU 電力上限) |
+| 監視温度 | `max(acpitz, GPU温度)` | **GPU 温度 (junction) のみ** |
+| 対象 LLM | `THERMAL_CONTAINER` の稼働中だけ | **常時** (ロード中のモデルを問わない) |
+| 段 | 1000 / 1665 MHz / 解除 | **210 / 250 / 300 W** |
+
+### 自動判定
+
+`detect_mode()` が `nvidia-smi` が PATH にあれば `clock`、無ければ amdgpu の
+`power1_cap` sysfs を探して `power`。`THERMAL_MODE=clock|power` で明示上書きできる
+(`api/config.py` のプラットフォーム検出と同じ思想)。
+
+### 3 段の電力上限 (要求仕様)
+
+| GPU 温度 | 電力上限 | 環境変数 |
+|---|---|---|
+| 80℃ を超えたら | **250 W** | `THERMAL_POWER_HIGH_C=80` / `THERMAL_CAP_HIGH_W=250` |
+| 90℃ を超えたら | **210 W** | `THERMAL_POWER_CRIT_C=90` / `THERMAL_CAP_CRIT_W=210` |
+| それ以下 | **300 W (最大)** | `THERMAL_CAP_MAX_W=300` |
+
+- 境界はミリ℃で比較するので「80℃ を超えたら」は 80.001℃ から発動し、80.000℃ は 300W
+- `power1_cap_min` = 210W / `power1_cap_max` = 300W が R9700 の書ける範囲。要求された
+  300/250/210W はちょうどこの範囲に収まる (下限を下回る指定は起動時にクランプ)
+- 温度は `label=junction` を優先 (`metrics.py:_amdgpu_temp_c()` と同じ定義)。ダッシュボードと
+  ガードが見る温度をズレさせないため
+
+### 解放は「2 秒以上下がった」時だけ / 制限強化は即時
+
+電力を**下げる**方向は即時。電力を**上げる**方向 (解放) は、その狙い値が
+`THERMAL_POWER_RELEASE_SECS=2` **秒以上継続した時だけ**適用する。
+
+- 判定はサンプル数ではなく**実時刻** (`pending_since` と `date +%s` の差分)。
+  サンプル数でやると監視間隔の実測ぶんに引きずられる。実測で 1 秒ループが
+  sysfs 読み込み込みで **約 1.4 秒/回** になり、2 サンプル待ちでは早すぎ (実効 1.2 秒)、
+  3 サンプル待ちでは遅すぎ (実効 4.2 秒) た。時刻判定なら両方の問題が消える
+- 段階を跨ぐ解放も「2 秒続いた狙い値」にしか行かないので、89℃⇄91℃ の発振で
+  210↔250W を連打することはない
+- 起動時に必ず `power1_cap_max` へ戻して既知の状態から始める。終了時 (`trap`) も
+  必ず最大へ復帰 (前節の `-rgc` と同じ理由)
+
+### 常時監視 (GB10 版との最大の違い)
+
+`loop_power()` は `docker ps` による LLM 稼働判定を**行わない**。atom2 は VRAM 32GB で
+モデルロード直後から電力が張り付くため、どのモデルが載っていても温度だけを見る。
+
+### 旧 `llm-gpu-powercap.service` を無効化
+
+従来は oneshot の `llm-gpu-powercap.service` が `amd-smi set -o ppt0 210` で **210W に
+常時固定**していた (実装メモ 2026-10-03)。残すと再起動時に 210W へ戻され、80℃ 以下で
+300W にならない。`install_service.sh` が `power1_cap` の唯一の書き手を thermal-guard に
+集約するため、AMD 機ではこの unit を `disable --now` する (unit ファイル自体は削除しない)。
+
+### はまった点 (両機共通の unit を触る時の注意)
+
+- **`/bin/sh` は dash**。`$((10#$1 * 1000000))` の進数プレフィックスは非対応で
+  `arithmetic expression: expecting EOF`。W→µW の変換は素の算術展開にした
+- **`set -euo pipefail` 下では `grep -q` が早期終了して SIGPIPE を返す**。
+  `systemctl list-unit-files | grep -q '^llm-gpu-powercap\.service'` がパイプライン全体で
+  非0 になり、無効化の分岐が静かに素通りした (一般シェルではマッチするのに)。
+  判定は unit ファイルの存在 (`[ -e /etc/systemd/system/... ]`) に変えた
+- 前節と同じく `systemctl enable --now` は稼働中 unit を再起動しないので、
+  `install_service.sh` は thermal-guard を毎回 `restart` している
+
+### 検証 (2026-10-17)
+
+**疑似 hwmon でのループ検証** — `/tmp` にフェイク hwmon を作り、実ファイルからループ
+末尾の `case` を除いた `loop_power()` をそのまま source して `cap_file()` だけ差し替えた。
+実機の `power1_cap` には触っていない:
+
+| 操作 | 期待 | 実測 |
+|---|---|---|
+| 旧 210W 固定 + 30℃ で起動 | 300W へ初期化 | **300W** |
+| 30℃ → 85℃ | 250W 即時 | `85C -> 250W (was 300W)` |
+| 85℃ → 95℃ | 210W 即時 | `95C -> 210W (was 250W)` |
+| 95℃ → 30℃ を 1.2 秒 | 解放しない | 210W 維持 |
+| 30℃ (1.2s) → 85℃ へ逆戻り | 発振しない | 210W 維持 |
+| 30℃ を 3.2 秒 | 300W へ解放 | `30C -> 300W (was 210W, released after 2s)` |
+| 300W → 95℃ | 210W 即時 | `95C -> 210W (was 300W)` |
+| 95℃ → 82℃ を 3.2 秒 | 250W へ解放 | `82C -> 250W (was 210W, released after 2s)` |
+| `kill -TERM` | 300W へ復帰 | **300W** |
+
+**実機 (systemd)**:
+
+```
+thermal-guard start: mode=power high=80 crit=90 caps=300/250/210W release=2s interval=1s \
+  cap=/sys/class/drm/card1/device/hwmon/hwmon5/power1_cap
+```
+
+- `llm-gpu-powercap.service` は `disabled` / `inactive`、`power1_cap` = **300000000**
+- drop-in で `HIGH_C=25 / CRIT_C=30` に一時変更し、**全 LLM コンテナが `running: false`
+  の状態**で `thermal-guard: 31C -> 210W (was 300W)` を確認 = 常時監視が効いている
+- drop-in 削除 + restart で 300W に復帰
+- `curl -s localhost:8080/api/thermal` (cliclie 権限) が
+  `{"mode":"power","temp_c":32.0,"power_cap_w":300,"power_max_w":300,"power_min_w":210,
+  "always_monitor":true,"high_c":80,"crit_c":90,"cap_high_w":250,"cap_crit_w":210,
+  "cap_max_w":300,"release_secs":2,...}` を返す
+- `sh -n` / `bash -n` / `python -m py_compile` 通過。clock モード (`loop_clock`) は
+  前節のロジックそのまま (インデント変更のみ) で、atom1 側の挙動は不変
 

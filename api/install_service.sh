@@ -46,6 +46,18 @@ systemctl enable --now "${SERVICE}"
 systemctl enable "${TG_SERVICE}" >/dev/null 2>&1
 systemctl restart "${TG_SERVICE}"
 
+# R9700 (atom2): 旧 llm-gpu-powercap.service は power1_cap を 210W に常時固定する
+# oneshot。thermal-guard が power1_cap の唯一の書き手になるので無効化する
+# (残すと再起動時に 210W へ戻され、80℃ 以下で 300W にならない)。
+# 判定は list-unit-files の grep ではなく unit ファイルの存在で見る
+# (set -o pipefail 下では grep -q の早期終了が SIGPIPE になり条件が常に偽になる)。
+if [ ! -e /proc/driver/nvidia/version ] \
+   && ls /sys/class/drm/card*/device/hwmon/hwmon*/power1_cap >/dev/null 2>&1 \
+   && [ -e /etc/systemd/system/llm-gpu-powercap.service ]; then
+  echo "==> Disabling legacy llm-gpu-powercap.service (power1_cap is owned by thermal-guard)"
+  systemctl disable --now llm-gpu-powercap.service >/dev/null 2>&1 || true
+fi
+
 sleep 3
 echo "==> Status"
 systemctl --no-pager status "${SERVICE}" | head -n 15
