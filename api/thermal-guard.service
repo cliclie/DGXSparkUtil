@@ -1,0 +1,30 @@
+[Unit]
+Description=GB10 thermal guard (nvidia-smi -lgc only)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# 特権はこの unit だけに限局する。dgx-spark-api.service は cliclie 権限のまま。
+# 実行するコマンドは読み取り (sysfs / nvidia-smi --query / docker ps) と
+# nvidia-smi -lgc / -rgc だけ。
+ExecStart=__API_DIR__/thermal_guard.sh
+# 解除しきい値を 85℃ にする (80℃ まで冷やすのを待たない)。
+# 実測: 10〜29 秒周期で -lgc を叩いても vLLM は壊れなかった (Xid 0 件 / prefill PASS)。
+# 90℃ までフルクロックで走る分、速度は固定ロックより出る。
+Environment=THERMAL_LOW_C=85
+# 発動時のロック値。-lgc は指定値を下位の段に丸める (1665 -> 実測 1644MHz)。
+# 1500 -> 1475MHz は base 1665MHz の「以下」で、prefill を 2285→1110 T/s (49%) まで
+# 落としていた。1644MHz なら acpitz は 90℃ 未満で飽和し、発振なしに速度が上がる見込み。
+Environment=THERMAL_LOCK_HIGH_MHZ=1665
+Restart=always
+RestartSec=5
+# /run/thermal を自動作成 (unit 停止時に自動削除)。state は 0644 で書かれ
+# cliclie の dgx-spark-api.service が /api/thermal で読む。
+RuntimeDirectory=thermal
+RuntimeDirectoryMode=0755
+# 温度監視なので CPU 優先度を落とさない (nice すると prefill 中に後回しにされる)
+Nice=0
+
+[Install]
+WantedBy=multi-user.target
