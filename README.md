@@ -30,10 +30,16 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 4. **稼働モデルに与えているパラメータ値の表示・編集**
    - コンテキストサイズ等のパラメータ値を表示
    - 一部項目は編集可能。編集後はコンテナを再作成して反映
+5. **GPU サーマルガード**(温度連動の GPU 制限・常駐)
+   - GPU 温度に応じて **GB10 は GPU クロック**(`nvidia-smi -lgc`)、**R9700 は GPU 電力上限**
+     (`sysfs power1_cap`) を 3 段で制御する
+   - root 特権は `thermal-guard.service` だけに限局し、API は `/api/thermal` で状態を読むだけ
+   - 詳細は「GB10 サーマルガード」「atom2 サーマルガード」の各節を参照
 
 - 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip) および
   WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)。
-  プラットフォームは `api/config.py` の自動検出で両環境同一コードで動作する(実装メモ 2026-10-03 参照)
+  プラットフォームは `api/config.py` の自動検出で両環境同一コードで動作する(実装メモ 2026-10-03 参照)。
+  GPU サーマルガードも `api/thermal_guard.sh` の自動判定(clock / power)で両機同一スクリプト(2026-10-17 参照)
 - 仕組み: クライアントからブラウザでアクセス → ビジュアル表示 → 値の更新はAPI経由
 
 ## 表示スタイル(ゲージ)
@@ -268,6 +274,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │     GET  /api/rag/status     → RAG状態(embedding/Qdrant) │
 │     POST /api/rag/start|stop → RAG 起動/停止(ジョブ)  │
 │     GET  /api/rag/job        → RAG ジョブ進捗         │
+│     GET  /api/thermal        → GPU サーマルガード状態   │
+│                                (/run/thermal/state を読むだけ) │
 │     データ源: /proc/stat, /proc/meminfo,              │
 │      /sys/class/thermal/*, /proc/diskstats,           │
 │      nvidia-smi(subprocess) / amdgpu sysfs,           │
@@ -284,13 +292,20 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │     四段目: RAG (sociax-rag) 状態 + 起動/停止      │
 │     fetch を 2秒毎ポーリングしてビジュアル表示     │
 │     (既存 vLLM/Qdrant に依存しない独立ポート)      │
+│  ③ thermal-guard.service (root 専用・両機同一)  │
+│     起動時に clock / power を自動判定           │
+│     clock(GB10) : nvidia-smi -lgc / -rgc        │
+│     power(R9700): sysfs power1_cap 300/250/210W │
+│     → /run/thermal/state(0644) を ① が読む      │
 └──────────────────────────────────────────────────────┘
 ```
 
 ### フォルダ構成
 
 - `/home/cliclie/DGXSparkUtil/front/` — ブラウザから参照する表示側(静的ファイル: 単一 index.html + JS、時系列グラフ用の Chart.js 単一ファイル `chart.umd.js`)
-- `/home/cliclie/DGXSparkUtil/api/` — モニタリング結果を返却するAPI群(Python + FastAPI)
+- `/home/cliclie/DGXSparkUtil/api/` — モニタリング結果を返却するAPI群(Python + FastAPI)。
+  加えて `thermal_guard.sh` + `thermal-guard.service`(root 特権の GPU サーマルガード。
+  clock=GB10 の GPU クロック / power=R9700 の GPU 電力上限を温度連動で 3 段制御) を含む
 
 ### vLLM関連機能の設計
 
@@ -440,6 +455,9 @@ sudo systemctl restart dgx-spark-api  # 再起動（コード変更後）
 sudo systemctl stop dgx-spark-api     # 停止
 sudo systemctl disable --now dgx-spark-api  # 自動起動解除＋停止
 tail -f /home/cliclie/DGXSparkUtil/api/server.log  # ログ確認
+systemctl status thermal-guard        # GPU サーマルガードの状態確認
+journalctl -u thermal-guard -f        # 発動ログ（温度連動の切替）
+curl -s localhost:8080/api/thermal    # ガードの状態 JSON
 ```
 
 - ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
@@ -448,6 +466,13 @@ tail -f /home/cliclie/DGXSparkUtil/api/server.log  # ログ確認
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
 - ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード）
+- **`install_service.sh` は `thermal-guard.service`（root 特権）も同時にインストールする**。
+  `api/thermal_guard.sh` に `chmod 755` して unit をレンダリングし、`enable` + 毎回 `restart`
+  （`enable --now` は稼働中 unit を再起動しないため、Environment のしきい値変更が反映されない）
+  - `dgx-spark-api.service` は `User=cliclie` のままで、GPU 制限を書けるのは
+    thermal-guard の root unit だけ
+  - AMD 機（R9700）では、旧 `llm-gpu-powercap.service`（210W 常時固定の oneshot）を
+    自動で `disable --now` する（`power1_cap` の書き手を thermal-guard に集約）
 
 ### 手動起動（開発・デバッグ用）
 
@@ -1402,6 +1427,11 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
 
 ## GB10 サーマルガード: 温度連動の GPU クロック制御 (2026-10-16)
 
+> **2026-10-17 に WhitebearATOM2 (R9700) 版を追加した。** `api/thermal_guard.sh` と
+> `api/thermal-guard.service` は両機で同一ファイルを使い、起動時に
+> **clock(GB10 = GPU クロック) / power(R9700 = GPU 電力上限)** を自動判定する。
+> 本節の clock 経路のロジックは変更していない。R9700 側は次節「atom2 サーマルガード」参照。
+
 ### 背景
 
 GB10 は CPU/GPU 同一ダイ・共有冷却で、`acpitz` が **104℃ に達すると本体が落ちる**
@@ -1581,6 +1611,7 @@ journalctl -u thermal-guard.service -f   # 発動ログ
 残る疑いは **`--max-num-batched-tokens 2048` < attention block size `4544`**
 (Mamba2 混成で attention/mamba ページサイズを揃えた結果)。詳細は
 `/home/cliclie/llm/README.md` の Nemotron 節。
+
 ---
 
 ## atom2 サーマルガード: 温度連動の GPU 電力上限制御 (2026-10-17)
@@ -1635,6 +1666,13 @@ GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したも�
 
 `loop_power()` は `docker ps` による LLM 稼働判定を**行わない**。atom2 は VRAM 32GB で
 モデルロード直後から電力が張り付くため、どのモデルが載っていても温度だけを見る。
+
+### 既知の未対応 (front)
+
+`front/index.html` は `/api/thermal` を参照していない (GB10 版導入時も未実装)。ガードの
+発動状況は `curl -s localhost:8080/api/thermal` と `journalctl -u thermal-guard` で見る。
+GPU 電力ゲージの「上限」表示は `power1_cap` を読んでいるため、温度連動で上限が動くと
+ゲージの基準値も追随して表示される。
 
 ### 旧 `llm-gpu-powercap.service` を無効化
 
