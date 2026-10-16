@@ -1587,6 +1587,13 @@ run1 req=220000 -> prompt=223739 comp=80 elapsed=147.4s prefill=1517.9 tok/s
 `acpitz_c` と `gpu_c` を比較して**制限値に引っかかった側**を特定できる(同値は共有ダイ側の
 acpitz = CPU 温度パネル)。atom1 の「GPU 電力」パネルは監視・制限対象ではないので着色しない。
 
+**実機で発動 JSON を採取して確認(2026-10-17)** — Nemotron 196K prefill 中の実データ
+`{"acpitz_c":75,"gpu_c":66,"locked_mhz":1665,"clock_mhz":1657,"lock_crit_mhz":1000,...}` を
+`thermalState()` に通すと `watchId=g-cpu-temp` / `limitId=g-gpu-clock` / `crit=false`
+(**暗め黄**)、ヘッダは `クロック制限 1665MHz (CPU 75℃)`。解除(`locked_mhz=0`)は全カード灰色。
+実測で `acpitz_c > gpu_c` が 253 / 254 サンプルなので、**発動時に染まるのはほぼ常に CPU 温度
+パネル**であり、atom2 版の「GPU 温度パネル固定」なら逆のパネルが染まることになる。
+
 ### インストール
 
 ```bash
@@ -1627,6 +1634,27 @@ journalctl -u thermal-guard.service -f   # 発動ログ
 | 1475 MHz(`-lgc 1500`) | 1517.9 T/s | 90℃ | 4 回 |
 | **1651 MHz(`-lgc 1665`)** | **1493.5 T/s** | 90℃ | 3 回 |
 
+**atom1 実機で再確認した(2026-10-17 08:50、196K 目標 = 実 199,210 tok、`prefill_load.py`)**:
+
+```
+08:51:33  thermal-guard: 90C -> 1665MHz (acpitz=90C gpu=78C running=1)
+08:51:43  thermal-guard: 74C -> 0MHz    (acpitz=74C gpu=66C running=1)
+08:51:52  thermal-guard: 90C -> 1665MHz (acpitz=90C gpu=81C running=1)
+08:52:02  thermal-guard: 74C -> 0MHz    (acpitz=74C gpu=67C running=1)
+08:52:15  thermal-guard: 90C -> 1665MHz (acpitz=90C gpu=83C running=1)
+08:52:25  thermal-guard: 69C -> 0MHz    (acpitz=69C gpu=61C running=1)
+run1 req=196000 -> prompt=199210 comp=80 elapsed=117.5s prefill=1695.8 tok/s
+```
+
+- 発動/解除は 3 回ずつ。**acpitz は 90℃ で頭打ち**(94℃ 未到達 = 104℃ 停止を回避)、
+  GPU peak 83℃。発動中の実クロックは 1651〜1657 MHz
+- **発動状態の占比は 2 秒 x 254 サンプル中 16 = 6%**。1651 MHz の冷却力が強く、
+  発動から 10 秒で 74℃ まで下がって解除される(発振周期は短い)
+- prefill **1695.8 T/s** は 1651 MHz 段の 2026-10-16 実測(1493.5 T/s)より **13% 速い**
+- **`acpitz_c > gpu_c` が 253 / 254 サンプル** — Nemotron prefill は CPU 側が 9〜12℃ 高い。
+  発動時に枠線が染まるのはほぼ常に「CPU 温度」パネルで、GPU 温度パネルは灰色のまま
+  (フロントの atom1 向け分岐が効く実データ)
+
 **速度の優位性はなかった(1.6% 遅い)。** 1651 MHz は 1475 より 11.5% 速いが発熱も速く、
 90℃ 到達が早まって発動状態の占比が増えるため相殺される。**90℃ 到達までの時間が支配的**
 なので、ロック値を上げる戦略は速度に効かない。
@@ -1647,6 +1675,13 @@ journalctl -u thermal-guard.service -f   # 発動ログ
 残る疑いは **`--max-num-batched-tokens 2048` < attention block size `4544`**
 (Mamba2 混成で attention/mamba ページサイズを揃えた結果)。詳細は
 `/home/cliclie/llm/README.md` の Nemotron 節。
+
+**2026-10-17 に 196K 投で再発(既知扱い・現状手当不要)**: 1665 MHz 段を 3 回発動させた直後
+(最後の解除 08:52:25 の 5 秒後)に `NVRM: Xid 31 … FAULT_PDE ACCESS_TYPE_VIRT_READ` →
+`cudaErrorIllegalAddress` で EngineCore が shutdown し、コンテナが終了した。1 本目の prefill
+199,210 tok は完了しているが decode が 0.7 T/s に損傷し、2 本目は HTTP 500。**熱とは無関係**
+(acpitz は 90℃ で抑え込まれており 94℃ に届いていない)ので、**サーマルガード側の対応対象では
+ない**。発動中の `-lgc` 連打は 6 遷移のみで、2026-10-16 の無害検証(10 秒周期で壊れない)と整合。
 
 ---
 
@@ -1832,6 +1867,17 @@ const cpuSide = a >= g;
   `curl -s localhost:8080/` の配信 HTML が作業ツリーと**完全一致**(front は静的配信なので
   `dgx-spark-api` の再起動は不要)。発動中は `acpitz_c` が `gpu_c` を上回ることが多く
   (Nemotron prefill は CPU 側が先に 90℃ に達する)CPU 温度パネルが着色される
+- **atom1 実機で負荷を掛けて発動表示を確認(2026-10-17 08:50)** — `vllm-nemotron120b` に
+  `prefill_load.py 196000 80 300 2` を流し、2 秒間隔で `GET /api/thermal` を 254 回採取した。
+  発動 3 回 / 解除 3 回で、発動中の実 JSON
+  `{"acpitz_c":75,"gpu_c":66,"locked_mhz":1665,"clock_mhz":1657,"lock_crit_mhz":1000,...}` を
+  実 `thermalState()` に通した結果は `watchId=g-cpu-temp` + `limitId=g-gpu-clock` の
+  `thr-high`(暗め黄)でヘッダは `クロック制限 1665MHz (CPU 75℃)`、解除 JSON は全カード灰色。
+  **`acpitz_c > gpu_c` が 253 / 254** なので実運用の発動で染まるのはほぼ常に CPU 温度パネル。
+  acpitz は 90℃ で頭打ち(= 104℃ 停止を回避)、prefill は 1695.8 T/s。詳細は
+  「GB10 サーマルガード」節の実測と「フロント表示」参照
+- 観測ログ: `/home/cliclie/llm/logs/thermal_watch_20261017.log`(2 秒間隔の
+  `ts acpitz gpu locked clock_mhz model_running`、269 行)
 
 ### 反映手順(atom1)
 
