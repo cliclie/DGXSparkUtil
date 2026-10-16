@@ -19,6 +19,9 @@
   --red: #f85149;
   --yellow: #d29922;
   --purple: #bc8cff;
+  /* GPU サーマルガード発動中の枠線/インジケータ (--red/--yellow を落とした暗め版) */
+  --thr-red: #9e3b3b;
+  --thr-yellow: #9a7b1f;
 }
 * { box-sizing: border-box; }
 body {
@@ -43,6 +46,7 @@ header {
 header h1 { font-size: 17px; margin: 0; }
 header #clock { color: var(--muted); font-size: 13px; }
 header #pstate { font-size: 13px; font-weight: 600; }
+header #thermal { font-size: 13px; font-weight: 600; }
 main { padding: 16px 20px 12px; }
 section { margin-bottom: 22px; }
 section:last-child { margin-bottom: 0; } /* 最下段の余白を潰し、縦スクロールバー出現を遅らせる */
@@ -109,6 +113,11 @@ section > h2 {
   padding: 10px 12px 8px;
   text-align: center;
 }
+/* GPU サーマルガード発動中: 監視対象(GPU温度)と制限対象(GPU電力/クロック)のカード枠線を
+   着色する。復帰 (上限=最大 / クロック解除) でクラスが外れ var(--border) の灰色に戻る。
+   太さは変えない (他カードとの高さを揃えたまま色だけで判別させる) */
+.gauge.thr-high { border-color: var(--thr-yellow); }
+.gauge.thr-crit { border-color: var(--thr-red); }
 .gauge .gtitle { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .gauge .gtitle .gdot { display: inline-block; width: 12px; height: 12px; margin-right: 6px; }
 .gauge .gcanvas { position: relative; height: 76px; } /* 96px → 80% (4の倍数) */
@@ -372,6 +381,7 @@ table.params td input[readonly] { color: var(--muted); }
   <h1 id="hdr-title">DGX Spark Monitor</h1>
   <span id="clock"></span>
   <span id="pstate"></span>
+  <span id="thermal"></span>
 </header>
 <div class="tabs">
   <button class="active" data-tab="system">システム</button>
@@ -541,6 +551,10 @@ let PLAT = {
   platform: "dgx-spark", label: "DGX Spark", hostname: "",
   memory_mode: "unified", net_max_mbps: 10000, exclusive_llm_rag: false,
 };
+
+// GPU サーマルガード (root unit の thermal-guard.service) の状態。/api/thermal で取得。
+// 未取得・unit 停止時は {enabled:false} = インジケータなし・枠線は灰色のまま。
+let THERMAL = { enabled: false };
 const RANGE_SECS = { "30m": 1800, "3h": 10800, all: Infinity };
 
 Chart.defaults.color = "#8b949e";
@@ -1118,6 +1132,13 @@ async function poll() {
   } catch (e) {
     console.error("rag poll failed", e);
   }
+  try {
+    THERMAL = await fetchJson(API + "/api/thermal");
+  } catch (e) {
+    THERMAL = { enabled: false };
+    console.error("thermal poll failed", e);
+  }
+  renderThermal();
   pollJob();
 }
 
@@ -1763,6 +1784,48 @@ function renderPstate(m) {
       : ["P2", "P3", "P8", "P12", "P15"].includes(m.gpu_pstate)
         ? "var(--yellow)"
         : "var(--red)";
+}
+
+// ------------------------------------------------------------- GPU サーマルガード表示
+// /api/thermal から「発動中か」を引く。発動中はヘッダにインジケータを出し、
+// 監視対象 (GPU 温度) と制限対象 (atom2=GPU 電力 / GB10=GPU クロック) のカード枠線を
+// 着色する。段は制限値そのもので判定 (power: cap_crit_w に達したら赤、clock:
+// lock_crit_mhz 以下なら赤)。復帰 (上限=最大 / locked_mhz=0) は null = 灰色に戻る。
+function thermalState() {
+  const t = THERMAL;
+  if (!t || !t.enabled) return null;
+  if (t.mode === "power") {
+    if (t.power_cap_w == null || t.power_max_w == null) return null;
+    if (t.power_cap_w >= t.power_max_w) return null; // 300W (最大) は制限なし
+    return {
+      crit: t.cap_crit_w != null && t.power_cap_w <= t.cap_crit_w,
+      limitId: "g-gpu-power",
+      text: `電力制限 ${t.power_cap_w}W (GPU ${Math.round(t.temp_c ?? 0)}℃)`,
+    };
+  }
+  if (!t.locked_mhz) return null; // 0 = nvidia-smi -rgc 解除
+  return {
+    crit: t.lock_crit_mhz != null && t.locked_mhz <= t.lock_crit_mhz,
+    limitId: "g-gpu-clock",
+    text: `クロック制限 ${t.locked_mhz}MHz (${Math.round(t.temp_c ?? 0)}℃)`,
+  };
+}
+
+function renderThermal() {
+  const st = thermalState();
+  const el = document.getElementById("thermal");
+  if (el) {
+    el.textContent = st ? st.text : "";
+    el.style.color = st ? (st.crit ? "var(--thr-red)" : "var(--thr-yellow)") : "";
+  }
+  for (const g of gages) {
+    const c = g.cardEl;
+    if (!c) continue;
+    c.classList.remove("thr-crit", "thr-high");
+    if (st && (g.def.id === "g-gpu-temp" || g.def.id === st.limitId)) {
+      c.classList.add(st.crit ? "thr-crit" : "thr-high");
+    }
+  }
 }
 
 // ------------------------------------------------------------- 起動

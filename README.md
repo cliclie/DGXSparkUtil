@@ -102,6 +102,10 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
     収めるため 1 行省略(`white-space:nowrap` + `overflow:hidden` + `text-overflow:ellipsis`)、
     フル名は `title` に入れる(`setV()` が設定)。5 行でも既存ゲージカードと高さが揃う
     (flex の stretch で全カード同高になる)
+- **GPU サーマルガード発動中**は、監視対象の「GPU 温度」と制限対象の「GPU 電力」
+  (GB10 は「GPU クロック」) のカード枠線を暗め黄 (250W) / 暗め赤 (210W) に着色する。
+  復帰 (上限=最大) と unit 停止時は灰色 (`--border`) に戻る
+  (「atom2 サーマルガード」節のフロント表示参照)
 
 ### 二段目: 時系列グラフ
 
@@ -1667,12 +1671,20 @@ GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したも�
 `loop_power()` は `docker ps` による LLM 稼働判定を**行わない**。atom2 は VRAM 32GB で
 モデルロード直後から電力が張り付くため、どのモデルが載っていても温度だけを見る。
 
-### 既知の未対応 (front)
+### フロント表示 (2026-10-17)
 
-`front/index.html` は `/api/thermal` を参照していない (GB10 版導入時も未実装)。ガードの
-発動状況は `curl -s localhost:8080/api/thermal` と `journalctl -u thermal-guard` で見る。
-GPU 電力ゲージの「上限」表示は `power1_cap` を読んでいるため、温度連動で上限が動くと
-ゲージの基準値も追随して表示される。
+`front/index.html` が 2 秒ポーリングで `/api/thermal` を引き、発動中なら
+
+- **ヘッダ (P-State の右) にインジケータ**: `電力制限 250W (GPU 32℃)`
+- **監視対象の「GPU 温度」パネルと制限対象の「GPU 電力」パネルの枠線**を着色
+  - 250W 段 → 暗め黄 `--thr-yellow: #9a7b1f`
+  - 210W 段 → 暗め赤 `--thr-red: #9e3b3b`
+
+復帰 (上限 = 最大 300W) と unit 停止時 (`{"enabled": false}`) はクラスが外れて灰色
+(`--border: #30363d`) に戻る。判定は `thermalState()` が担い、段は**制限値そのもの**
+(`power_cap_w <= cap_crit_w`) で決める。GB10 (clock モード) は対称に
+「GPU 温度」+「GPU クロック」パネルが対象で、`locked_mhz <= lock_crit_mhz` が赤、
+それ以外の発動が黄、`locked_mhz = 0` (解除) は灰色。
 
 ### 旧 `llm-gpu-powercap.service` を無効化
 
