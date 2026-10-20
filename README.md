@@ -22,19 +22,25 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - APIの健全性(`/health`)、サーブ中のモデル名(`/v1/models`)、
      vLLM組み込みメトリクス(`/metrics`: リクエスト数・キュー・KVキャッシュ使用率・スループット等)を表示
       (SGLang は `--enable-metrics` 指定時、llama.cpp は `--metrics` 指定時に `/metrics` を使用、
-      TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析)
+      TabbyAPI は `/metrics` が無いため docker logs のリクエスト毎統計を解析。
+      WSL2 はコンテナを立てないため docker logs の代わりに起動ログファイル末尾を解析)
    - 直近ログの表示
 3. **モデルの切替**
    - Web UI から稼働モデルを切替(サーバ側で既存の切替スクリプトを呼ぶ)
    - 既存スクリプト参照: `/home/cliclie/llm/compose/switch_models.sh`(参照のみ。調査フェーズでは実行しない)
+   - WSL2 は docker compose を使わないため、汎用ランチャー
+     `/home/cliclie/scripts/model-ctl.sh`(14 モードを VRAM 排他切替)を呼ぶ
 4. **稼働モデルに与えているパラメータ値の表示・編集**
    - コンテキストサイズ等のパラメータ値を表示
    - 一部項目は編集可能。編集後はコンテナを再作成して反映
+     (編集は compose 環境のみ。WSL2 は設定形式がエンジンごとに異なるため**表示のみ**)
 5. **GPU サーマルガード**(温度連動の GPU 制限・常駐)
    - GPU 温度に応じて **GB10 は GPU クロック**(`nvidia-smi -lgc`)、**R9700 は GPU 電力上限**
      (`sysfs power1_cap`) を 3 段で制御する
    - root 特権は `thermal-guard.service` だけに限局し、API は `/api/thermal` で状態を読むだけ
    - 詳細は「GB10 サーマルガード」「atom2 サーマルガード」の各節を参照
+   - WSL2 は GPU がホスト (Windows) 側ドライバ管理で `-lgc` / `power1_cap` が効かないため
+     **導入しない**(`install_service.sh` が自動でスキップ)
 
 - 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip) および
   WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)、
@@ -313,6 +319,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │      /sys/class/net/<if>/speed (NIC 実リンク速度)     │
 │      magnitude CLI(models status), ~/.magnitude/      │
 │      serving-usage.sqlite, journalctl --user          │
+│      [modelctl] wsl_modelctl_bridge.sh → model-ctl.sh │
+│       (list/switch/stop/params) + 起動ログファイル     │
 │  ② 表示: front/ (単一 index.html + JS)          │
 │     4段レイアウト(表示レイアウト(4段構成)参照)   │
 │     一段目: 現在値ゲージ行 / 二段目: 時系列グラフ  │
@@ -329,6 +337,22 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 └──────────────────────────────────────────────────────┘
 ```
 
+### モデル管理バックエンド (2 系統)
+
+同一コードベースで、モデルの起動・切替の仕組みだけ 2 系統を持つ
+(`api/config.py` の `backend` キーで分岐。実装メモ 2026-10-21):
+
+| backend | 対象 | プロファイル表の源 | 切替の実行体 |
+|---|---|---|---|
+| `compose` (既定) | dgx-spark (atom1) / atom2 | `docker-compose.yml` を動的パース | `switch_models.sh <profile>` |
+| `modelctl` | WSL2 (Whitebear2026) | `model-ctl.sh` のモード一覧 (ブリッジ経由) | `model-ctl.sh` の `_mc_launch <mode>` |
+
+- API の待ち受けポートはホストごとに `install_service.env` で決める
+  (dgx-spark / atom2 = 8080、WSL2 = **8090**。Strata 系が 8080 を占有するため)
+- `modelctl` は docker を要求しない (TabbyAPI / ExLlamaV3 / Strata / llama.cpp は
+  ネイティブプロセス、bonsai / swiftqwen38 / mimo のみ docker。いずれも
+  `model-ctl.sh` が排他制御するため Web 側は再実装しない)
+
 ### フォルダ構成
 
 - `/home/cliclie/DGXSparkUtil/front/` — ブラウザから参照する表示側(静的ファイル: 単一 index.html + JS、
@@ -337,6 +361,20 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - `/home/cliclie/DGXSparkUtil/api/` — モニタリング結果を返却するAPI群(Python + FastAPI)。
   加えて `thermal_guard.sh` + `thermal-guard.service`(root 特権の GPU サーマルガード。
   clock=GB10 の GPU クロック / power=R9700 の GPU 電力上限を温度連動で 3 段制御) を含む
+  - `config.py` — プラットフォーム自動検出と環境別値(パス・メモリ形態・backend・上限値)の集約
+  - `main.py` — FastAPI エントリポイント(エンドポイント一覧は上記アーキテクチャ図)
+  - `metrics.py` — ホストメトリクス(nvidia / amdgpu sysfs / /proc 系)
+  - `vllm.py` — モデル状態・切替・パラメータ表示。`backend` で compose / modelctl を分岐
+  - `rag.py` — RAG (embedding + Qdrant) の状態と起動/停止(compose 環境のみ)
+  - `modelctl.py` / `wsl_modelctl_bridge.sh` — **modelctl バックエンド (WSL2)**。
+    ブリッジが `model-ctl.sh` を source して非対話化し、モード一覧・切替・停止・
+    表示用パラメータをタブ区切りで返す。`modelctl.py` がそれを compose 版と同一の
+    プロファイル表形状に変換する (`model-ctl.sh` 本体は変更しない)
+  - `install_service.sh` / `dgx-spark-api.service` — systemd 導入。unit は
+    `__API_DIR__` / `__USER__` / `__PORT__` / `__KILL_MODE__` / `__LIMIT_NOFILE__` の
+    プレースホルダを置換してレンダリングする
+  - `install_service.env` — **git 管理外のホスト固有設定**(`PORT` / `KILL_MODE` /
+    `LIMIT_NOFILE` / `DGXUTIL_THERMAL`)。WSL2 以外には置かない (無い = 従来動作)
 
 ### vLLM関連機能の設計
 
@@ -356,7 +394,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | 同上(TabbyAPI) | `docker logs` (リクエスト毎統計の解析、実装メモ 2026-09-14 参照) |
 | 同上(llama.cpp) | `GET /metrics` (`--metrics` 指定時、Prometheus 形式) + `GET /slots` (KVキャッシュ使用率) |
 | 同上(Magnitude / magn) | `~/.magnitude/serving-usage.sqlite` (usage 表) + GPU 負荷から実行中を推定 (`/metrics` 無し、実装メモ 2026-10-06) |
-| 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`) |
+| 同上(modelctl / WSL2) | TabbyAPI=起動ログ解析、Strata=`/metrics/prometheus`(`llamacpp:*` 同名系列)+`/slots`+`[strata] done:` ログ、llama.cpp=`/slots`+`print_timing` ログ、ExLlamaV3=`/health` のカウンタ差分 (実装メモ 2026-10-21) |
+| 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`、modelctl は `logs/ctl-*.log` 等のログファイル末尾) |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
 
 - llama.cpp は `--metrics` 指定時に `/metrics` (実行/待機・スループット) + `/slots` (KVキャッシュ使用率) を利用。
@@ -2155,8 +2194,36 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   `_mc_launch` が排他停止 → 起動 → `/health` 待機まで内包するため、
   14 モード固有の判定 (bonsai / mimo の docker inspect、Strata 5 モードの
   `/v1/models` id による代表集約など) を再実装していない
-- WSL のみ `Popen(start_new_session=True)`: uvicorn 再起動/停止でモデルサーバーを
-  巻き込まない (compose 側は従来どおりセッション継承)
+- 切替ジョブは `Popen(start_new_session=True)` で**セッション**を切り離す (uvicorn の
+  kill で一緒にシグナルを受けないため)。ただし **cgroup は切れない**ので、
+  `systemctl restart dgx-spark-api` からモデルを守るには unit の `KillMode=process` が要る
+  (`start_new_session` だけでは不足だったのは実測で確認。compose 側は従来どおり
+  セッション継承のまま = モデルが docker コンテナなので影響ない)
+
+### 管理対象モード (WSL2 の model-ctl.sh / 14 モード)
+
+RTX 5090 1 枚では `model-ctl.sh` が 14 モードを **VRAM 排他**で管理する
+(同時起動不可。Web から切替すると稼働中を自動停止してから起動する)。
+一覧は `bash api/wsl_modelctl_bridge.sh list` で取得できる（モデル名・導入状態は
+実機の状態が変わるので記載しない）。
+
+| モード | エンジン | API ポート | 備考 |
+|---|---|---|---|
+| `exl` | exllama | 8888 | ExLlamaV3 kit (serve_openai.py) |
+| `tabby` | tabbyapi | 5000 | TabbyAPI |
+| `swift40` / `swift35` | tabbyapi | 5001 / 5002 | 同一 dir、config 違い |
+| `qwen9` | tabbyapi | 5003 | 9B |
+| `bonsai` | llamacpp-docker | 8081 | 稼働判定は `docker inspect` |
+| `swiftqwen38` | sglang-docker | 8040 | 稼働判定は `docker inspect` |
+| `mimo` | sglang-docker | 8050 | 稼働判定は `docker inspect` |
+| `strata15` / `strataS4` / `strataU4` / `strataq3` / `strataC1` | strata | **8080** | 5 モードが port/process 共有 → 代表 1 件に集約 |
+| `llmjp` | llamacpp | 8060 | llama-server (`--metrics` 未指定) |
+
+- **API の待ち受けは 8090**：Strata 系が 8080 を占有するため本リポジトリの既定 8080 は
+  使えない (`install_service.env` の `PORT=8090`)
+- 重み未導入のモードは `ready=false` で返り、フロントは**モデル名を灰色**にして
+  選択・切替を不可とする (`model-ctl.sh` 側はその場 DL を尋ねるが、
+  ブリッジでは `_mc_mode_download` を上書きして走らせない)
 
 ### エンジン種別ごとのメトリクス源 (ログ解析は初期実装)
 
