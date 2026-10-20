@@ -45,6 +45,8 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 ## 表示スタイル(ゲージ)
 
 監視項目はすべて、DGX Dashboard の「System Memory」と同様の**半円ゲージ(半円アーチ)**で表示する。
+描画は**二段目の時系列グラフと同じ Chart.js**(`front/chart.umd.js`、v4.4.9 をローカル参照)の
+`doughnut` で行う(canvas 2D への直接描画は行わない — 実装メモ(2026-10-20)参照)。
 
 共通スタイル:
 - ゲージ上部に項目名(タイトル)
@@ -55,6 +57,19 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
   外側(=A)/内側(=B)の 2 つのアーチ(ストーク間隔 1px)で別々に表示し、2 行の値は
   **ゲージの直下**に表示する(合計値ではない。中央配置では縮小後 canvas で内側アーチと
   交差するためゲージ下に配置 — 実装メモ(2026-09-27)・実装メモ(2026-10-05)参照)
+
+Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
+
+- `circumference:180` / `rotation:-90` / `cutout` は穴比率で指定。**dataset 1 本 = 1 同心リング**で
+  `index 0` が最外周。`weight` がリング厚み(1 weight ≈ 1px)
+- `ds0` = 閾値ゾーン帯(緑/橙/赤ベタ・`borderWidth:0`・厚み 3px)、`ds1` = 単一ゲージの値アーチ
+  (ゾーン色)または dual の外側 A(固定色)、`ds2` = dual のみ 内側 B(固定色)
+- 値リングの `data=[値%, 100-値%]` の**残り分を `ARC_BG`(背景アーチ色)**にすることで、
+  canvas 版の「背景アーチ + 値アーチ」を 1 本のリングで再現する
+- リング間 1px は `borderWidth:1` + `borderColor=カード背景 #161b22` の**擬似余白**で出す
+  (`spacing` はリング端が引っ込むため不使用)
+- 中央の現在値・単位・2 行目は canvas に描かず** HTML オーバーレイ**(`.gval` / `.gval-dual-out` /
+  `.gsub`)で重ねる。canvas は `responsive:false` + 属性サイズ 150×76(単一)/ 150×56(dual) 固定
 
 項目ごとのレイアウト:
 
@@ -79,9 +94,10 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - **システム**タブ(既定): 一段目(現在値ゲージ行) + 二段目(時系列グラフ)
 - **モデル**タブ: 三段目(vLLM / モデル) + 四段目(RAG)
 - タブバーは header 直下の `.tabs`(テキスト + アクティブ下線)。`.tab-panel` を `display` で切り替える
-- 非表示タブ内の canvas は `clientWidth=0` のため `Gauge.render()` がスキップされる。
-  システムタブへ戻る際は `redrawSystemTab()` がゲージのキャッシュ(`_last`)を無効化して再描画し、
-  `mainChart.resize()` + `refreshMainChart()` でグラフのサイズを復元する
+- 非表示タブ(display:none)中のゲージは値が変わっても `chart.update()` が走るだけで視覚的に
+  反映されない。システムタブへ戻る際は `redrawSystemTab()` がゲージのキャッシュ(`_last`)を
+  無効化して全ゲージを `update()` し直す。ゲージは `responsive:false`(canvas 属性サイズが
+  論理サイズ)なのでサイズ復元は不要で、`resize()` は二段目の `mainChart` のみ行う
 
 ### 一段目: 現在値ゲージ行
 
@@ -311,7 +327,9 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 
 ### フォルダ構成
 
-- `/home/cliclie/DGXSparkUtil/front/` — ブラウザから参照する表示側(静的ファイル: 単一 index.html + JS、時系列グラフ用の Chart.js 単一ファイル `chart.umd.js`)
+- `/home/cliclie/DGXSparkUtil/front/` — ブラウザから参照する表示側(静的ファイル: 単一 index.html + JS、
+  **一段目の半円ゲージ(`doughnut`)と二段目の時系列グラフ(`line`)共通**の Chart.js 単一ファイル
+  `chart.umd.js`。CDN 不使用・ローカル参照)
 - `/home/cliclie/DGXSparkUtil/api/` — モニタリング結果を返却するAPI群(Python + FastAPI)。
   加えて `thermal_guard.sh` + `thermal-guard.service`(root 特権の GPU サーマルガード。
   clock=GB10 の GPU クロック / power=R9700 の GPU 電力上限を温度連動で 3 段制御) を含む
@@ -1892,4 +1910,99 @@ curl -s localhost:8080/api/thermal | python3 -m json.tool
 GB10 では `thermal_guard.sh` の clock 経路(`loop_clock`)は**ロジック変更なし**。unit の
 追記分は power 用の環境変数と `ExecStartPre`(GB10 は `nvidia-smi` を見つけて即通過)だけで、
 既存の `THERMAL_LOW_C=85` / `THERMAL_LOCK_HIGH_MHZ=1665` はそのまま有効。
+
+## 一段目メーターの Chart.js 移植（2026-10-20・canvas 直描画の撤去）
+
+### 経緯
+
+- 一段目の半円ゲージは `Gauge.render()` が canvas 2D へ直接描画していた（`ctx.arc` で
+  背景アーチ／閾値ゾーン帯／値アーチ）。二段目の時系列グラフは Chart.js のため、
+  **一段目も描画ライブラリを Chart.js に統一**したいとの依頼
+- 参考元: SociaX-Standalone `operations-ui`（`static/app.js` の `renderCpuGauge()` /
+  `cpuGaugeDatasets()` / `cpuGaugeCutout()`）。同リポジトリ `SettingLogs.md` の
+  「CPU負荷メーターの Chart.js 移植（2026-10-01・正本化）」と追随修正 1〜3 が確定仕様
+- 対象は**全 10 枚**（単一 8 + dual 2）。`Gauge` クラスを丸ごと置換し canvas 直描画は完全撤去
+
+### 構成
+
+- `front/index.html` のみ変更（API 変更なし → `systemctl restart dgx-spark-api` 不要、
+  ブラウザリロードのみで反映）
+- `new Chart(canvas, {type:"doughnut", options:{responsive:false, circumference:180,
+  rotation:-90, cutout, layout:{padding:{top:4, bottom:2}},
+  plugins:{legend:{display:false}, tooltip:{enabled:false}},
+  animation:{duration:1000, easing:"easeInOutQuad"}}})`
+- `gaugeDatasets(def, v)` が dataset を生成する（`index 0` = 最外周）:
+  `ds0` 閾値ゾーン帯 `data:[s0*100, (s1-s0)*100, (1-s1)*100]`・3 色ベタ・`borderWidth:0`・`weight:3`
+  / `ds1` 単一=値アーチ（ゾーン色・`weight:11`）または dual=外側 A（`colorA` 固定・`weight:8`）
+  / `ds2` dual のみ 内側 B（`colorB` 固定・`weight:6`）
+- **DGXSparkUtil 固有の要点**: 値リング `data=[値%, 100-値%]` の**残り分を `"transparent"` ではなく
+  `ARC_BG`** にした（operations-ui 準拠で transparent にすると canvas 版の背景アーチが消える）
+- **余白制御**: 値リングの `borderWidth:1` + `borderColor:CARD_BG(#161b22)` がリング間 1px の
+  擬似余白。`spacing` は端が引っ込むため不使用（operations-ui 追随修正 2 準拠）
+- **文字は HTML オーバーレイ維持**: `.gval`（中央値 16px + 単位 + `subVal` 2 行目）/
+  `.gval-dual-out`（dual の 2 行値をゲージ下）/ `.gsub` をそのまま流用。`set()` の HTML 生成は無変更
+- **差分アニメ**: dataset オブジェクトは保持し `data`/`backgroundColor` だけ書き換えて `update()`
+  （operations-ui の教訓: datasets を丸ごと差し替えると Chart.js が新規データとみなし毎回 0 から回る）
+- `gaugeCutout(dual)` は「1 weight ≈ 1px」になる穴比率（単一 80% / dual 66%）
+
+### 寸法対応（canvas 版 → Chart.js 実測）
+
+`responsive:false` では canvas 属性サイズが論理サイズ（dpr は Chart.js の retinaScale が自動対応）。
+`.gcanvas` の実幅は 176px − padding 12×2 − border 1×2 = **150px** で、canvas 属性も 150 にした
+（152 にすると右に 2px はみ出す）。半円 doughnut は `getRatioAndOffset()` が `ratioY:0.5` /
+`offsetY:0.5` を返すため**中心 y = canvas 高さ − padding.bottom** になり、
+`padding:{top:4, bottom:2}` で canvas 版の `cy = h - 2` に一致する。
+
+| ゲージ | 中心 x,y | 閾値ゾーン帯 | 外側アーチ | 内側アーチ | 頂部/下端 |
+|---|---|---|---|---|---|
+| 単一 150×76（canvas 版） | 75, 74 | 67〜70 | 値 54.8〜66 | — | 4 / 2 |
+| 単一 150×76（Chart.js 実測） | 75, 74 | 67〜70 | 値 56〜67 | — | 4 / 2 |
+| dual 150×56（canvas 版） | 75, 54 | 47〜50 | 38〜46 | 31〜37 | 4 / 2 |
+| dual 150×56（Chart.js 実測） | 75, 54 | 47〜50 | 39〜47 | 33〜39 | 4 / 2 |
+
+中央値 16px の最大径 53.3px（実装メモ 2026-10-05）は新内縁 56px に収まり文字干渉なし。
+
+### 周辺機構
+
+- `tuneGauge()`（`gpu_power_cap_w` / `gpu_clock_max_mhz` / `gpu_temp_crit_c` / `net_max_mbps` による
+  実測上限補正）は `data` 再計算のみに反映。`cutout`/`weight` は上限に依存しないため再構築不要
+- 項目未提供時のカード非表示（`cardEl.style.display="none"`）と `renderThermal()` の
+  `thr-high`/`thr-crit` 枠線着色は**無変更**（`cardEl` クラス操作のみ）
+- `redrawSystemTab()` の `_last` 無効化は維持。ゲージは `responsive:false` なので `resize()` 不要
+- CSS は `.gauge .gcanvas canvas` の `width:100%/height:100%` を削除（Chart.js が inline style で
+  論理 px を指定するため）。`position:absolute; left:0; top:0` は `.gval` の配置基準として維持
+
+### 検証（headless Chrome 実測）
+
+この環境に node はなく `google-chrome` があるため、`--headless=new --dump-dom` で iframe 経由に
+稼働中のページへ eval を注入し、chart 内部を直接実測した（検証用 HTML は検証後に削除）:
+
+- **canvas 属性 / inline style**: 単一 `150×76`・dual `150×56` が全 10 枚に付与されることを確認
+  （`responsive:true` はコンテナ計測が効かず 300px 固定で右へはみ出す — operations-ui の教訓どおり）
+- **dataset**: 単一 2 本・dual 3 本、`weight [3,11]` / `[3,8,6]`、`cutout 80%` / `66%`、
+  `borderWidth [0,1]` / `[0,1,1]`。`g-gpu-clock` は `zoneStops` が `data [83.9, 6, 10.1]` に反映
+- **寸法**: 上表のとおり中心・リング半径が canvas 版と一致（`arc.outerRadius`/`innerRadius` 実測）
+- **0 始まりアニメなし**: 値リングの `arc.circumference` を 16ms×400 回サンプリングし、目標 % が
+  変化した全フレームで `circumference < 0.05` は**ゼロ**（前回値からの連続遷移）
+- **タブ切替**: システム → モデル → システム復帰後、全ゲージの `circumference` が目標角度に収束
+  （worst diff 0.031 は CPU 負荷が変動し続けている分で、他は ≤ 0.001）
+- **ゾーン色連動**: 統合メモリ 88.1% → 赤 `#f85149`、CPU 負荷 15.6% → 緑 `#3fb950`
+- **スクリーンショット**: 1 段目 10 枚のゾーン帯 3 色・背景アーチ・リング間 1px・中央値 2 行・
+  dual のゲージ下 2 行値を確認。JS コンソールエラーなし
+- **atom2 (discrete) 分岐**: `PLAT.memory_mode="discrete"` を模擬して** 11 枚**（RAM / VRAM 追加）を
+  生成。`g-ram` / `g-vram` は単一ゲージと同一寸法（`cutout 80%`・`weight [3,11]`・中心 75,74・
+  `bg` 付きカード）で、値のゾーン色連動（RAM 87.5% → 赤、VRAM 62.5% → 橙）と `subVal` 2 行目も
+  従来どおり。上限補正は `g-gpu-temp` max 110 / `g-gpu-power` max 250 (R9700 PPT) /
+  `g-gpu-clock` max 2350 + `zoneStops` 標準（`data [60,25,15]`）が `data` に反映されることを実測。
+  GB10 の `/api/metrics` は `vram_*` を返さないため `g-vram` は従来の missing 機構で非表示
+  （Chart.js 化とは無関係な既存挙動）
+
+### 既知のトレードオフ
+
+- `bg: rgba(色,.10)` を敷くカード（統合メモリ / RAM / VRAM / GPU 負荷）では、1px の擬似余白が
+  `CARD_BG` 固定のためカード実色とわずかにズミる（operations-ui と同じトレードオフ）
+- `borderWidth:1` は値セグメントの内外境界にも乗るため、アーチ端が 1px 欠けて見える
+  （operations-ui で承諾済みの挙動）
+- 現行 canvas 版は即時描画だったが、Chart.js 化で **1000ms / easeInOutQuad のアニメが追加**された
+  （POLL_MS=2000 と両立。不要なら `animation:false`）
 
