@@ -502,16 +502,25 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   # /home/cliclie/DGXSparkUtil/api/install_service.env  (WSL2 Whitebear2026 の実例)
   PORT=8090            # Strata 系が 8080 を使うため API は 8090
   KILL_MODE=process    # API 再起動で稼働中モデルサーバーを巻き込まない (下記)
+  LIMIT_NOFILE=1048576 # WSL2 の CUDA に必要 (下記)
   DGXUTIL_THERMAL=0    # 省略可 (WSL は /proc/version 判定で自動 0)
   ```
   → 以後は素の `sudo bash .../install_service.sh` で 8090 が入る。
   ファイルが存在しない環境 (atom1 / atom2) は `PORT=8080` / `KILL_MODE=control-group`
-  の従来動作のまま
+  / `LimitNOFILE` 行なし (systemd 既定 1024) の従来動作のまま
 - **`KILL_MODE`**: unit の `KillMode`。既定 `control-group` のままだと、モデルサーバーを
   このサービスの cgroup 内で起動する `modelctl` (WSL) では
   `systemctl restart dgx-spark-api` が稼働中モデルまで SIGKILL する
   (`start_new_session` でセッションは切れるが cgroup は切れない)。WSL は `process` を使う。
   atom1 / atom2 のモデルは docker コンテナ (dockerd の cgroup) なので影響なし
+  - 実測: `LimitNOFILE` 適用後のユーザーサービスで `systemctl --user restart` →
+    API は 200、稼働中 TabbyAPI (`:5001/health`) も 200 のまま生存を確認
+- **`LIMIT_NOFILE` (WSL2 で必須)**: systemd サービスの既定 `LimitNOFILE=1024` では、
+  WSL2 の CUDA (`/dev/dxg` + D3D12) がモデルロード中にハンドルを枯渇させて
+  `RuntimeError: CUDA driver error: unknown error` になる。
+  ログインセッション (`ulimit -n` = 1048576) では同じ手順で成功するため、
+  **切り分けは「同一セッションで `ulimit -n 1024` を下げて再現」**で行った
+  (cgroup / 環境変数 / setsid は無関係であることを実測で否定)
 - **WSL2 では `thermal-guard.service` を自動でインストールしない**
   (`/proc/version` に microsoft が含まれるか `DGXUTIL_THERMAL=0` でスキップ。
   WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため)。
@@ -2233,5 +2242,16 @@ sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh   # api/install_serv
   `sudo: preserving the entire environment is not supported, '-E' is ignored` で落ちる。
   → ホスト固有値は `api/install_service.env` (git 管理外) に置いて解決した
 - `systemd-analyze verify` でレンダリング後 unit の検証 OK
-  (`KillMode=process` / `--port 8090`)
+  (`KillMode=process` / `LimitNOFILE=1048576` / `--port 8090`)
+- **はまった点 (systemd 化後にモデル切替が `CUDA driver error: unknown error` で失敗)**:
+  原因は **systemd サービス既定の `LimitNOFILE=1024`**。WSL2 の CUDA (D3D12 / `/dev/dxg`) は
+  モデルロード中に 1024 を超えるハンドルを開くため途中で失敗した。切り分けの実測順:
+  1. system サービス経由の切替 → 失敗 (78% で `torch.empty` が CUDA error)
+  2. **同じ環境変数を `/proc/<MainPID>/environ` から注入**してログインシェルから実行 → 成功
+     (環境変数は無関係)
+  3. `systemd-run --user --scope` (user.slice) から実行 → 成功 (cgroup も無関係)
+  4. ログインセッションのまま `ulimit -n 1024` → **同じエラーが再現** → 確定
+  5. `LimitNOFILE=1048576` を与えたサービスで切替 → 成功 (`job success=True`)
+  - 教訓: 「system.slice が悪い」と早合流して `Slice=` / user サービス導入を一時実装したが、
+    **`/proc/<pid>/limits` を先に見る**べきだった (余計な分岐は撤回した)
 

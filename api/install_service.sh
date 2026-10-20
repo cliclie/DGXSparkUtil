@@ -4,14 +4,16 @@
 # the run user from SUDO_USER. The unit file is rendered from the __API_DIR__ /
 # __USER__ / __PORT__ placeholders in dgx-spark-api.service.
 # Usage: sudo bash <repo>/api/install_service.sh
+#   (unit の __API_DIR__ / __USER__ / __PORT__ / __KILL_MODE__ / __LIMIT_NOFILE__ を置換)
 #   既定ポート (8080) を変えたい / サーマルガードを入れない環境は、このスクリプトと
 #   同じディレクトリの install_service.env (git 管理外・各マシン固有) に書く:
 #       PORT=8090
 #       KILL_MODE=process
+#       LIMIT_NOFILE=1048576
 #       DGXUTIL_THERMAL=0
 #   → sudo は環境変数を引き継がない (WSL の sudo は -E 非対応) ため、ファイル側で持つ。
-#   一時上書きで済ませたい場合は sudo のコマンドラインでも指定できる:
-#       sudo PORT=8090 bash <repo>/api/install_service.sh
+#   呼び出し側で明示した値はファイルより優先される:
+#       sudo PORT=8091 bash <repo>/api/install_service.sh
 #
 # GPU サーマルガード (thermal-guard.service) は nvidia-smi -lgc / power1_cap を
 # 直接叩く root unit。WSL2 は GPU がホスト (Windows) 側ドライバ管理でこれらの
@@ -23,10 +25,17 @@ RUN_USER="${SUDO_USER:-cliclie}"
 SERVICE="dgx-spark-api.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE}"
 
-# ホスト固有の設定 (存在しなければ何もしない = atom1 / atom2 は従来どおり)
-if [ -f "${API_DIR}/install_service.env" ]; then
-  # shellcheck disable=SC1090
-  source "${API_DIR}/install_service.env"
+# ホスト固有の設定 (存在しなければ何もしない = atom1 / atom2 は従来どおり)。
+# 呼び出し側が明示した変数 (例: PORT=8091 bash install_service.sh) は優先する。
+INSTALL_ENV="${API_DIR}/install_service.env"
+if [ -f "${INSTALL_ENV}" ]; then
+  while IFS='=' read -r _k _v; do
+    case "${_k}" in ''|'#'*) continue ;; esac
+    case "${_k}" in *[!A-Za-z0-9_]*) continue ;; esac
+    if [ -z "${!_k+x}" ]; then
+      export "${_k}=${_v}"
+    fi
+  done < "${INSTALL_ENV}"
 fi
 
 PORT="${PORT:-8080}"
@@ -34,6 +43,10 @@ PORT="${PORT:-8080}"
 # モデルサーバーをこの unit の cgroup 内で起動する環境は install_service.env で
 # KILL_MODE=process を指定し、API 再起動からモデルを守る。
 KILL_MODE="${KILL_MODE:-control-group}"
+# unit の LimitNOFILE。空なら行を削除して systemd 既定 (1024) のままにする。
+# WSL2 は CUDA のハンドル数が既定値を超えるため install_service.env で
+# LIMIT_NOFILE=1048576 を指定する。
+LIMIT_NOFILE="${LIMIT_NOFILE:-}"
 
 # WSL2 判定 (/proc/version に microsoft)。atom1 / atom2 では常に偽 = 従来動作。
 IS_WSL=0
@@ -50,17 +63,20 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} thermal-guard=${TG_ENABLED}"
+echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} LIMIT_NOFILE=${LIMIT_NOFILE:-既定(1024)} thermal-guard=${TG_ENABLED}"
 
 echo "==> Stopping any manually started instance (frees port ${PORT})"
 systemctl stop "${SERVICE}" 2>/dev/null || true
-pkill -u "${RUN_USER}" -f 'uvicorn main:app' 2>/dev/null || true
+pkill -u "${RUN_USER}" -f 'uvicorn mai[n]:app' 2>/dev/null || true
 sleep 2
 
 echo "==> Rendering unit file -> ${UNIT_PATH}"
 sed -e "s|__API_DIR__|${API_DIR}|g" -e "s|__USER__|${RUN_USER}|g" \
   -e "s|__PORT__|${PORT}|g" -e "s|__KILL_MODE__|${KILL_MODE}|g" \
+  -e "s|__LIMIT_NOFILE__|${LIMIT_NOFILE}|g" \
   "${API_DIR}/${SERVICE}" > "${UNIT_PATH}"
+# 未指定の行は落として従来動作 (systemd 既定 = LimitNOFILE 1024) に戻す
+sed -i -e '/^LimitNOFILE=$/d' "${UNIT_PATH}"
 chmod 644 "${UNIT_PATH}"
 
 # GB10 サーマルガード。nvidia-smi -lgc / -rgc を叩くのはこの root unit だけ。

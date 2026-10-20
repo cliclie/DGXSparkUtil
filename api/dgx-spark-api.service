@@ -11,13 +11,19 @@ Group=__USER__
 # ユーザセッションバス (XDG_RUNTIME_DIR) をサービス環境に与える
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 WorkingDirectory=__API_DIR__
-# modelctl (WSL) は切替ジョブが起動したモデルサーバーをこのサービスの进程ツリーから
+# modelctl (WSL) は切替ジョブが起動したモデルサーバーをこのサービスのプロセスツリーから
 # 切り離す (start_new_session) が、cgroup は引き続きこの unit の配下にある。
 # 既定 (control-group) だと `systemctl restart dgx-spark-api` で稼働中モデルまで
 # SIGKILL されるため、WSL では KILL_MODE=process (install_service.env) を使う。
 # compose 環境 (atom1 / atom2) はモデルが docker コンテナ (dockerd の cgroup) なので
 # control-group のまま従来動作。
 KillMode=__KILL_MODE__
+# WSL2 の CUDA (/dev/dxg + D3D12) は 1 モデルあたり数百件のハンドルを開くため、
+# systemd サービス既定の LimitNOFILE=1024 だとモデルロード中に枯渇して
+# "RuntimeError: CUDA driver error: unknown error" になる (ログインセッションの
+# 1048576 では成功するのを実測)。LIMIT_NOFILE を指定したときだけこの行を残す。
+# 未指定 (atom1 / atom2 はモデルが docker コンテナ側で動く) は行を削除して従来動作。
+LimitNOFILE=__LIMIT_NOFILE__
 ExecStartPre=/bin/sh -c 'test -x __API_DIR__/venv/bin/python || (cd __API_DIR__ && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
 ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port __PORT__
 Restart=always
