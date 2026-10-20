@@ -419,13 +419,13 @@ table.params td input[readonly] { color: var(--muted); }
   <!-- タブ 2: モデル (vLLM / モデル + RAG) -->
   <div class="tab-panel" id="tab-model">
   <!-- Tier 3: vLLM -->
-  <section>
-    <h2>vLLM / モデル</h2>
+  <section id="sec-model">
+    <h2 id="h2-model">vLLM / モデル</h2>
     <div id="vllm-panel">
       <div id="vllm-headline">
         <div class="item"><span class="k">稼働モデル</span><span class="v" id="v-model">-</span></div>
         <div class="item"><span class="k">ポート</span><span class="v" id="v-port">-</span></div>
-        <div class="item"><span class="k">コンテナ状態</span><span class="v" id="v-status">-</span></div>
+        <div class="item"><span class="k" id="k-status">コンテナ状態</span><span class="v" id="v-status">-</span></div>
         <div class="item"><span class="k">稼働時間</span><span class="v" id="v-uptime">-</span></div>
         <div class="item"><span class="k">実行/待機</span><span class="v" id="v-rw">-</span></div>
         <div class="item"><span class="k">KVCache</span><span class="v" id="v-kv">-</span></div>
@@ -448,7 +448,7 @@ table.params td input[readonly] { color: var(--muted); }
     </div>
   </section>
 
-  <section>
+  <section id="sec-rag">
     <h2>RAG (sociax-rag) <span id="rag-excl-note" style="display:none;color:var(--muted);font-size:12px;font-weight:400;">※ LLM ⇔ RAG は VRAM 排他</span></h2>
     <div id="rag-panel">
       <div id="rag-headline">
@@ -550,9 +550,12 @@ const POLL_MS = 2000;
 
 // プラットフォーム情報 (/api/platform で取得。既定は DGX Spark 挙動 = 従来動作)
 // memory_mode: unified=統合メモリ1枚 / discrete=RAM+VRAM 2枚
+// backend: compose=docker-compose + switch_models.sh / modelctl=WSL の model-ctl.sh
+// rag_enabled / params_editable: 各セクション・保存ボタンの表示可否
 let PLAT = {
   platform: "dgx-spark", label: "DGX Spark", hostname: "",
   memory_mode: "unified", net_max_mbps: 10000, exclusive_llm_rag: false,
+  backend: "compose", rag_enabled: true, params_editable: true,
 };
 
 // GPU サーマルガード (root unit の thermal-guard.service) の状態。/api/thermal で取得。
@@ -815,7 +818,7 @@ function gaugeDefs() {
       sub: (m) => `上限 ${m.gpu_temp_crit_c ? m.gpu_temp_crit_c.toFixed(0) : (discrete ? 110 : 100)}°C` },
     { id: "g-gpu-power", title: "GPU 電力", max: discrete ? 300 : 140, unit: "W", color: "#bc8cff",
       get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1),
-      sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W ${discrete ? "(R9700 PPT)" : "(GB10 TDP)"}` },
+      sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W ${!discrete ? "(GB10 TDP)" : (m.gpu_vendor === "nvidia" ? "(GPU power limit)" : "(R9700 PPT)")}` },
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
@@ -1156,11 +1159,14 @@ async function poll() {
   } catch (e) {
     console.error("vllm poll failed", e);
   }
-  try {
-    const rst = await fetchJson(API + "/api/rag/status");
-    renderRag(rst);
-  } catch (e) {
-    console.error("rag poll failed", e);
+  // RAG 環境が無いプラットフォーム (WSL) は docker を叩かないので poll も省略する
+  if (PLAT.rag_enabled !== false) {
+    try {
+      const rst = await fetchJson(API + "/api/rag/status");
+      renderRag(rst);
+    } catch (e) {
+      console.error("rag poll failed", e);
+    }
   }
   try {
     THERMAL = await fetchJson(API + "/api/thermal");
@@ -1203,10 +1209,17 @@ function makeModelItem(c, st, sw) {
   } else {
     meta = (c.running ? "稼働中" : "停止中") + (c.uptime_str ? " (" + c.uptime_str + ")" : "");
   }
+  // modelctl (WSL): 重み未導入のモードは切替不可 (bridge が DL を走らせない)
+  const notReady = c.ready === false;
+  if (notReady && !isTarget) meta = (meta ? meta + "・" : "") + "重み未導入";
   const div = document.createElement("div");
   div.className = "model-item" + (cls ? " " + cls : "") + (c.profile === selectedProfile ? " selected" : "");
   div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
-  div.onclick = () => { selectedProfile = c.profile; renderModelList(); };
+  div.onclick = () => {
+    if (notReady) return;
+    selectedProfile = c.profile;
+    renderModelList();
+  };
   return div;
 }
 
@@ -1216,7 +1229,10 @@ function updateSwitchButtons(st) {
   if (!btn) return;
   const busy = !!(st && st.switching);
   const active = st && st.active ? st.active.profile : null;
-  btn.disabled = busy || !selectedProfile || selectedProfile === active;
+  // modelctl (WSL): 重み未導入モードは切替対象にできない (compose 側は ready 未定義で常時 true)
+  const sel = st && st.containers ? st.containers.find((c) => c.profile === selectedProfile) : null;
+  const blocked = !!sel && sel.ready === false;
+  btn.disabled = busy || !selectedProfile || selectedProfile === active || blocked;
   btn.textContent = selectedProfile ? "切り替え実行: " + selectedProfile : "切り替え実行";
 }
 
@@ -1871,7 +1887,7 @@ function renderThermal() {
 
 // ------------------------------------------------------------- 起動
 function applyPlatform() {
-  // dgx-spark は固定ラベル「DGX Spark」、atom2 はホスト名 (例: WhitebearATOM2)
+  // dgx-spark は固定ラベル「DGX Spark」、atom2 / wsl はホスト名 (例: WhitebearATOM2)
   const name = PLAT.platform === "dgx-spark" ? PLAT.label : (PLAT.hostname || PLAT.label);
   const h1 = document.getElementById("hdr-title");
   if (h1) h1.textContent = name + " Monitor";
@@ -1879,6 +1895,25 @@ function applyPlatform() {
   if (PLAT.exclusive_llm_rag) {
     const note = document.getElementById("rag-excl-note");
     if (note) note.style.display = "";
+  }
+  // RAG 環境が無いプラットフォーム (WSL) はセクションごと非表示 + poll も省略
+  if (PLAT.rag_enabled === false) {
+    const sec = document.getElementById("sec-rag");
+    if (sec) sec.style.display = "none";
+  }
+  // modelctl (WSL) は docker を使わない → 「コンテナ」表記と再作成ボタンを外す
+  if (PLAT.backend === "modelctl") {
+    const h2 = document.getElementById("h2-model");
+    if (h2) h2.textContent = "モデル (model-ctl.sh)";
+    const ks = document.getElementById("k-status");
+    if (ks) ks.textContent = "状態";
+    const sw = document.getElementById("panel-switch-warn");
+    if (sw) sw.textContent = "";
+  }
+  // パラメータ編集未対応 (WSL: 設定形式がエンジンごとに異なる) は保存ボタンを隠す
+  if (PLAT.params_editable === false) {
+    const save = document.getElementById("params-save");
+    if (save) save.style.display = "none";
   }
 }
 

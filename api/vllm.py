@@ -4,10 +4,18 @@
 - プロファイル対応表: docker-compose.yml を動的にパース(モデル追加に自動追従)
 - 切替: 既存スクリプト switch_models.sh をバックグラウンド実行
 - パラメータ編集: docker-compose.yml の command を書き換えて --force-recreate
+
+バックエンドは config.BACKEND で分岐する (実装メモ 2026-10-21):
+- "compose"  : 上記の従来動作 (dgx-spark / atom2)。このモジュールのロジックは不変
+- "modelctl" : WSL2。docker を使わず、汎用ランチャー model-ctl.sh を source した
+               ブリッジ (wsl_modelctl_bridge.sh / modelctl.py) から同一形状の
+               プロファイル表・状態・メトリクスを取得する。切替は _mc_launch を
+               バックグラウンドジョブとして実行する。
 """
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import socket
@@ -16,11 +24,20 @@ import time
 from pathlib import Path
 
 import config
+import modelctl
 
 # パス・排他有無は config (プラットフォーム検出) に集約
 COMPOSE_DIR = config.COMPOSE_DIR
 COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yml"
 SWITCH_SCRIPT = COMPOSE_DIR / "switch_models.sh"
+
+# モデル管理バックエンド ("compose" = 従来 / "modelctl" = WSL の model-ctl.sh)
+BACKEND = config.BACKEND
+
+
+def _is_modelctl() -> bool:
+    return BACKEND == "modelctl"
+
 
 # プロファイル対応表 (profile -> service/container/port) は docker-compose.yml から
 # 動的に読み込む(モデル追加に自動追従。_load_profiles 参照)。
@@ -44,7 +61,13 @@ def _load_profiles() -> dict[str, dict]:
     ファイルの mtime が変わったときのみ再パース(2 秒ポーリングでも低コスト)。
     YAML パーサではなく regex で解析するため、<<: *vllm-common のような
     アンカー参照に依存しない(新規依存ゼロ)。
+
+    modelctl バックエンド (WSL) では docker-compose.yml を読まず、
+    model-ctl.sh のモード一覧から同一形状の表を返す。
     """
+    if _is_modelctl():
+        return modelctl.profiles()
+
     global _profiles_cache, _profiles_mtime
     try:
         mtime = COMPOSE_FILE.stat().st_mtime
@@ -589,6 +612,14 @@ def _is_tabbyapi(base: str) -> bool:
 
 
 _TABBY_ENTRY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d+ \w+:")
+# WSL (modelctl) はログファイルを読む。model-ctl.sh が起こす起動ログ (logs/ctl-*.log) は
+# docker logs と同じ "HH:MM:SS.mmm LEVEL:" 接頭辞だが、TabbyAPI 自身の loguru ファイル
+# (logs/2026-10-20_08-09-35_588705.log) は "2026-10-20 08:10:43.124 | INFO |" 形式。
+# どちらのファイルも読めるように両形式を受理する (本文側の開始/完了正規表現は共通)。
+_TABBY_ENTRY_RE_FILE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \| \w+")
+_TABBY_ENTRY_RE_ANY = re.compile(
+    r"^(?:\d{2}:\d{2}:\d{2}\.\d+ \w+:|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \| \w+)"
+)
 _TABBY_START_RE = re.compile(r"#(\d+) \S+(?: \(stream\))?: ([\d,]+) prompt tokens")
 _TABBY_DONE_RE = re.compile(
     r"#(\d+) \S+(?: \(stream\))?: ([\d,]+) tokens generated"
@@ -599,16 +630,22 @@ _TABBY_DONE_RE = re.compile(
 )
 
 
-def _tabbyapi_parse_logs(text: str) -> list[tuple[str, int, dict | None]]:
-    """TabbyAPI の docker logs を (kind, req_id, stats) の列に解析する。
+def _tabbyapi_parse_logs(
+    text: str, entry_re: "re.Pattern[str] | None" = None
+) -> list[tuple[str, int, dict | None]]:
+    """TabbyAPI のログを (kind, req_id, stats) の列に解析する。
 
+    entry_re 省略時は docker logs 形式 (_TABBY_ENTRY_RE)。WSL のログファイル
+    読み取りでは _TABBY_ENTRY_RE_FILE を渡す。
     loguru が長い行を折返す(継続行は先頭が空白)ため、タイムスタンプで始まる行を
     1 エントリとして継続行を結合してから開始/完了にマッチする。
     kind: "start"(stats=None) / "done"(stats=dict)。
     """
+    if entry_re is None:
+        entry_re = _TABBY_ENTRY_RE
     entries: list[str] = []
     for ln in text.splitlines():
-        if _TABBY_ENTRY_RE.match(ln) or not entries:
+        if entry_re.match(ln) or not entries:
             entries.append(ln)
         else:
             entries[-1] += " " + ln.strip()
@@ -637,8 +674,18 @@ def _tabbyapi_parse_logs(text: str) -> list[tuple[str, int, dict | None]]:
     return events
 
 
-def _tabbyapi_metrics(base: str, container: str) -> dict:
-    """TabbyAPI メトリクス: docker logs のリクエスト毎統計を解析する(/metrics なし)。
+def _tabbyapi_metrics(
+    base: str,
+    container: str,
+    log_text: str | None = None,
+    headers: list[str] | None = None,
+) -> dict:
+    """TabbyAPI メトリクス: ログのリクエスト毎統計を解析する(/metrics なし)。
+
+    log_text 省略時は docker logs を読む(従来動作 = atom1 / atom2)。
+    WSL (modelctl) はコンテナを立てないため、呼び出し側がログファイル末尾を
+    読み込んで log_text に渡す。headers は WSL で API キーが設定されている場合のみ
+    渡す (/v1/model が 401 になると cache_size / max_batch_size が取れない)。
 
     実行/待機: ログの req_id 追跡(開始あり・完了なし)。max_batch_size 超過分は待機。
     KVCache: (直近リクエストの prompt+gen トークン) / cache_size の推定値
@@ -649,9 +696,12 @@ def _tabbyapi_metrics(base: str, container: str) -> dict:
     vLLM の prompt_tokens_per_s と同一セマンティクス。
     """
     now = time.time()
-    events = _tabbyapi_parse_logs(
-        _run(["docker", "logs", "--tail", str(_TABBY_LOG_TAIL), container], timeout=10)
-    )
+    if log_text is None:
+        events = _tabbyapi_parse_logs(
+            _run(["docker", "logs", "--tail", str(_TABBY_LOG_TAIL), container], timeout=10)
+        )
+    else:
+        events = _tabbyapi_parse_logs(log_text, _TABBY_ENTRY_RE_ANY)
     for kind, rid, stats in events:
         if kind == "start":
             _tabby_in_flight.setdefault(rid, now)
@@ -666,7 +716,7 @@ def _tabbyapi_metrics(base: str, container: str) -> dict:
 
     # cache_size / max_batch_size は /v1/model から
     cache_size = max_batch_size = None
-    model_txt = _http_get(f"{base}/v1/model", timeout=3)
+    model_txt = _http_get(f"{base}/v1/model", timeout=3, headers=headers)
     if model_txt:
         cm = re.search(r'"cache_size"\s*:\s*(\d+)', model_txt)
         bm = re.search(r'"max_batch_size"\s*:\s*(\d+)', model_txt)
@@ -697,8 +747,276 @@ def _tabbyapi_metrics(base: str, container: str) -> dict:
     return m
 
 
+# ================================================================ modelctl (WSL2) メトリクス
+# backend=modelctl ではコンテナが立たない。エンジン種別ごとに HTTP / ログファイルから
+# vLLM と同じ構造のメトリクスを組み立てる (実装メモ 2026-10-21)。
+#
+# - Strata           : /metrics/prometheus が llama.cpp と同名系列 (llamacpp:*) を公開する
+#                      ため _llamacpp_metrics を流用。加えてログの "[strata] done:" 行から
+#                      直近リクエスト・expert cache hit 率・投機受理を補完する。
+# - llama.cpp (llmjp): --metrics 未指定。/slots + ログの print_timing 行から算出。
+# - TabbyAPI         : ログファイル末尾を _tabbyapi_metrics に渡す (既存パーサを流用)。
+# - ExLlamaV3 (exl)  : /health の累計カウンタの差分でスループットを算出。
+# - SGLang / llama.cpp (Docker 系モード): HTTP は既存経路、ログは docker logs を使う。
+
+_STRATA_DONE_RE = re.compile(
+    r"\[strata\] done: ([\d,]+) tokens in ([\d.]+) s \(([\d.]+) tok/s\)"
+    r"(?:.*?expert cache ([\d.]+)% hit)?"
+)
+_STRATA_PROGRESS_RE = re.compile(
+    r"\[strata\] (?:thinking|answering|writing)[^:]*: ([\d,]+) of .*?([\d.]+) tok/s"
+)
+# llama-server の print_timing (llama.cpp 標準ログ)
+_LLAMACPP_LOG_PROMPT_RE = re.compile(
+    r"prompt eval time =\s*([\d.]+) ms /\s*([\d,]+) tokens .*?([\d,.]+) tokens per second"
+)
+_LLAMACPP_LOG_EVAL_RE = re.compile(
+    r"eval time =\s*([\d.]+) ms /\s*([\d,]+) tokens .*?([\d,.]+) tokens per second"
+)
+_LLAMACPP_LOG_TOTAL_RE = re.compile(r"total time =\s*([\d.]+) ms /\s*([\d,]+) tokens")
+
+
+def _strata_metrics(base: str, log_text: str) -> dict:
+    """Strata のメトリクス: /metrics/prometheus (llamacpp: 系列) + ログ補完。"""
+    pm = _parse_vllm_metrics(_http_get(f"{base}/metrics/prometheus", timeout=5))
+    m = _llamacpp_metrics(pm, base)
+    running = 0
+    for ln in reversed(log_text.splitlines()):
+        mp = _STRATA_PROGRESS_RE.search(ln)
+        if mp:
+            running = 1
+            m["generation_tokens_per_s"] = float(mp.group(2).replace(",", ""))
+            break
+    for ln in reversed(log_text.splitlines()):
+        md = _STRATA_DONE_RE.search(ln)
+        if md:
+            secs = float(md.group(2))
+            m["e2e_latency_s"] = secs if secs > 0 else None
+            if not m.get("generation_tokens_per_s"):
+                m["generation_tokens_per_s"] = float(md.group(3))
+            if md.group(4):
+                # expert cache hit 率は Strata 独自の会話/重みキャッシュ命中率。
+                # KV キャッシュ使用率が取れない場合の代替指標として併記する。
+                m["expert_cache_hit_pct"] = float(md.group(4))
+            break
+    if not m.get("requests_running"):
+        m["requests_running"] = running
+    if m.get("requests_waiting") is None:
+        m["requests_waiting"] = 0
+    return m
+
+
+def _llamacpp_log_metrics(base: str, log_text: str) -> dict:
+    """llama.cpp (--metrics 未有効) のログ解析: print_timing から算出する。
+
+    KV キャッシュ使用率は /slots、スループット・E2E・TTFT は直近の
+    prompt eval / eval / total 行から取る。
+    """
+    m = _llamacpp_metrics({}, base)  # /slots による KV + requests 状態
+    lines = log_text.splitlines()
+    for ln in reversed(lines):
+        mp = _LLAMACPP_LOG_PROMPT_RE.search(ln)
+        if mp:
+            m["prompt_tokens_per_s"] = float(mp.group(3).replace(",", ""))
+            m["ttft_s"] = float(mp.group(1)) / 1000.0
+            break
+    for ln in reversed(lines):
+        me = _LLAMACPP_LOG_EVAL_RE.search(ln)
+        if me:
+            m["generation_tokens_per_s"] = float(me.group(3).replace(",", ""))
+            break
+    for ln in reversed(lines):
+        mt = _LLAMACPP_LOG_TOTAL_RE.search(ln)
+        if mt:
+            m["e2e_latency_s"] = float(mt.group(1)) / 1000.0
+            break
+    return m
+
+
+def _exllama_metrics(base: str) -> dict:
+    """ExLlamaV3 kit (serve_openai.py): /health の累計カウンタを差分算出する。
+
+    /health は prompt_tokens_total / completion_tokens_total を公開する
+    (live tok/s 表示用)。系列名を vLLM と同じ *_total に寄せて _tps_of を再利用する。
+    """
+    txt = _http_get(f"{base}/health", timeout=3)
+    if not txt:
+        return {}
+    try:
+        data = json.loads(txt)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    pm = {
+        "vllm:prompt_tokens_total": float(data.get("prompt_tokens_total", 0) or 0),
+        "vllm:generation_tokens_total": float(data.get("completion_tokens_total", 0) or 0),
+    }
+    now = time.time()
+    m = {
+        "requests_running": data.get("requests_running"),
+        "requests_waiting": data.get("requests_waiting"),
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": None,
+        "prompt_tokens_per_s": _tps_of("prompt", "vllm:prompt_tokens_total", pm, now),
+        "generation_tokens_per_s": _tps_of(
+            "generation", "vllm:generation_tokens_total", pm, now
+        ),
+    }
+    _prev_metrics["ts"] = now
+    _prev_metrics["prompt"] = pm["vllm:prompt_tokens_total"]
+    _prev_metrics["generation"] = pm["vllm:generation_tokens_total"]
+    return m
+
+
+# Docker でサーブする WSL モード (bonsai / swiftqwen38 / mimo) のコンテナ名。
+# model-ctl.sh が docker inspect で使う実体名と一致させる。
+_MODELCTL_DOCKER_CONTAINERS = {
+    "bonsai": "bonsai-llama-server",
+    "swiftqwen38": "swift-qwen38",
+    "mimo": "mimo-9b",
+}
+
+
+def _modelctl_headers(profile: str) -> list[str] | None:
+    """WSL モードの API キー (model-ctl.sh の _mc_mode_key が正本) を curl 用引数にする。
+
+    鍵が無いモード (exl / bonsai) と、ログ読みのみのモードでは None = 従来どおり無認証。
+    """
+    key = (modelctl.params(profile).get("api_key") or "").strip()
+    return ["-H", f"Authorization: Bearer {key}"] if key else None
+
+
+def _modelctl_metrics(profile: str, info: dict, base: str) -> dict:
+    """modelctl バックエンドのメトリクス取得をエンジン種別で振り分ける。"""
+    engine = info.get("engine", "unknown")
+    log_path = info.get("log", "")
+    if engine == "tabbyapi":
+        _reset_token_state()
+        return _tabbyapi_metrics(
+            base,
+            profile,
+            modelctl.read_log_text(log_path, _TABBY_LOG_TAIL),
+            _modelctl_headers(profile),
+        )
+    if engine == "strata":
+        _reset_token_state()
+        _reset_tabby_state()
+        return _strata_metrics(base, modelctl.read_log_text(log_path, 200))
+    if engine == "llamacpp":
+        _reset_token_state()
+        _reset_tabby_state()
+        return _llamacpp_log_metrics(base, modelctl.read_log_text(log_path, 400))
+    if engine == "exllama":
+        _reset_token_state()
+        _reset_tabby_state()
+        return _exllama_metrics(base)
+    # llamacpp-docker / sglang-docker: HTTP は既存の /metrics 経路を流用
+    mt = _http_get(f"{base}/metrics", timeout=5)
+    pm = _parse_vllm_metrics(mt) if mt else {}
+    if any(k.startswith("sglang:") for k in pm):
+        _reset_tabby_state()
+        return _sglang_metrics(pm)
+    if any(k.startswith("llamacpp:") for k in pm):
+        _reset_token_state()
+        _reset_tabby_state()
+        return _llamacpp_metrics(pm, base)
+    if _is_llamacpp(base):
+        _reset_token_state()
+        _reset_tabby_state()
+        return _llamacpp_metrics({}, base)
+    _reset_token_state()
+    _reset_tabby_state()
+    return _sglang_get_load(base) or {}
+
+
+def _modelctl_docker_logs(profile: str, tail: int) -> list[str]:
+    """Docker 系モード (bonsai / swiftqwen38 / mimo) の直近ログ。"""
+    name = _MODELCTL_DOCKER_CONTAINERS.get(profile, profile)
+    out = _run(["docker", "logs", "--tail", str(tail), name], timeout=10)
+    return out.splitlines()[-tail:]
+
+
+def _get_status_modelctl() -> dict:
+    """modelctl バックエンド (WSL) の状態取得。
+
+    compose 版 get_status() と同じ JSON 形状を返す (フロントは無変更で動く)。
+    container キーには表示用のモデルラベルを入れる (コンテナ実体は無い)。
+    """
+    out: dict = {"containers": [], "active": None}
+    profiles = _load_profiles()
+    running_profile = None
+    for profile, info in profiles.items():
+        running = bool(info.get("running"))
+        if running:
+            running_profile = profile
+        out["containers"].append(
+            {
+                "profile": profile,
+                "container": info.get("label", profile),
+                "running": running,
+                "status": "running" if running else "exited",
+                "uptime_s": None,
+                "uptime_str": modelctl.uptime_str(profile) if running else None,
+                "restart_count": 0,
+                "ready": info.get("ready", False),
+                "engine": info.get("engine"),
+            }
+        )
+
+    out["switching"] = _switching_info()
+
+    if running_profile is None:
+        return out
+
+    info = profiles[running_profile]
+    port = info.get("port")
+    base = f"http://localhost:{port}" if port else ""
+    active: dict = {
+        "profile": running_profile,
+        "service": running_profile,
+        "container": info.get("label", running_profile),
+        "port": port,
+        "api_url": base,
+        "engine": info.get("engine"),
+        "running": True,
+        "status": "running",
+        "uptime_s": None,
+        "uptime_str": modelctl.uptime_str(running_profile),
+        "restart_count": 0,
+        "health": False,
+        "model_name": None,
+        "metrics": {},
+        "logs": [],
+    }
+    if base:
+        hdrs = _modelctl_headers(running_profile)
+        # TabbyAPI は /health が無く /v1/models が応答 (model-ctl.sh の待機判定と同じ)
+        active["health"] = _http_ok(f"{base}/health", timeout=3) or bool(
+            _http_get(f"{base}/v1/models", timeout=3, headers=hdrs)
+        )
+        models = _http_get(f"{base}/v1/models", timeout=3, headers=hdrs)
+        if models:
+            mm = re.search(r'"id"\s*:\s*"([^"]+)"', models)
+            if mm:
+                active["model_name"] = mm.group(1)
+        try:
+            active["metrics"] = _modelctl_metrics(running_profile, info, base)
+        except Exception:
+            active["metrics"] = {}
+        if info.get("engine") in ("llamacpp-docker", "sglang-docker"):
+            active["logs"] = _modelctl_docker_logs(running_profile, 30)
+        else:
+            active["logs"] = modelctl.tail_log(info.get("log", ""), 30)
+    else:
+        active["logs"] = modelctl.tail_log(info.get("log", ""), 30)
+
+    out["active"] = active
+    return out
+
+
 def _container_state(name: str) -> dict:
-    """docker inspect でコンテナ状態を取得する(存在しなければ空 dict)。"""
     out = _run(["docker", "inspect", name])
     if not out:
         return {}
@@ -750,6 +1068,9 @@ def _switching_info() -> dict | None:
 
 def get_status() -> dict:
     """稼働中モデルの状態 + vLLM メトリクスを返す。"""
+    if _is_modelctl():
+        return _get_status_modelctl()
+
     out: dict = {"containers": [], "active": None}
 
     # 各コンテナの稼働状態 (対応表は docker-compose.yml から動的取得)
@@ -910,6 +1231,11 @@ def get_log(profile: str, tail: int = 500) -> dict:
     if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
     p = profiles[profile]
+    if _is_modelctl():
+        # WSL: 起動ログファイル (logs/ctl-*.log) を読む。Docker 系モードだけ docker logs。
+        if p.get("engine") in ("llamacpp-docker", "sglang-docker"):
+            return {"profile": profile, "logs": _modelctl_docker_logs(profile, tail)}
+        return {"profile": profile, "logs": modelctl.tail_log(p.get("log", ""), tail)}
     if profile == "magn":
         cmd = [
             "journalctl",
@@ -943,12 +1269,21 @@ def _start_job(kind: str, profile: str, cmd: list[str]) -> dict:
 
     log_file = f"/tmp/dgxutil_{kind}_{int(time.time())}.log"
     lf = open(log_file, "w")
+    # compose バックエンドは compose ディレクトリを cwd にする (従来どおり)。
+    # modelctl (WSL) はそのパスが存在しないため API ディレクトリを使う。
+    cwd = str(COMPOSE_DIR) if COMPOSE_DIR.is_dir() else str(Path(__file__).resolve().parent)
+    extra: dict = {}
+    if _is_modelctl():
+        # 起動したモデルサーバーを API サービスのセッションから切り離す
+        # (uvicorn 再起動/停止でモデルプロセスを巻き込まないため)
+        extra["start_new_session"] = True
     proc = subprocess.Popen(
         cmd,
         stdout=lf,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
-        cwd=str(COMPOSE_DIR),
+        cwd=cwd,
+        **extra,
     )
     _job = {
         "kind": kind,
@@ -1007,8 +1342,19 @@ def job_status() -> dict:
 
 
 def switch_model(profile: str) -> dict:
-    """モデル切替をバックグラウンド実行する。"""
+    """モデル切替をバックグラウンド実行する。
+
+    modelctl (WSL): 確認プロンプトは出さず、model-ctl.sh の _mc_launch を
+    そのままジョブとして起動する (稼働中の他モデルは自動で排他停止される)。
+    """
     profiles = _load_profiles()
+    if _is_modelctl():
+        if not profiles:
+            raise ValueError(f"{config.MODEL_CTL} からモード一覧を読み込めません")
+        if profile not in profiles:
+            known = ", ".join(sorted(profiles))
+            raise ValueError(f"不明なモード: {profile} (既知: {known})")
+        return _start_job("switch", profile, modelctl.switch_cmd(profile))
     if not profiles:
         raise ValueError(f"{COMPOSE_FILE} からプロファイル付きサービスを読み込めません")
     if profile not in profiles:
@@ -1020,6 +1366,15 @@ def switch_model(profile: str) -> dict:
 def stop_model(profile: str) -> dict:
     """稼働中モデルを停止する(バックグラウンド)。"""
     profiles = _load_profiles()
+    if _is_modelctl():
+        if not profiles:
+            raise ValueError(f"{config.MODEL_CTL} からモード一覧を読み込めません")
+        if profile not in profiles:
+            known = ", ".join(sorted(profiles))
+            raise ValueError(f"不明なモード: {profile} (既知: {known})")
+        if not profiles[profile].get("running"):
+            raise ValueError(f"{profile} は稼働していません")
+        return _start_job("stop", profile, modelctl.stop_cmd(profile))
     if not profiles:
         raise ValueError(f"{COMPOSE_FILE} からプロファイル付きサービスを読み込めません")
     if profile not in profiles:
@@ -1081,6 +1436,29 @@ def get_params(profile: str) -> dict:
     profiles = _load_profiles()
     if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
+    if _is_modelctl():
+        # WSL: 設定形式がエンジンごとに異なる (TabbyAPI yml / Strata JSON / kit .env /
+        # llama.cpp 起動引数) ため、model-ctl.sh の既存アクセサが読む値を表示専用で返す。
+        kv = modelctl.params(profile)
+        labels = {
+            "mode": "モード",
+            "engine": "エンジン",
+            "label": "モデル",
+            "port": "API ポート",
+            "dir": "作業ディレクトリ",
+            "start_script": "起動スクリプト",
+            "weights_ready": "重み導入済み",
+            "running": "稼働中",
+            "context_length": "コンテキスト長",
+            "max_output_tokens": "最大出力トークン",
+            "config_json": "設定 JSON",
+            "model_name": "モデル ID",
+        }
+        params = [
+            {"flag": labels.get(k, k), "value": v, "editable": False}
+            for k, v in kv.items()
+        ]
+        return {"profile": profile, "service": profile, "params": params}
     service = profiles[profile]["service"]
     block = _service_command_lines(service)
     if block is None:
@@ -1136,6 +1514,10 @@ def edit_params(profile: str, updates: dict[str, str]) -> dict:
     vLLM / llama.cpp のパラメータは起動時に確定するため、
     compose の command を書き換えた後に --force-recreate する。
     """
+    if _is_modelctl():
+        # WSL: compose を使わないため編集は未対応 (表示のみ)。フロントも
+        # /api/platform の params_editable=false で保存ボタンを非表示にする。
+        raise ValueError("modelctl バックエンドではパラメータ編集はできません (表示のみ)")
     profiles = _load_profiles()
     if profile not in profiles:
         raise ValueError(f"不明なプロファイル: {profile}")
@@ -1308,6 +1690,49 @@ def _command_has_flag(service: str, flags: list[str]) -> bool:
     return False
 
 
+def _cline_config_modelctl(active: dict) -> dict:
+    """modelctl (WSL) 版の Cline 設定値。
+
+    base URL は WSL 内の実情に合わせて LAN IP を使う (mDNS .local は WSL 内では
+    解決できない — model-ctl.sh の案内と同じ)。API キー・コンテキスト長は
+    model-ctl.sh の既存アクセサ (_mc_mode_key / _mc_mode_ctx_conf) が読んだ値を正本とする。
+    """
+    profile = active["profile"]
+    port = active["port"]
+    kv = modelctl.params(profile)
+    host = kv.get("lan_ip") or socket.gethostname()
+    model_id = active.get("model_name") or kv.get("model_name") or profile
+    key = (kv.get("api_key") or "").strip()
+    if key:
+        api_key = key
+    else:
+        api_key = "認証なし(任意の値でOK)"
+    ctx_raw = (kv.get("context_length") or "").strip()
+    try:
+        ctx = int(ctx_raw)
+    except ValueError:
+        ctx = None
+    mo_raw = (kv.get("max_output_tokens") or "").strip()
+    try:
+        max_out = int(mo_raw)
+    except ValueError:
+        max_out = None
+    table = CLINE_MODEL_TABLE.get(profile, {})
+    return {
+        "api_provider": "OpenAI Compatible",
+        "base_url": f"http://{host}:{port}/v1/" if port else None,
+        "api_key": api_key,
+        "model_id": model_id,
+        "supports_images": bool(table.get("images", False)),
+        "context_recommended": ctx or table.get("context_max"),
+        "context_max": table.get("context_max", ctx),
+        "max_output_recommended": max_out or table.get("max_output_recommended", 8192),
+        "max_output_max": table.get("max_output_max", 32768),
+        "temperature": table.get("temperature", 0.6),
+        "reasoning_effort_options": ["None", "Low", "Medium", "High", "XHigh"],
+    }
+
+
 def get_cline_config() -> dict:
     """稼働中モデルの Cline 設定値を返す。
 
@@ -1322,6 +1747,9 @@ def get_cline_config() -> dict:
     profile = active["profile"]
     service = active["service"]
     port = active["port"]
+
+    if _is_modelctl():
+        return _cline_config_modelctl(active)
 
     # 動的: モデル名・ポート・hostname
     model_id = active.get("model_name") or profile

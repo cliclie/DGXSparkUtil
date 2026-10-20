@@ -1,5 +1,5 @@
 [Unit]
-Description=DGXSparkUtil Monitor API (FastAPI on port 8080)
+Description=DGXSparkUtil Monitor API (FastAPI on port __PORT__)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ Group=__USER__
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 WorkingDirectory=__API_DIR__
 ExecStartPre=/bin/sh -c 'test -x __API_DIR__/venv/bin/python || (cd __API_DIR__ && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
-ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080
+ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port __PORT__
 Restart=always
 RestartSec=5
 StandardOutput=append:__API_DIR__/server.log

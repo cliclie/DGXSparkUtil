@@ -191,12 +191,21 @@ def _read_cpu_temp_c() -> float | None:
 
 
 def _read_gpu_nvidia() -> dict:
-    """nvidia-smi で GPU メトリクスを取得する (DGX Spark / GB10)。"""
+    """nvidia-smi で GPU メトリクスを取得する (DGX Spark / GB10)。
+
+    memory_mode=discrete (WSL2 の RTX 5090 のような分離 VRAM) では、フロントの
+    「VRAM」ゲージと上限表示に使う値を追加で読む。unified (GB10) は従来と
+    同一キー・同一クエリのまま (追加キーを出さない)。
+    """
+    discrete = config.MEMORY_MODE == "discrete"
+    fields = "utilization.gpu,temperature.gpu,power.draw,clocks.sm,pstate"
+    if discrete:
+        fields += ",memory.total,memory.used,clocks.max.sm,power.limit"
     try:
         r = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm,pstate",
+                f"--query-gpu={fields}",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -205,8 +214,9 @@ def _read_gpu_nvidia() -> dict:
         )
         if r.returncode != 0:
             return {}
-        u, t, p, c, ps = [x.strip() for x in r.stdout.split(",")]
-        return {
+        cols = [x.strip() for x in r.stdout.split(",")]
+        u, t, p, c, ps = cols[:5]
+        out = {
             "gpu_vendor": "nvidia",
             "gpu_load_pct": float(u),
             "gpu_temp_c": float(t),
@@ -214,6 +224,20 @@ def _read_gpu_nvidia() -> dict:
             "gpu_clock_mhz": float(c),
             "gpu_pstate": ps,
         }
+        if discrete and len(cols) >= 9:
+            vram_total_mib = float(cols[5])
+            vram_used_mib = float(cols[6])
+            if vram_total_mib > 0:
+                out["vram_total_gib"] = vram_total_mib / 1024.0
+                out["vram_used_gib"] = vram_used_mib / 1024.0
+                out["vram_used_pct"] = vram_used_mib / vram_total_mib * 100.0
+            out["gpu_clock_max_mhz"] = float(cols[7])
+            out["gpu_power_cap_w"] = float(cols[8])
+            # WSL の nvidia-smi は温度上限を公開しない (T.Limit Specification が
+            # N/A / 0) ため、プラットフォーム既定値 (config) を使う
+            if config.GPU_TEMP_CRIT_C is not None:
+                out["gpu_temp_crit_c"] = config.GPU_TEMP_CRIT_C
+        return out
     except (subprocess.SubprocessError, ValueError):
         return {}
 

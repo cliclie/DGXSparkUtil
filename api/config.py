@@ -4,12 +4,18 @@ DGX Spark (GB10 / NVIDIA) と WhitebearATOM2 (R9700 / AMD) の両環境で
 同じコードが動くように、ハード・パス依存の値をここに集める。
 
 検出順:
-1. 環境変数 DGXUTIL_PLATFORM ("dgx-spark" | "atom2") による明示上書き
-2. nvidia-smi が PATH にあれば dgx-spark
-3. amdgpu sysfs (/sys/class/drm/card*/device/gpu_busy_percent) があれば atom2
-4. どちらも無ければ dgx-spark 扱い(nvidia 経路が失敗しても他メトリクスは動く)
+1. 環境変数 DGXUTIL_PLATFORM ("dgx-spark" | "atom2" | "wsl") による明示上書き
+2. WSL2 (/proc/version に microsoft が含まれる) なら wsl
+3. nvidia-smi が PATH にあれば dgx-spark
+4. amdgpu sysfs (/sys/class/drm/card*/device/gpu_busy_percent) があれば atom2
+5. どれも無ければ dgx-spark 扱い(nvidia 経路が失敗しても他メトリクスは動く)
 
+dgx-spark / atom2 は従来どおり (2 の WSL 判定は非 WSL では常に偽)。
 パスは追加で環境変数 DGXUTIL_COMPOSE_DIR / DGXUTIL_RAG_DIR による上書きが可能。
+
+モデル管理のバックエンドは backend キーで分岐する:
+- "compose"  : docker-compose.yml のプロファイル + switch_models.sh (dgx-spark / atom2)
+- "modelctl" : WSL の汎用ランチャー model-ctl.sh を source して切替 (docker 前提なし)
 """
 
 from __future__ import annotations
@@ -29,10 +35,21 @@ def _has_amdgpu() -> bool:
     return bool(list(Path("/sys/class/drm").glob("card[0-9]*/device/gpu_busy_percent")))
 
 
+def _is_wsl() -> bool:
+    """WSL2 実行中か (/proc/version に microsoft)。atom1 / atom2 は物理マシンなので常に偽。"""
+    try:
+        v = Path("/proc/version").read_text().lower()
+    except OSError:
+        return False
+    return "microsoft" in v or "wsl" in v
+
+
 def _detect_platform() -> str:
     forced = os.environ.get("DGXUTIL_PLATFORM", "").strip().lower()
-    if forced in ("dgx-spark", "atom2"):
+    if forced in ("dgx-spark", "atom2", "wsl"):
         return forced
+    if _is_wsl():
+        return "wsl"
     if _has_nvidia():
         return "dgx-spark"
     if _has_amdgpu():
@@ -66,6 +83,30 @@ PLATFORMS: dict[str, dict] = {
         "net_max_mbps": 1000,    # ゲージ上限の既定値 (実リンク速度が取れない時のフォールバック)
         "exclusive_llm_rag": True,
     },
+    # --- WSL2 (Whitebear2026 / RTX 5090) -------------------------------------
+    # 追加専用。dgx-spark / atom2 の値・キーは変更していない (未設定キーは
+    # _cfg() の既定値に落ちるため、既存 2 環境の解決値は従来と同一)。
+    # backend=modelctl: docker-compose を使わず、汎用ランチャー model-ctl.sh
+    # (14 モードを VRAM 排他で切替) を source して切替・状態取得を行う。
+    "wsl": {
+        "label": "Whitebear2026-WSL",
+        # compose 系 API との互換のためキーは持たせる (実体は存在せず、modelctl 経路では参照しない)
+        "compose_dir": "/home/cliclie/llm/compose",
+        "rag_dir": "/home/cliclie/RAG/compose",
+        "gpu_backend": "nvidia",
+        # RAM 82GB + VRAM 32GB の分離型 → atom2 と同じ「RAM」「VRAM」2 ゲージを再利用
+        "memory_mode": "discrete",
+        "net_max_mbps": 1000,
+        "exclusive_llm_rag": False,
+        "backend": "modelctl",
+        "model_ctl": "/home/cliclie/scripts/model-ctl.sh",
+        "rag_enabled": False,     # WSL 側に RAG compose 環境なし → セクション非表示
+        "params_editable": False,  # 設定形式が複数 (yml / json / .env) → 表示のみ
+        # WSL の nvidia-smi は温度上限を公開しない (T.Limit Specification = N/A/0)。
+        # RTX 5090 の GPU サーマルスレッドホルド 95°C をゲージ上限の既定として使う。
+        # (dgx-spark / atom2 ではこのキー未設定 → 従来どおりフロント側既定値 100/110)
+        "gpu_temp_crit_c": 95.0,
+    },
 }
 
 
@@ -91,6 +132,21 @@ NET_MAX_MBPS: int = _cfg("net_max_mbps", 10000)
 EXCLUSIVE_LLM_RAG: bool = bool(_cfg("exclusive_llm_rag", False))
 LABEL: str = _cfg("label", "DGX Spark")
 
+# モデル管理バックエンド: "compose" (dgx-spark / atom2 の既定・従来動作)
+#                      | "modelctl" (WSL: model-ctl.sh を source して切替)
+BACKEND: str = str(_cfg("backend", "compose")).strip().lower()
+# modelctl バックエンドが source する汎用ランチャーのパス
+# (環境変数 DGXUTIL_MODEL_CTL で上書き可。未設定なら空 Path)
+MODEL_CTL: Path = Path(
+    os.environ.get("DGXUTIL_MODEL_CTL", "").strip() or _cfg("model_ctl", "")
+).expanduser()
+RAG_ENABLED: bool = bool(_cfg("rag_enabled", True))
+PARAMS_EDITABLE: bool = bool(_cfg("params_editable", True))
+# GPU 温度ゲージの上限。プラットフォーム既定を持たない環境 (dgx-spark / atom2) は
+# None のまま = 従来どおり metrics が実測上限 (amdgpu sysfs) を、無ければフロントの
+# 既定値 (unified 100 / discrete 110) を使う。
+GPU_TEMP_CRIT_C: float | None = _cfg("gpu_temp_crit_c", None)
+
 # GPU サーマルガード (thermal-guard.service / root 特権はこの unit だけ) が書く
 # 状態ファイル。API は読むだけで、クロック (GB10) / 電力上限 (R9700) を書く権限は持たない。
 THERMAL_STATE_FILE: Path = Path(
@@ -110,6 +166,11 @@ def info() -> dict:
         "exclusive_llm_rag": EXCLUSIVE_LLM_RAG,
         "compose_dir": str(COMPOSE_DIR),
         "rag_dir": str(RAG_DIR),
+        # 追加キー (既存 2 環境では backend=compose / rag_enabled=true /
+        # params_editable=true = 従来どおりの表示・操作)
+        "backend": BACKEND,
+        "rag_enabled": RAG_ENABLED,
+        "params_editable": PARAMS_EDITABLE,
     }
 
 

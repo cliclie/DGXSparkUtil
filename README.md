@@ -37,9 +37,13 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - 詳細は「GB10 サーマルガード」「atom2 サーマルガード」の各節を参照
 
 - 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip) および
-  WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)。
-  プラットフォームは `api/config.py` の自動検出で両環境同一コードで動作する(実装メモ 2026-10-03 参照)。
+  WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)、
+  **Whitebear2026 (WSL2 Ubuntu + NVIDIA RTX 5090 / model-ctl.sh 運用)**。
+  プラットフォームは `api/config.py` の自動検出で全環境同一コードで動作する(実装メモ 2026-10-03 参照)。
   GPU サーマルガードも `api/thermal_guard.sh` の自動判定(clock / power)で両機同一スクリプト(2026-10-17 参照)
+  - WSL2 はモデル管理に docker compose を使わないため、`backend` キーで
+    `compose`(dgx-spark / atom2) と `modelctl`(WSL2: 汎用ランチャー `model-ctl.sh`) を切り替える
+    (「WSL2 モデル切替バックエンド modelctl」節参照)
 - 仕組み: クライアントからブラウザでアクセス → ビジュアル表示 → 値の更新はAPI経由
 
 ## 表示スタイル(ゲージ)
@@ -488,8 +492,17 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
 ```
 
 - ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
-  (テンプレート: `__API_DIR__` / `__USER__` プレースホルダを `install_service.sh` が
+  (テンプレート: `__API_DIR__` / `__USER__` / `__PORT__` プレースホルダを `install_service.sh` が
   sed で置換して `/etc/systemd/system/` にインストール)
+- **ポートの既定は 8080 のまま**。他サービスと競合する環境は `PORT` で上書きする
+  (WSL2 Whitebear2026 は Strata 系が 8080 を使うため **8090** で導入する):
+  ```bash
+  PORT=8090 sudo -E bash /home/cliclie/DGXSparkUtil/api/install_service.sh
+  ```
+- **WSL2 では `thermal-guard.service` を自動でインストールしない**
+  (`/proc/version` に microsoft が含まれるか `DGXUTIL_THERMAL=0` でスキップ。
+  WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため)。
+  dgx-spark / atom2 は従来どおり thermal-guard も有効化する
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
 - ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード）
@@ -2076,4 +2089,123 @@ python3 -m venv /tmp/jsenv && /tmp/jsenv/bin/pip install -q websocket-client
   （operations-ui で承諾済みの挙動）
 - 現行 canvas 版は即時描画だったが、Chart.js 化で **1000ms / easeInOutQuad のアニメが追加**された
   （POLL_MS=2000 と両立。不要なら `animation:false`）
+
+## WSL2 モデル切替バックエンド modelctl (2026-10-21)
+
+Whitebear2026 (WSL2 Ubuntu 26.04 / RTX 5090 32GB) を第 3 の対象機材として導入した。
+**docker compose を新設せず**、既存の汎用ランチャー `~/scripts/model-ctl.sh`
+(RTX 5090 上の 14 モードを VRAM 排他で切替) をそのまま Web UI の切替バックエンドに使う。
+atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.sh` が担う、という対応関係。
+
+### プラットフォーム検出と backend 分岐
+
+- `api/config.py` の検出順を `DGXUTIL_PLATFORM 明示 > WSL2 (/proc/version に microsoft) >
+  nvidia-smi > amdgpu sysfs` にした。**WSL 判定は非 WSL では常に偽**なので
+  dgx-spark / atom2 の検出結果は不変
+- `PLATFORMS["wsl"]` を**追加** (既存 2 エントリのキー・値は変更していない)。
+  `label=Whitebear2026-WSL` / `gpu_backend=nvidia` / `memory_mode=discrete`
+  (RAM 82GB + VRAM 32GB → atom2 と同じ 2 ゲージを再利用) / `net_max_mbps=1000` /
+  `exclusive_llm_rag=False` / **`backend=modelctl`** /
+  `model_ctl=/home/cliclie/scripts/model-ctl.sh` / `rag_enabled=False` /
+  `params_editable=False` / `gpu_temp_crit_c=95.0`
+- 未設定キーは `_cfg()` の既定値に落ちるため、`backend=compose` / `rag_enabled=True` /
+  `params_editable=True` = 既存 2 環境は従来どおりの解決値
+- 上書きフック: `DGXUTIL_PLATFORM` / `DGXUTIL_COMPOSE_DIR` / `DGXUTIL_RAG_DIR` に加え
+  `DGXUTIL_MODEL_CTL` (ランチャーのパス)
+
+### ブリッジ (api/wsl_modelctl_bridge.sh) と modelctl.py
+
+`model-ctl.sh` は **source して関数群を使う**設計なので、本体を 1 行も変更せずに済む。
+
+- ブリッジが `source` 後に関数を**上書き定義して非対話化**する:
+  `_mc_ask(){ return 0; }` (稼働中を停止して切替える確認 = 常に yes)、
+  `_mc_mode_download(){ return 1; }` (重み未導入モードのその場 DL は走らせない。
+  一覧の `ready=false` をフロントが受けて選択・切替を拒否する)
+- サブコマンド `list` / `status` / `switch <mode>` / `stop <mode>` / `unload` / `params <mode>`。
+  `list` は 1 モード 1 行のタブ区切り
+  `mode / label / port / dir / ready / running / engine / log`
+  (14 モードで 0.6 秒。`api/modelctl.py` が 1.5 秒 TTL でキャッシュ)
+- `api/modelctl.py` が **vllm.py の compose 版と同じ形** `{profile: {service, container, port, ...}}`
+  を返し、`api/vllm.py` は `_load_profiles()` の入口と `get_status` / `switch_model` /
+  `stop_model` / `get_log` / `get_params` / `get_cline_config` の 6 箇所で
+  `if _is_modelctl():` 分岐するだけ。**compose 経路のコードは無変更**
+- 切替は既存の `_start_job` (`/api/vllm/job` でポーリング) に `_mc_launch` を渡す。
+  `_mc_launch` が排他停止 → 起動 → `/health` 待機まで内包するため、
+  14 モード固有の判定 (bonsai / mimo の docker inspect、Strata 5 モードの
+  `/v1/models` id による代表集約など) を再実装していない
+- WSL のみ `Popen(start_new_session=True)`: uvicorn 再起動/停止でモデルサーバーを
+  巻き込まない (compose 側は従来どおりセッション継承)
+
+### エンジン種別ごとのメトリクス源 (ログ解析は初期実装)
+
+| モード | engine | 主経路 | ログ解析 |
+|---|---|---|---|
+| `tabby` `swift40` `swift35` `qwen9` | tabbyapi | ログのみ (`/metrics` 無し) | 既存 `_tabbyapi_parse_logs` を**ファイル入力でも再利用** |
+| `strata15` `strataS4` `strataU4` `strataq3` `strataC1` | strata | `/metrics/prometheus` + `/slots` | `[strata] done:` / `thinking:` / `answering:` 行 |
+| `llmjp` | llamacpp | `/slots` (`--metrics` 未指定) | `print_timing` 行 |
+| `exl` | exllama | `/health` の累計カウンタ差分 | — |
+| `bonsai` `swiftqwen38` `mimo` | llamacpp-docker / sglang-docker | 既存の HTTP + `docker logs` をそのまま利用 | 同左 |
+
+- **Strata は `serve/server.py` が `/metrics/prometheus` を llama.cpp と同名系列
+  (`llamacpp:prompt_tokens_seconds` 他) で公開している**ため、既存 `_llamacpp_metrics` が
+  そのまま流用できる。加えてログの `expert cache NN.N% hit` を
+  `expert_cache_hit_pct` (Strata 独自のキャッシュ命中率) として補完する
+- **TabbyAPI の起動ログ `logs/ctl-*.log` は docker logs と同じ
+  `HH:MM:SS.mmm LEVEL:` 接頭辞**だった (loguru 実ファイルは
+  `YYYY-MM-DD HH:MM:SS.mmm | LEVEL |`)。両形式を受理する
+  `_TABBY_ENTRY_RE_ANY` を追加し、`_tabbyapi_metrics(base, container, log_text=None,
+  headers=None)` に引数を**末尾追加** (省略時は従来どおり `docker logs`)
+- llama.cpp は `--metrics` 未有効のため `/slots` + ログの
+  `prompt eval time / eval time / total time` 行から prefill/decode・TTFT・E2E を算出
+- ExLlamaV3 kit は `/health` の `prompt_tokens_total` / `completion_tokens_total` を
+  `vllm:*_total` に寄せて既存 `_tps_of` のカウンタ差分機構を再利用
+- WSL の TabbyAPI は `/v1/models`・`/v1/model` に API キーが必要
+  (`model-ctl.sh` の `_mc_mode_key` が正本)。ブリッジの `params` が返す
+  `api_key` を curl ヘッダとして渡す (`headers=None` なら無認証 = 従来動作)
+
+### フロント / 表示
+
+- `/api/platform` に `backend` / `rag_enabled` / `params_editable` を追加
+- `rag_enabled=false` → RAG セクションを非表示 + `/api/rag/status` の poll を省略
+  (WSL に RAG compose は無い)
+- `params_editable=false` → 「保存してコンテナを再作成」ボタンを非表示。
+  `/api/vllm/params` は `model-ctl.sh` が読む値 (コンテキスト長・ポート・設定 JSON 等) を
+  **`editable:false` で表示のみ**返す。`edit_params` は modelctl では 409 を返す
+- `backend=modelctl` → 見出しを「モデル (model-ctl.sh)」、「コンテナ状態」→「状態」
+- モード一覧の `ready=false` は「重み未導入」表示 + 選択不可 (切替ボタンも不可)
+- `api/metrics.py` の nvidia 経路は `memory_mode=discrete` のときだけ
+  `memory.total/used`, `clocks.max.sm`, `power.limit` を追加取得して
+  `vram_*` / `gpu_clock_max_mhz` / `gpu_power_cap_w` を出す
+  (unified = GB10 はクエリ・キーとも従来どおり)。WSL の nvidia-smi は温度上限を
+  公開しないため `gpu_temp_crit_c` はプラットフォーム既定値 95°C を使う
+
+### 検証 (Whitebear2026 実機 2026-10-21)
+
+- `/api/platform` = `wsl` / `backend=modelctl`。`/api/metrics` で
+  RAM 82.48 GiB・**VRAM 31.84 GiB 中 2.10 GiB**・GPU 37°C / 49.7W / 上限 600W / 3090MHz を実測
+- `swift40` (TabbyAPI) へ切替 → 19 秒で job 完了。実リクエスト後に
+  `e2e 4.23 s / ttft 0.30 s / prefill 226.7 tok/s / decode 76.4 tok/s / kv_cache 0.14%`
+  をログ解析で取得 (`/v1/model` の `cache_size 262144` を反映)
+- `swift40` → `strataq3` へ切替 → **稼働中 TabbyAPI を自動排他停止**してから 82 秒で起動完了。
+  `/metrics/prometheus` + `/slots` + ログで
+  `requests_running 1 / kv_cache 0.026% / e2e 5.0 s / decode 77.5 tok/s / expert_cache_hit 83.4%`、
+  `model_name=swift-1.5-iq3_s` を実測
+- `/api/vllm/stop` (strataq3) → 15 秒で停止成功。`/api/vllm/log` は `logs/ctl-*.log` の
+  末尾行を返す。`/api/vllm/cline` は LAN IP + API キー + ctx 262144 を返す
+  (WSL 内は mDNS 解決不可のため `hostname.local` ではなく LAN IP。`model-ctl.sh` の案内と同じ)
+- **model-ctl.sh 無変更**: `git -C ~/Whitebear2026-WSL2 status --porcelain scripts/` が空、
+  `~/scripts/model-ctl.sh` の mtime も運用前そのまま (対話 CLI `llm` / `tabby` / `unloadllm` に影響なし)
+
+### atom1 / atom2 との互換性 (回帰実測)
+
+改修前 (HEAD) と改修後のコードを同一環境で突き合わせた
+(`DGXUTIL_PLATFORM=dgx-spark` / `atom2` + ダミー `DGXUTIL_COMPOSE_DIR`):
+
+- 一致: `_load_profiles()` のプロファイル表、`SWITCH_SCRIPT` / `COMPOSE_FILE` のパス、
+  `get_params()`、`_tabbyapi_parse_logs()`、`_llamacpp_metrics()`、`_sglang_metrics()`、
+  `get_status()` のキーと `containers`
+- 差分は `/api/platform` の**追加 3 キーのみ**
+  (`backend="compose"` / `rag_enabled=true` / `params_editable=true` — いずれも従来動作)
+- `install_service.sh` の `PORT` 既定値は 8080、thermal-guard は WSL 以外では従来どおり
+  無条件に enable + restart。unit の `__PORT__` は既定レンダで 8080 になる
 
