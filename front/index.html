@@ -123,7 +123,9 @@ section > h2 {
 .gauge .gtitle .gdot { display: inline-block; width: 12px; height: 12px; margin-right: 6px; }
 .gauge .gcanvas { position: relative; height: 76px; } /* 96px → 80% (4の倍数) */
 .gauge.dual .gcanvas { height: 56px; } /* 二重メーター: 2行テキストをゲージ下に置くため描画領域を縮小 (単一メーターとカード高さを揃える) */
-.gauge .gcanvas canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+/* Chart.js (responsive:false) が canvas に論理サイズの inline style を付与するため width/height は
+   指定しない (position/left/top は .gval と .gval-dual-out の配置基準なので維持) */
+.gauge .gcanvas canvas { position: absolute; left: 0; top: 0; }
 .gauge .gval {
   position: absolute;
   left: 0;
@@ -621,30 +623,94 @@ function viewArrays() {
   };
 }
 
-// ------------------------------------------------------------- 半円ゲージ
+// ------------------------------------------------------- 半円ゲージ (Chart.js doughnut)
 const ZONE_GREEN = "#3fb950";
 const ZONE_ORANGE = "#d29922";
 const ZONE_RED = "#f85149";
 const ARC_BG = "rgba(48,54,61,.55)";
 // README 仕様のゾーン閾値: 緑 < 60%、オレンジ 60〜85%、赤 > 85%
 const ZONE_STOPS = [0.6, 0.85];
+// リング間 1px の擬似余白の色 = カード背景 var(--card)。canvas 描画は CSS var を解決できないため実値
+const CARD_BG = "#161b22";
+// canvas の論理サイズ (responsive:false では属性サイズが論理サイズ)。カード 176px − padding 12×2
+// − border 1×2 = 150px 幅、高さは .gcanvas と同じ 76px (単一) / 56px (dual)
+const GW = 150, GH_SINGLE = 76, GH_DUAL = 56;
+// layout.padding {top:4, bottom:2} での Chart.js 実効外径 (高さ制約 = canvas 高さ − top − bottom)。
+// canvas 版の R = min(w/2, h) - 6 = 69 (単一) / 50 (dual) に対応
+const GAUGE_ROUT = { single: 70, dual: 50 };
+// リング厚み = weight 配分 (1 weight ≈ 1px)。index 0 = 最外周の閾値ゾーン帯
+const W_ZONE = 3, W_VAL_SINGLE = 11, W_VAL_OUTER = 8, W_VAL_INNER = 6;
 
 function fmtGiB(gib) {
   if (gib >= 1024) return (gib / 1024).toFixed(2) + " TiB";
   return Math.round(gib) + " GiB";
 }
 
+// 値 → アーチ %。canvas 版の Math.max(0, Math.min(1, val/max)) と同一 (null は 0 = アーチなし)
+function toArcPct(v, max) {
+  return v == null ? 0 : Math.max(0, Math.min(100, (v / max) * 100));
+}
+
+// 単一ゲージのアーチ色 (canvas 版 Gauge._zoneColor と同一の閾値判定)
+function zoneColor(v, def) {
+  const frac = Math.max(0, Math.min(1, v / def.max));
+  const stops = def.zoneStops || ZONE_STOPS;
+  if (frac > stops[1]) return ZONE_RED;
+  if (frac > stops[0]) return ZONE_ORANGE;
+  return ZONE_GREEN;
+}
+
+// 1 weight ≈ 1px になる穴比率 (canvas 版の値アーチ内縁 rA - lwA/2 相当)
+function gaugeCutout(dual) {
+  const R = dual ? GAUGE_ROUT.dual : GAUGE_ROUT.single;
+  const sum = W_ZONE + (dual ? W_VAL_OUTER + W_VAL_INNER : W_VAL_SINGLE);
+  return Math.round(((R - sum) / R) * 100) + "%";
+}
+
+// dataset 1 本 = 1 同心リング (index 0 = 最外周)。
+//   ds0 閾値ゾーン帯 (緑/橙/赤ベタ・borderWidth:0)
+//   ds1 単一=値アーチ (ゾーン色) / dual=外側 A (固定色)
+//   ds2 dual のみ 内側 B (固定色)
+// 値リングの残り分 (100-値) は ARC_BG = canvas 版の背景アーチ。
+// 値リングの borderWidth:1 + borderColor=CARD_BG がリング間 1px の擬似余白 (operations-ui 準拠)。
+// spacing はリング端が引っ込むため不使用。
+function gaugeDatasets(def, v) {
+  const s = def.zoneStops || ZONE_STOPS;
+  const ds = [{
+    data: [s[0] * 100, (s[1] - s[0]) * 100, (1 - s[1]) * 100],
+    backgroundColor: [ZONE_GREEN, ZONE_ORANGE, ZONE_RED],
+    borderWidth: 0,
+    weight: W_ZONE,
+  }];
+  if (def.dual) {
+    const a = v ? v.a : null, b = v ? v.b : null;
+    const pa = toArcPct(a, def.max), pb = toArcPct(b, def.max);
+    ds.push({ data: [pa, 100 - pa],
+      backgroundColor: [a == null ? ARC_BG : def.colorA, ARC_BG],
+      borderWidth: 1, borderColor: CARD_BG, weight: W_VAL_OUTER });
+    ds.push({ data: [pb, 100 - pb],
+      backgroundColor: [b == null ? ARC_BG : def.colorB, ARC_BG],
+      borderWidth: 1, borderColor: CARD_BG, weight: W_VAL_INNER });
+  } else {
+    const p = toArcPct(v, def.max);
+    ds.push({ data: [p, 100 - p],
+      backgroundColor: [v == null ? ARC_BG : zoneColor(v, def), ARC_BG],
+      borderWidth: 1, borderColor: CARD_BG, weight: W_VAL_SINGLE });
+  }
+  return ds;
+}
+
 class Gauge {
   constructor(id, def) {
     this.def = def;
-    this.ctx = document.getElementById(id).getContext("2d");
-    const wrap = document.getElementById(id).parentElement; // .gcanvas
+    const el = document.getElementById(id);
+    const wrap = el.parentElement; // .gcanvas
     const card = wrap.parentElement; // .gauge
     this.cardEl = card; // 項目未提供時の非表示制御用
     this.valEl = document.createElement("div");
     this.subEl = card.querySelector(".gsub");
     if (def.dual) {
-      // 二重メーター: 80% 縮小後の canvas (150×60) 内で 2 行テキストが内側アーチと交差するため
+      // 二重メーター (150×56): 2 行テキストが内側リングと交差するため
       // 値表示はゲージ下 (canvas 外) に配置する
       this.valEl.className = "gval-dual-out";
       card.insertBefore(this.valEl, this.subEl);
@@ -652,6 +718,24 @@ class Gauge {
       this.valEl.className = "gval";
       wrap.appendChild(this.valEl);
     }
+    // 半円ゲージ = doughnut の circumference:180 / rotation:-90 (operations-ui 準拠)。
+    // responsive:false + canvas 属性サイズ固定: responsive:true はコンテナ計測が効かず
+    // canvas が既定 300px 幅のまま右へはみ出す (operations-ui で実測済み)
+    this.chart = new Chart(el, {
+      type: "doughnut",
+      data: { datasets: gaugeDatasets(def, null) },
+      options: {
+        responsive: false,
+        circumference: 180,
+        rotation: -90,
+        cutout: gaugeCutout(!!def.dual),
+        // 頂部/下端の余白。Chart.js の半円 doughnut は中心 y = canvas 高さ − padding.bottom になる
+        // (offsetY=0.5 の効果)。canvas 版の cy = h - 2 に一致させ、外径も R = 69/50 に揃える
+        layout: { padding: { top: 4, bottom: 2 } },
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        animation: { duration: 1000, easing: "easeInOutQuad" },
+      },
+    });
     this._last = null;
   }
   set(v, m) {
@@ -676,73 +760,16 @@ class Gauge {
     this.subEl.textContent = this.def.sub ? this.def.sub(m) : "";
   }
   render(v) {
-    const cv = this.ctx.canvas;
-    const dpr = window.devicePixelRatio || 1;
-    const w = cv.clientWidth, h = cv.clientHeight;
-    if (w === 0 || h === 0) return;
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
-      cv.width = Math.round(w * dpr);
-      cv.height = Math.round(h * dpr);
-    }
-    const ctx = this.ctx;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    const cx = w / 2;
-    const cy = h - 2;
-    const dual = !!this.def.dual;
-    const R = Math.min(w / 2, h) - 6;   // ゾーン帯の外半径 (コンテナ内に収まる)
-    // アーチの半径/厚み (dual: 外側=A / 内側=B)
-    // 二重メーターの 2 行値はゲージ下 (canvas 外) に表示するため、内外アーチの間隔は 1px に縮小 (テキスト交渉なし)
-    const gapAB = 1;
-    const lwA = Math.max(8, R * 0.16);
-    const rA = R - lwA / 2 - 4;
-    const lwB = dual ? Math.max(6, R * 0.12) : 0;
-    const rB = dual ? rA - lwA / 2 - lwB / 2 - gapAB : 0;
-    // 背景アーチ
-    ctx.beginPath();
-    ctx.arc(cx, cy, rA, Math.PI, 2 * Math.PI);
-    ctx.strokeStyle = ARC_BG;
-    ctx.lineWidth = lwA;
-    ctx.stroke();
-    if (dual) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, rB, Math.PI, 2 * Math.PI);
-      ctx.strokeStyle = ARC_BG;
-      ctx.lineWidth = lwB;
-      ctx.stroke();
-    }
-    const a = dual ? v.a : v;
-    const b = dual ? v.b : null;
-    if (a == null && b == null) return;
-    // 色ゾーン帯 (細い外側リング)
-    const stops = this.def.zoneStops || ZONE_STOPS;
-    const zr = R - 1.5;
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = ZONE_GREEN;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI, Math.PI * (1 + stops[0])); ctx.stroke();
-    ctx.strokeStyle = ZONE_ORANGE;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[0]), Math.PI * (1 + stops[1])); ctx.stroke();
-    ctx.strokeStyle = ZONE_RED;
-    ctx.beginPath(); ctx.arc(cx, cy, zr, Math.PI * (1 + stops[1]), 2 * Math.PI); ctx.stroke();
-    // 値アーチ (dual は固定色: 外側=A / 内側=B、単一はゾーン色)
-    const arc = (val, radius, lw, color) => {
-      if (val == null) return;
-      const frac = Math.max(0, Math.min(1, val / this.def.max));
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, Math.PI, Math.PI * (1 + frac));
-      ctx.strokeStyle = color;
-      ctx.lineWidth = lw;
-      ctx.stroke();
-    };
-    arc(a, rA, lwA, dual ? this.def.colorA : this._zoneColor(a));
-    if (dual) arc(b, rB, lwB, this.def.colorB);
-  }
-  _zoneColor(v) {
-    const frac = Math.max(0, Math.min(1, v / this.def.max));
-    const stops = this.def.zoneStops || ZONE_STOPS;
-    if (frac > stops[1]) return ZONE_RED;
-    if (frac > stops[0]) return ZONE_ORANGE;
-    return ZONE_GREEN;
+    // dataset オブジェクトは保持し data / backgroundColor だけ書き換える。
+    // datasets を丸ごと差し替えると Chart.js は新規データとみなし毎回 0 からアニメする
+    // (operations-ui「CPU負荷メーターの Chart.js 移植」で実測済みの教訓)
+    const nds = gaugeDatasets(this.def, v);
+    const cds = this.chart.data.datasets;
+    cds.forEach((d, i) => {
+      d.data = nds[i].data;
+      d.backgroundColor = nds[i].backgroundColor;
+    });
+    this.chart.update();
   }
 }
 
@@ -831,7 +858,7 @@ function buildHostCards() {
       : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
     return `<div class="gauge${d.dual ? " dual" : ""}"${d.bg ? ` style="background:${d.bg}"` : ""}>
        <div class="gtitle">${dots}${d.title}</div>
-       <div class="gcanvas"><canvas id="${d.id}"></canvas></div>
+       <div class="gcanvas"><canvas id="${d.id}" width="${GW}" height="${d.dual ? GH_DUAL : GH_SINGLE}"></canvas></div>
        <div class="gsub"></div>
      </div>`;
   }).join("") + VINFO_CARD;
@@ -956,8 +983,10 @@ document.querySelectorAll("#range-btns button").forEach((btn) => {
 });
 
 // ------------------------------------------------------------- タブ切替 (システム / モデル)
-// 非表示タブ内の canvas は clientWidth=0 のため Gauge.render() がスキップされる。
-// システムタブへ戻るときはゲージのキャッシュ(_last)を無効化して描画し直し、Chart.js はサイズを再計算する。
+// 非表示タブ (display:none) 中のゲージは値が変わっても chart.update() が走るだけで視覚的に反映されない。
+// システムタブへ戻るときはゲージのキャッシュ(_last)を無効化して全ゲージを update() し直す。
+// ゲージは responsive:false (canvas 属性サイズが論理サイズ) なのでサイズ復元は不要で、
+// line の mainChart は responsive:true のため resize() が必要。
 function redrawSystemTab() {
   if (!lastMetrics) return;
   for (const g of gages) g._last = null;
