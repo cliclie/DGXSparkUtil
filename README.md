@@ -2194,7 +2194,9 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   `/api/vllm/params` は `model-ctl.sh` が読む値 (コンテキスト長・ポート・設定 JSON 等) を
   **`editable:false` で表示のみ**返す。`edit_params` は modelctl では 409 を返す
 - `backend=modelctl` → 見出しを「モデル (model-ctl.sh)」、「コンテナ状態」→「状態」
-- モード一覧の `ready=false` は「重み未導入」表示 + 選択不可 (切替ボタンも不可)
+- モード一覧の `ready=false`（重み未導入）は **モデル名を灰色 (`--muted`) にして**導入済みと区別し、
+  「重み未導入」 suffix + 選択不可（切替ボタンも不可）にする。compose 環境は `ready` を
+  返さないためクラスが付かず、表示は従来どおり
 - `api/metrics.py` の nvidia 経路は `memory_mode=discrete` のときだけ
   `memory.total/used`, `clocks.max.sm`, `power.limit` を追加取得して
   `vram_*` / `gpu_clock_max_mhz` / `gpu_power_cap_w` を出す

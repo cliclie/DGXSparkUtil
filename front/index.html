@@ -265,6 +265,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .model-item.current .meta { color: var(--green); }
 .model-item.stopping .meta,
 .model-item.switching .meta { color: var(--red); }
+/* 重み未導入 (modelctl / WSL2): モデル名を灰色にして導入済みと区別する。
+   選択・切替は不可 (makeModelItem / updateSwitchButtons で制御)。
+   compose 環境 (atom1 / atom2) は containers に ready を出さないため
+   このクラスは付与されず、表示は従来どおり。 */
+.model-item.not-ready { cursor: default; }
+.model-item.not-ready .name { color: var(--muted); }
 .job-log {
   background: #010409;
   border: 1px solid var(--border);
@@ -1213,7 +1219,8 @@ function makeModelItem(c, st, sw) {
   const notReady = c.ready === false;
   if (notReady && !isTarget) meta = (meta ? meta + "・" : "") + "重み未導入";
   const div = document.createElement("div");
-  div.className = "model-item" + (cls ? " " + cls : "") + (c.profile === selectedProfile ? " selected" : "");
+  div.className = "model-item" + (cls ? " " + cls : "") + (notReady ? " not-ready" : "") +
+    (c.profile === selectedProfile ? " selected" : "");
   div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
   div.onclick = () => {
     if (notReady) return;
