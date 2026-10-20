@@ -1972,10 +1972,14 @@ GB10 では `thermal_guard.sh` の clock 経路(`loop_clock`)は**ロジック�
 - CSS は `.gauge .gcanvas canvas` の `width:100%/height:100%` を削除（Chart.js が inline style で
   論理 px を指定するため）。`position:absolute; left:0; top:0` は `.gval` の配置基準として維持
 
-### 検証（headless Chrome 実測）
+### 検証 1: 描画の実測（headless Chrome）
 
-この環境に node はなく `google-chrome` があるため、`--headless=new --dump-dom` で iframe 経由に
-稼働中のページへ eval を注入し、chart 内部を直接実測した（検証用 HTML は検証後に削除）:
+この環境に node はなく `google-chrome` (155.0.8059.84) があるため、稼働中のページへ eval を注入し
+chart 内部を直接実測した。初回は `--headless=new --dump-dom` で iframe 経由に注入する形で行った
+（検証用 HTML は検証後に削除）。ただし**この環境では iframe の `onload` が発火せず JSON が取り
+出せない**ことが後続セッションで判明したため、それ以降の再検証はすべて **CDP
+（`--remote-debugging-port` + websocket の `Runtime.evaluate`）** に切り替えている
+（再現手順とハマりどころは「検証 3」にまとめた）。
 
 - **canvas 属性 / inline style**: 単一 `150×76`・dual `150×56` が全 10 枚に付与されることを確認
   （`responsive:true` はコンテナ計測が効かず 300px 固定で右へはみ出す — operations-ui の教訓どおり）
@@ -1996,6 +2000,73 @@ GB10 では `thermal_guard.sh` の clock 経路(`loop_clock`)は**ロジック�
   `g-gpu-clock` max 2350 + `zoneStops` 標準（`data [60,25,15]`）が `data` に反映されることを実測。
   GB10 の `/api/metrics` は `vram_*` を返さないため `g-vram` は従来の missing 機構で非表示
   （Chart.js 化とは無関係な既存挙動）
+
+### 検証 2: 移植前 (c9125f1) との寸法回帰比較（2026-10-20）
+
+「単一 137px / dual 147.6px の 10.6px 差が移植で入ったものか」を切り分けるため、
+`git show c9125f1:front/index.html`（canvas 直描画版）を `http://localhost:8099` に配信し、
+新版（8080）と同じ CDP スクリプトで `getBoundingClientRect()` を照合した。**判定 24 項目 ALL PASS**。
+
+| 実測項目 | 移植前 c9125f1 | 移植後（現行） | 差分 |
+|---|---|---|---|
+| カード高さ 単一 9 枚 | 137 | 137 | 0.0 |
+| カード高さ dual 2 枚（`g-disk-io` / `g-net`） | 147.6 | 147.6 | 0.0 |
+| `.gtitle` | 17 | 17 | 0.0 |
+| `.gcanvas`（単一 / dual） | 76 / 56 | 76 / 56 | 0.0 |
+| `.gval-dual-out`（dual のみ） | 28.6 | 28.6 | 0.0 |
+| `.gsub` | 16（`g-gpu-load` のみ 14） | 16（同） | 0.0 |
+
+**単一と dual の 10.6px 差は移植前から同じ**（dual は `.gcanvas` が 56px に縮む代わりに
+`.gval-dual-out` 28.6px がゲージ下へ出る）。CSS 上 `.gauge.dual .gcanvas{height:56px}` と
+`.gval-dual-out` は今回の変更で無変更であり、**Chart.js 移植はカード外寸を一切変えていない**ことを
+実測で確定した。あわせて新版側でも canvas 属性・options・リング半径と中心、タブ復帰後の角度収束、
+atom1/atom2 の枠線着色 7 ケース、ヘッダ解決色 `rgb(154,123,31)`（= `--thr-yellow` `#9a7b1f`）を再確認した。
+
+### 検証 3: CDP 方式の再現手順とハマりどころ
+
+```bash
+# 1) 移植前を 8099 で配信。index.html は chart.umd.js を相対参照するので /static/ 配置が必須
+#    (それ以外だと 404 → Chart 未定義で落ちる)
+mkdir -p /tmp/oldfront/static && cd ~/DGXSparkUtil
+git show c9125f1:front/index.html \
+  | sed 's|const API = "";|const API = "http://localhost:8080";|' > /tmp/oldfront/index.html
+cp front/chart.umd.js front/meter-dgx.ico /tmp/oldfront/static/
+(nohup python3 -m http.server 8099 --directory /tmp/oldfront >/tmp/hs.log 2>&1 &)
+
+# 2) CDP 付き headless Chrome を起動 (--remote-allow-origins=* が必須。* はクォートする)
+(nohup google-chrome --headless=new --disable-gpu --no-sandbox \
+   --remote-debugging-port=9333 '--remote-allow-origins=*' \
+   --user-data-dir=/tmp/cud >/tmp/cdp.log 2>&1 &)
+
+# 3) 計測スクリプトで新版(8080) → 旧版(8099) → 新版を順に実測し PASS/FAIL を印字
+python3 -m venv /tmp/jsenv && /tmp/jsenv/bin/pip install -q websocket-client
+(nohup /tmp/jsenv/bin/python -u /tmp/verify_gauge.py > /tmp/gauge_report.txt 2>&1 &)
+```
+
+※ `verify_gauge.py` はリポジトリ外の使い捨てスクリプト（`/json/list` で page ターゲットを取り、
+`Runtime.evaluate` で `gages[]` の `chart.data.datasets` / `getDatasetMeta().data`（`innerRadius`
+`outerRadius` `x` `y` `circumference` `startAngle` `endAngle`）と `cardEl.getBoundingClientRect()`
+を文字列化して返すだけ）。旧版側は `chart` を持たない（canvas 直描画）ので、寸法比較は
+`document.querySelectorAll("#tab-system .gauge")` の `.gtitle` / `.gcanvas` / `.gval-dual-out` /
+`.gsub` の高さを同じ式で読めばよい。
+
+はまった点（次回セッション向け）:
+
+- **`--remote-allow-origins=*` がないと WS handshake が 403**。Chrome 155 は既定で DevTools への
+  Origin チェックを行う（`Rejected an incoming WebSocket connection from the http://127.0.0.1:9333
+  origin`）。`/json/new` は GET 不可で **PUT** が必要
+- **`Runtime.evaluate` の戻り値は `result.result.value` にネスト**している
+- **navigate 直後は 8〜9 秒の実時間待機**が必要。仮想時間待機だとコンテキスト未確立で evaluate が
+  空を返す
+- **JS の `Array.join()` 後は真偽値が小文字 `"false"`**。Python 側 `str()` 想定の `"False"` と
+  比較すると、設定が正しくても誤 FAIL する
+- **`Math.round(r*10)/10` は 67.0 を `"67"` と文字列化**する。期待値を `"67.0-70.0"` にすると
+  同じく誤 FAIL（実測は一致していた）
+- 計測行の**列違い**で `float('150x76')` の ValueError を踏んだ（カード高さは canvas 属性の別列）。
+  判定式は「値が正しいか」だけでなく「どの列を見ているか」も照合する
+- **`pkill -f 'remote-debugging-port=9333'` は自爆する**（自分のコマンドラインにも同じ文字列が
+  入り、シェルごと SIGTERM で終わる）。落とすなら `fuser -k 9333/tcp 8099/tcp`
+- **stdout はファイルリダイレクト時ブロックバッファ**。進捗を確認しながら待つなら `python -u`
 
 ### 既知のトレードオフ
 
