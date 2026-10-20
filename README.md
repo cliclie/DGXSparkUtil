@@ -2217,6 +2217,13 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   (WSL 内は mDNS 解決不可のため `hostname.local` ではなく LAN IP。`model-ctl.sh` の案内と同じ)
 - **model-ctl.sh 無変更**: `git -C ~/Whitebear2026-WSL2 status --porcelain scripts/` が空、
   `~/scripts/model-ctl.sh` の mtime も運用前そのまま (対話 CLI `llm` / `tabby` / `unloadllm` に影響なし)
+- **systemd 導入後の再検証 (2026-10-21 05:33)**: `dgx-spark-api.service` (system.slice /
+  `LimitNOFILE=1048576` / `KillMode=process`) 経由で `swift40` へ切替 → `job success=True`。
+  リクエスト後に `e2e 1.56 s / ttft 0.21 s / prefill 300 tok/s / decode 162.8 tok/s /
+  kv_cache 0.108%` をログ解析で取得。`MainPID` を kill して自動再起動 (Restart=always) しても
+  **稼働中 TabbyAPI は生存** (api=200 / model health=200) を実測
+- 稼働時間は起動ログの **ファイル名 `ctl-YYYYMMDD_HHMMSS.log`** (固定名ログは birth time) から
+  算出する。mtime は追記で進むため採用しない (実測: 初版はリクエストのたびに 00:00:00 に戻った)
 
 ### atom1 / atom2 との互換性 (回帰実測)
 

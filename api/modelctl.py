@@ -11,8 +11,11 @@ atom1 (dgx-spark) / atom2 の compose バックエンド (docker-compose.yml + s
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 import config
@@ -159,22 +162,46 @@ def read_log_text(path: str, tail: int = 300) -> str:
     return "\n".join(tail_log(path, tail))
 
 
+_CTL_LOG_NAME_RE = re.compile(r"ctl-(\d{8})_(\d{6})\.log$")
+
+
+def _log_start_ts(log: str) -> float | None:
+    """起動ログからサーバーの起動時刻 (epoch) を求める。
+
+    mtime はログ行が追記されるたびに進むため起動時刻には使えない。
+    1. model-ctl.sh の起動ログ名 `ctl-YYYYMMDD_HHMMSS.log` (確定値)
+    2. ファイルの birth time (llama-server.log など固定名の場合はこれに従う)
+    3. ctime
+    """
+    name = Path(log).name
+    m = _CTL_LOG_NAME_RE.search(name)
+    if m:
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").timestamp()
+        except ValueError:
+            pass
+    try:
+        st = os.stat(log)
+    except OSError:
+        return None
+    for attr in ("st_birthtime", "st_ctime"):
+        v = getattr(st, attr, None)
+        if v:
+            return float(v)
+    return None
+
+
 def uptime_str(mode: str) -> str | None:
-    """起動ログファイルの mtime から稼働時間文字列を算出する (docker inspect 代替)。
+    """起動ログの作成時刻から稼働時間文字列を算出する (docker inspect 代替)。
 
     稼働中でない場合は None。model-ctl.sh は起動のたびに logs/ctl-<ts>.log を
-    新規作成するため、その mtime が起動時刻になる。
+    新規作成するため、その時刻 (ファイル名 or birth time) が起動時刻になる。
     """
     p = profiles().get(mode)
     if not p or not p["running"]:
         return None
-    log = p.get("log") or ""
-    f = Path(log) if log else None
-    if not f or not f.is_file():
-        return None
-    try:
-        started = f.stat().st_mtime
-    except OSError:
+    started = _log_start_ts(p.get("log") or "")
+    if started is None:
         return None
     secs = int(max(0.0, time.time() - started))
     return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
