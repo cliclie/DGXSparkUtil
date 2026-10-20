@@ -2197,6 +2197,15 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
 - モード一覧の `ready=false`（重み未導入）は **モデル名を灰色 (`--muted`) にして**導入済みと区別し、
   「重み未導入」 suffix + 選択不可（切替ボタンも不可）にする。compose 環境は `ready` を
   返さないためクラスが付かず、表示は従来どおり
+- **P-State の色分けに `P5` / `P7` を追加**（黄 = 中間状態）。実装メモ(2026-09-03) の
+  分類は GB10 で観測される P0 / P2 / P3 / P8 / P12 / P15 のみで、GeForce (RTX 5090) で
+  頻出する P5 が「それ以外」に落ちて**赤（異常に見える）**だった。
+  GB10 / R9700 では P5・P7 が観測されないため既存環境の表示は実質不変
+  - 併せて調査: ダッシュボードの P-State が `nvidia-smi` と「違う」ように見える件は、
+    同時刻サンプル 12 回で全一致（`/api/metrics` は都度 `nvidia-smi` を叩く即値・ラグ 0.0 秒）。
+    差が出る原因は (1) フロントの 2 秒ポーリング vs 打った瞬間の値、
+    (2) `nvidia-smi` 実行自体が GPU を起こす (アイドル 20 秒後の初回サンプルが P5 に戻った)、
+    (3) ブラウザが裏タブ時の `setInterval` 抑止 で、P8 / P5 は秒刻みで交互していた
 - `api/metrics.py` の nvidia 経路は `memory_mode=discrete` のときだけ
   `memory.total/used`, `clocks.max.sm`, `power.limit` を追加取得して
   `vram_*` / `gpu_clock_max_mhz` / `gpu_power_cap_w` を出す

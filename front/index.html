@@ -1823,7 +1823,10 @@ setInterval(() => {
 }, 1000);
 
 // ------------------------------------------------------------- P-State(タイトルの現在日時の右)
-// P0=緑 / P2・P3・P8・P12・P15=黄 / それ以外=赤
+// P0=緑 / P2・P3・P5・P7・P8・P12・P15=黄 / それ以外=赤
+//   P5・P7 は GeForce (WSL2 の RTX 5090) で頻出する中間状態。追加前は「それ以外」に
+//   落ちて赤 (異常に見える) だった (実測: アイドルでも P8 と P5 が秒刻みで交互)。
+//   GB10 / R9700 では P5・P7 は観測されないため既存環境の表示は実質不変。
 function renderPstate(m) {
   const el = document.getElementById("pstate");
   if (!m.gpu_pstate) {
@@ -1834,7 +1837,7 @@ function renderPstate(m) {
   el.style.color =
     m.gpu_pstate === "P0"
       ? "var(--green)"
-      : ["P2", "P3", "P8", "P12", "P15"].includes(m.gpu_pstate)
+      : ["P2", "P3", "P5", "P7", "P8", "P12", "P15"].includes(m.gpu_pstate)
         ? "var(--yellow)"
         : "var(--red)";
 }
