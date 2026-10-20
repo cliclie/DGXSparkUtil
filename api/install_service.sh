@@ -7,6 +7,7 @@
 #   既定ポート (8080) を変えたい / サーマルガードを入れない環境は、このスクリプトと
 #   同じディレクトリの install_service.env (git 管理外・各マシン固有) に書く:
 #       PORT=8090
+#       KILL_MODE=process
 #       DGXUTIL_THERMAL=0
 #   → sudo は環境変数を引き継がない (WSL の sudo は -E 非対応) ため、ファイル側で持つ。
 #   一時上書きで済ませたい場合は sudo のコマンドラインでも指定できる:
@@ -29,6 +30,10 @@ if [ -f "${API_DIR}/install_service.env" ]; then
 fi
 
 PORT="${PORT:-8080}"
+# unit の KillMode。既定 control-group (従来動作)。modelctl (WSL) のように
+# モデルサーバーをこの unit の cgroup 内で起動する環境は install_service.env で
+# KILL_MODE=process を指定し、API 再起動からモデルを守る。
+KILL_MODE="${KILL_MODE:-control-group}"
 
 # WSL2 判定 (/proc/version に microsoft)。atom1 / atom2 では常に偽 = 従来動作。
 IS_WSL=0
@@ -45,7 +50,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} thermal-guard=${TG_ENABLED}"
+echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} thermal-guard=${TG_ENABLED}"
 
 echo "==> Stopping any manually started instance (frees port ${PORT})"
 systemctl stop "${SERVICE}" 2>/dev/null || true
@@ -54,7 +59,7 @@ sleep 2
 
 echo "==> Rendering unit file -> ${UNIT_PATH}"
 sed -e "s|__API_DIR__|${API_DIR}|g" -e "s|__USER__|${RUN_USER}|g" \
-  -e "s|__PORT__|${PORT}|g" \
+  -e "s|__PORT__|${PORT}|g" -e "s|__KILL_MODE__|${KILL_MODE}|g" \
   "${API_DIR}/${SERVICE}" > "${UNIT_PATH}"
 chmod 644 "${UNIT_PATH}"
 

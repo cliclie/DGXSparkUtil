@@ -11,6 +11,13 @@ Group=__USER__
 # ユーザセッションバス (XDG_RUNTIME_DIR) をサービス環境に与える
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 WorkingDirectory=__API_DIR__
+# modelctl (WSL) は切替ジョブが起動したモデルサーバーをこのサービスの进程ツリーから
+# 切り離す (start_new_session) が、cgroup は引き続きこの unit の配下にある。
+# 既定 (control-group) だと `systemctl restart dgx-spark-api` で稼働中モデルまで
+# SIGKILL されるため、WSL では KILL_MODE=process (install_service.env) を使う。
+# compose 環境 (atom1 / atom2) はモデルが docker コンテナ (dockerd の cgroup) なので
+# control-group のまま従来動作。
+KillMode=__KILL_MODE__
 ExecStartPre=/bin/sh -c 'test -x __API_DIR__/venv/bin/python || (cd __API_DIR__ && python3 -m venv venv && ./venv/bin/pip install -q -r requirements.txt)'
 ExecStart=__API_DIR__/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port __PORT__
 Restart=always

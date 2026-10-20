@@ -501,10 +501,17 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   ```bash
   # /home/cliclie/DGXSparkUtil/api/install_service.env  (WSL2 Whitebear2026 の実例)
   PORT=8090            # Strata 系が 8080 を使うため API は 8090
+  KILL_MODE=process    # API 再起動で稼働中モデルサーバーを巻き込まない (下記)
   DGXUTIL_THERMAL=0    # 省略可 (WSL は /proc/version 判定で自動 0)
   ```
   → 以後は素の `sudo bash .../install_service.sh` で 8090 が入る。
-  ファイルが存在しない環境 (atom1 / atom2) は `PORT=8080` の従来動作のまま
+  ファイルが存在しない環境 (atom1 / atom2) は `PORT=8080` / `KILL_MODE=control-group`
+  の従来動作のまま
+- **`KILL_MODE`**: unit の `KillMode`。既定 `control-group` のままだと、モデルサーバーを
+  このサービスの cgroup 内で起動する `modelctl` (WSL) では
+  `systemctl restart dgx-spark-api` が稼働中モデルまで SIGKILL する
+  (`start_new_session` でセッションは切れるが cgroup は切れない)。WSL は `process` を使う。
+  atom1 / atom2 のモデルは docker コンテナ (dockerd の cgroup) なので影響なし
 - **WSL2 では `thermal-guard.service` を自動でインストールしない**
   (`/proc/version` に microsoft が含まれるか `DGXUTIL_THERMAL=0` でスキップ。
   WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため)。
@@ -2214,4 +2221,17 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   (`backend="compose"` / `rag_enabled=true` / `params_editable=true` — いずれも従来動作)
 - `install_service.sh` の `PORT` 既定値は 8080、thermal-guard は WSL 以外では従来どおり
   無条件に enable + restart。unit の `__PORT__` は既定レンダで 8080 になる
+
+### 常駐化 (WSL)
+
+```bash
+sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh   # api/install_service.env を読む
+```
+
+- はまった点: **WSL の sudo は `-E` (環境保持) 非対応**で
+  `PORT=8090 sudo -E bash install_service.sh` が
+  `sudo: preserving the entire environment is not supported, '-E' is ignored` で落ちる。
+  → ホスト固有値は `api/install_service.env` (git 管理外) に置いて解決した
+- `systemd-analyze verify` でレンダリング後 unit の検証 OK
+  (`KillMode=process` / `--port 8090`)
 
