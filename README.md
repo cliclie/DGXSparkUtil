@@ -494,11 +494,17 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
 - ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
   (テンプレート: `__API_DIR__` / `__USER__` / `__PORT__` プレースホルダを `install_service.sh` が
   sed で置換して `/etc/systemd/system/` にインストール)
-- **ポートの既定は 8080 のまま**。他サービスと競合する環境は `PORT` で上書きする
-  (WSL2 Whitebear2026 は Strata 系が 8080 を使うため **8090** で導入する):
+- **ポートの既定は 8080 のまま**。他サービスと競合する環境は `PORT` で上書きする。
+  `sudo` は環境変数を引き継がない (**WSL の sudo は `-E` 非対応**で `sudo: preserving the
+  entire environment is not supported, '-E' is ignored`) ため、**リポジトリと同じ
+  ディレクトリに置く `api/install_service.env` (git 管理外)** で指定する:
   ```bash
-  PORT=8090 sudo -E bash /home/cliclie/DGXSparkUtil/api/install_service.sh
+  # /home/cliclie/DGXSparkUtil/api/install_service.env  (WSL2 Whitebear2026 の実例)
+  PORT=8090            # Strata 系が 8080 を使うため API は 8090
+  DGXUTIL_THERMAL=0    # 省略可 (WSL は /proc/version 判定で自動 0)
   ```
+  → 以後は素の `sudo bash .../install_service.sh` で 8090 が入る。
+  ファイルが存在しない環境 (atom1 / atom2) は `PORT=8080` の従来動作のまま
 - **WSL2 では `thermal-guard.service` を自動でインストールしない**
   (`/proc/version` に microsoft が含まれるか `DGXUTIL_THERMAL=0` でスキップ。
   WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため)。

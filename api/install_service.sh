@@ -4,8 +4,13 @@
 # the run user from SUDO_USER. The unit file is rendered from the __API_DIR__ /
 # __USER__ / __PORT__ placeholders in dgx-spark-api.service.
 # Usage: sudo bash <repo>/api/install_service.sh
-#   PORT=8090 sudo -E bash <repo>/api/install_service.sh   # 既定 8080 を変えたい時
-#   DGXUTIL_THERMAL=0 sudo -E bash <repo>/api/install_service.sh  # サーマルガード不入れ
+#   既定ポート (8080) を変えたい / サーマルガードを入れない環境は、このスクリプトと
+#   同じディレクトリの install_service.env (git 管理外・各マシン固有) に書く:
+#       PORT=8090
+#       DGXUTIL_THERMAL=0
+#   → sudo は環境変数を引き継がない (WSL の sudo は -E 非対応) ため、ファイル側で持つ。
+#   一時上書きで済ませたい場合は sudo のコマンドラインでも指定できる:
+#       sudo PORT=8090 bash <repo>/api/install_service.sh
 #
 # GPU サーマルガード (thermal-guard.service) は nvidia-smi -lgc / power1_cap を
 # 直接叩く root unit。WSL2 は GPU がホスト (Windows) 側ドライバ管理でこれらの
@@ -16,6 +21,13 @@ API_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RUN_USER="${SUDO_USER:-cliclie}"
 SERVICE="dgx-spark-api.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE}"
+
+# ホスト固有の設定 (存在しなければ何もしない = atom1 / atom2 は従来どおり)
+if [ -f "${API_DIR}/install_service.env" ]; then
+  # shellcheck disable=SC1090
+  source "${API_DIR}/install_service.env"
+fi
+
 PORT="${PORT:-8080}"
 
 # WSL2 判定 (/proc/version に microsoft)。atom1 / atom2 では常に偽 = 従来動作。

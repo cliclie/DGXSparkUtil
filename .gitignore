@@ -6,3 +6,6 @@ __pycache__/
 # サーバーログ
 api/server.log
 .clinerules/01-always.md
+
+# ホスト固有のインストール設定 (WSL: PORT=8090 等)。マシンごとに置くため git 管理外
+api/install_service.env
