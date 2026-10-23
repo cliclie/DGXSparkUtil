@@ -2382,3 +2382,74 @@ sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh   # api/install_serv
 - **変更していない運用**: バインド（`0.0.0.0:8080`）、CORS `allow_origins=["*"]`、
   POST 系エンドポイントの認証なしは**従来どおり維持**（LAN 内運用を前提とした既存仕様。
   2026-10-23 の調査では露出低減案も検討したが、運用変更は見送った）。
+
+## 履歴書き換え（API key 除去）後の他機同期手順（2026-10-23）
+
+2026-10-23 に `git filter-repo` で README の Magnitude API key 実値を**履歴ごと**除去し、
+`main`（`96a8fb5 → 6ec972e`）と `atom2対応`（`31397e1 → 10eec7e`）を force push した。
+これより前に clone した機（**dgx-spark = atom1 / atom2 / Whitebear2026-WSL2**）は履歴が分岐するため、
+`git pull` は `refusing to merge unrelated histories` で拒否されるか、通った場合は同じメッセージの
+重複コミットをマージで抱え込む（filter-repo は全コミットのハッシュを変えるため、新旧の系譜に共通祖先がない）。
+書き換え前の全 refs バックアップは **atom2 上の** `~/temp/DGXSparkUtil-pre-redact-20261023-0931.bundle`
+（430 KB・他機には存在しない。必要なら atom2 から `scp` で取得）。
+
+### 1. リポジトリの同期（各機で）
+
+```bash
+cd /home/cliclie/DGXSparkUtil
+cp -a api/install_service.env /tmp/install_service.env.bak 2>/dev/null || true  # WSL2 のみ (PORT=8090 等)
+git status --short            # tracked の未コミット変更を確認
+git stash                     # 変更がある場合のみ。-u は使わない
+git fetch origin
+git reset --hard origin/main
+git branch -f atom2対応 origin/atom2対応 2>/dev/null || true   # 同名ローカルブランチがある場合
+```
+
+- `api/install_service.env` は untracked なので `reset --hard` では消えないが、
+  `git stash -u` や `git clean -fd` を併用すると失う。その場合は `/tmp` のバックアップか
+  `git stash pop` で復元すること。無いと `install_service.sh` が `PORT=8080` /
+  `KILL_MODE=control-group` / `LimitNOFILE` 行なしの既定で再レンダリングしてしまう
+  （WSL2 では 8080 が Strata 系と衝突し、`LimitNOFILE` 欠落でモデル切替が CUDA driver error になる）
+
+### 2. venv の依存更新（各機で必須・pull だけでは反映されない）
+
+`api/venv/` は git 管理外で、`dgx-spark-api.service` の `ExecStartPre` は
+**venv が存在しないときだけ** `pip install -r requirements.txt` を実行する。
+既存 venv を持つ機は明示的に当てる必要がある（2026-10-23 に opentelemetry-api 1.45.1 の
+CVE 修正と fastapi / starlette / pydantic / websockets / httptools の保守更新が入っている）。
+
+```bash
+cd /home/cliclie/DGXSparkUtil/api
+./venv/bin/pip install -U -r requirements.txt      # 下限追従
+# 実測ピン版に揃える場合: ./venv/bin/pip install -r requirements.lock
+./venv/bin/python -c "import fastapi, starlette, pydantic, opentelemetry.trace; print(fastapi.__version__, starlette.__version__, pydantic.VERSION)"
+sudo systemctl restart dgx-spark-api
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/platform   # WSL2 は 8090
+```
+
+### 3. 同期の検証
+
+```bash
+git --no-pager log --oneline -1                     # 6ec972e 以降を指すこと
+git status -sb | head -1                            # ahead/behind が出ないこと
+git --no-pager log -S'<旧 API key の実値>' --all --oneline   # 空であること（実値は本誌に記載しない）
+```
+
+- 旧コミットは reflog に一定期間残る。即座に消したい場合のみ
+  `git reflog expire --expire=now --all && git gc --prune=now`
+- 以降も `git pull` を使うなら `git config pull.ff only`（または `pull.rebase true`）を推奨。
+  force push 直後の pull はマージコミットを生成する
+- 他機で modelctl バックエンド（WSL2）を使う場合は、同期後に `~/scripts/model-ctl.sh` の実在を確認する。
+  `api/config.py` は既定で `PLATFORMS["wsl"].model_ctl = /home/cliclie/scripts/model-ctl.sh` を使い、
+  上書きは環境変数 `DGXUTIL_MODEL_CTL`。**`install_service.env` に書いても api プロセスには届かない**
+  （`install_service.sh` が自プロセス内で export するだけで、`dgx-spark-api.service` のテンプレートに
+  `Environment=` 置換がない）。既定パスに置けない場合は unit に直接
+  `Environment=DGXUTIL_MODEL_CTL=/path/to/model-ctl.sh` を追記して `daemon-reload` + `restart` すること
+
+### 4. 残る前提（重要）
+
+force push は GitHub 側の**参照の付け替え**であり、旧コミット（`96a8fb5` / `f8ed431`）が
+commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に消える保証はない。
+実値の鍵自体は有効なままなので、**鍵のローテーションが本質的な解決**
+（前節「API key の指定」の手順。`.env` と `~/.magnitude/config.json` を同一値に揃えて
+`magn-headless` と `dgx-spark-api` を両方再起動すること。`config.py` は import 時に `.env` を読む）。
