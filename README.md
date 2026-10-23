@@ -2340,3 +2340,43 @@ sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh   # api/install_serv
   - 教訓: 「system.slice が悪い」と早合流して `Slice=` / user サービス導入を一時実装したが、
     **`/proc/<pid>/limits` を先に見る**べきだった (余計な分岐は撤回した)
 
+## api venv のセキュリティ/保守更新と依存ピン留め（2026-10-23）
+
+稼働環境全体の CVE 調査（OSV / GitHub Security Advisories / Ubuntu CVE Tracker）で、当リポジトリの
+`api/venv` と `~/LLM/tools/hf-venv` に既知 CVE が 2 件該当したため更新した。調査の全貌と
+コンテナ基盤（docker-ce 29.9.2 / containerd.io 2.4.2）の移行記録は `~/LLM/README.md` の
+2026-10-23 エントリ参照。
+
+- **更新（api venv）**: `opentelemetry-api` 1.45.0 → **1.45.1**（GHSA-xcq7-p3pf-p88h — W3C
+  `tracestate` ヘッダを先頭が無制限の `[ \t]*` 正規表現で split するため O(N²) に転び、
+  未認証 1 リクエスト（約100KB）がワーカーを 6〜12 秒占有）。当サービスは propagator を明示設定
+  していないが、starlette が `starlette/middleware/opentelemetry.py` から import するため
+  削除ではなく更新を選んだ。併せて保守として fastapi 0.142.2 → **0.161.1**、starlette 1.7.0 →
+  **1.9.0**、pydantic 2.13.5 → **2.14.1**（core 2.50.1）、websockets 17.1 → **17.3**、
+  httptools 0.8.0 → **0.9.0**（いずれも OSV 該当なし）。
+- **更新（`~/LLM/tools/hf-venv`）**: `certifi` 2026.7.22 → **2026.10.19**（GHSA-6q48-6c7w-9gw2 —
+  emSign 漏洩鍵のルート CA 同梱。更新後 bundle は `G1 / ECC-C3 / C1` のみで、問題の **ECC-G3
+  非包含**を実データで確認）。他 hf-xet 1.7.0 / tokenizers 0.23.3 / filelock 4.2.4 /
+  truststore 0.10.5。
+- **`requirements.txt` の下限引き上げ**: `install_service.sh` の `ExecStartPre` は venv 不在時に
+  `pip install -r requirements.txt` を実行するため、`fastapi>=0.110` のままでは脆弱な旧版が
+  再導入されうる。starlette / pydantic は推移的依存だが下限を実測版まで明示した。
+- **`requirements.lock` を新規**（実測済みの完全ピン版・再現用）。`requirements.lock.pre-update` は
+  更新前のスナップショット（ロールバック用）。
+- **検証 (2026-10-23)**: `./venv/bin/python -c "import main"` → `routes=22` で import OK。
+  `sudo systemctl restart dgx-spark-api` 後、`/api/platform`・`/api/metrics`・`/api/history`・
+  `/api/vllm/status`・`/api/rag/status`・`/api/thermal`・`/`・`/static/chart.umd.js` がすべて 200。
+  LAN 内クライアントからの定期ポーリング（`/api/thermal`・`/api/vllm/job`・`/api/rag/job`）も
+  server.log 上で 200 継続を確認。
+- **rebase 後の再検証 (2026-10-23)**: `origin/main` の WSL2/modelctl 系（`api/modelctl.py`、
+  `api/vllm.py` の `backend` 分岐、`api/config.py` の `PLATFORMS["wsl"]`）を取り込んだ後も
+  `import main` が `routes=22` で通り、`systemctl restart dgx-spark-api` 後に全 endpoint 200
+  （`/api/rag/status` は初回のみ docker 照会で 12 秒台、以降 0.15 秒）。atom2 は `/api/platform` が
+  `backend=compose`・`rag_enabled=true` を返し、WSL 判定は非 WSL では常に偽なので既存 2 機の挙動は不変。
+  新コードに pip 追加依存はない（`modelctl.py` は標準ライブラリ + `config` のみ）。
+- **据え置き**: uvicorn 0.54.0 / anyio 4.15.1 / idna 3.20 / PyYAML 6.0.3 / python-dotenv 1.2.4 /
+  uvloop 0.23.0 / watchfiles 1.3.0 / h11 0.16.0 / click 8.5.0 は PyPI 最新かつ OSV 該当なし。
+  `front/chart.umd.js`（Chart.js 4.4.9）は OSV 該当なし（最新 4.6.1、更新は任意）。
+- **変更していない運用**: バインド（`0.0.0.0:8080`）、CORS `allow_origins=["*"]`、
+  POST 系エンドポイントの認証なしは**従来どおり維持**（LAN 内運用を前提とした既存仕様。
+  2026-10-23 の調査では露出低減案も検討したが、運用変更は見送った）。

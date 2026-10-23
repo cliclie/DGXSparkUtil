@@ -1,2 +1,7 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
+# 2026-10-23 セキュリティ/保守更新で引き上げ（fastapi 0.142.2→0.161.1 等）。
+# starlette / pydantic は fastapi の依存だが、下限を明示して脆弱な旧版の再導入を防ぐ。
+# 実測済みの完全なピン版は requirements.lock を使う。
+fastapi>=0.161.1
+starlette>=1.9.0
+pydantic>=2.14.1
+uvicorn[standard]>=0.54.0
