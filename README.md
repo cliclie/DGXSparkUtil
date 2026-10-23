@@ -2454,6 +2454,15 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 （前節「API key の指定」の手順。`.env` と `~/.magnitude/config.json` を同一値に揃えて
 `magn-headless` と `dgx-spark-api` を両方再起動すること。`config.py` は import 時に `.env` を読む）。
 
+### 5. 各機の同期状況
+
+- **atom1 (WhitebearATOM1)**: 2026-10-24 に同期済み（`c3fbe98` へ reset + `atom2対応` ブランチ同期 /
+  venv を `pip install -U -r requirements.txt` で更新: fastapi 0.162.0 / starlette 1.9.0 / pydantic 2.14.1 /
+  uvicorn 0.54.0 / opentelemetry-api 1.45.1 / API 再起動し `/`・`/api/platform`・`/api/metrics`・
+  `/api/vllm/status` が 200・thermal-guard active を確認）。
+  unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
+  運用に無影響）。
+
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
 WSL2 (RTX 5090) で二段目の統合時系列グラフの GPU クロック系列が 100% を超えるという報告の調査・修正。
