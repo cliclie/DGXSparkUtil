@@ -1247,9 +1247,11 @@ context_max=262144 を返すことを確認。`POST http://whitebearatom2.local:
 ### API key の指定 (2026-10-06)
 
 Magnitude の API key は `~/.magnitude/config.json` の `network.apiKey` に保存される (自動生成ではなく編集可能)。
-指定値 `MAGN_API_KEY_REDACTED_2026-10-23` に変更し、`systemctl --user restart magn-headless.service` で反映。
-併せて `~/LLM/compose/.env` と `magn.env.example` の `MAGN_API_KEY` を同一値に更新 (DGXSparkUtil の健全性
-判定・Cline 設定が読む)。検証: 旧キー 401 / 新キー 200、`GET /api/vllm/cline` が新キーを返す。
+**実値は git 管理外の `~/LLM/compose/.env` の `MAGN_API_KEY` を唯一の正本**とし、この文書には記載しない
+(2026-10-23 に README の実値記載を削除し、履歴からも除去した)。値を回す場合は `.env` と
+`~/.magnitude/config.json` を同一値に揃えて `systemctl --user restart magn-headless.service` を実行する。
+DGXSparkUtil 側の健全性判定と Cline 設定 (`GET /api/vllm/cline`) は `.env` を読む。
+検証: 旧キー 401 / 新キー 200。
 
 ## Magnitude (magn) の KVCache・E2E・TTFT・スループット表示 (2026-10-06)
 
