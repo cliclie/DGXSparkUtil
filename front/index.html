@@ -966,6 +966,15 @@ function refreshMainChart() {
   if (!mainChart) return;
   const v = viewArrays();
   const N = CHART_NORM;
+  // 100% 換算基準の実測上限補正 (tuneGauge() と同じ思想)。
+  // buildMainChart() 時点の discrete 既定値 (2350MHz / 300W) は R9700 前提で、
+  // WSL の RTX 5090 (clocks.max.sm=3090MHz / power.limit=600W) では基準が低く
+  // グラフが 100% を超えた。API が gpu_clock_max_mhz / gpu_power_cap_w を返す
+  // 環境ではそれに追随させる (unified = GB10 はキーなし → 既定値のまま)。
+  if (lastMetrics) {
+    if (lastMetrics.gpu_clock_max_mhz) N.gpuClock = lastMetrics.gpu_clock_max_mhz;
+    if (lastMetrics.gpu_power_cap_w) N.gpuPower = lastMetrics.gpu_power_cap_w;
+  }
   const ds = chartDs;
   mainChart.data.labels = v.labels;
   ds.cpuLoad.data = v.cpuLoad;

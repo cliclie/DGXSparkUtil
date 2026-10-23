@@ -2453,3 +2453,26 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 実値の鍵自体は有効なままなので、**鍵のローテーションが本質的な解決**
 （前節「API key の指定」の手順。`.env` と `~/.magnitude/config.json` を同一値に揃えて
 `magn-headless` と `dgx-spark-api` を両方再起動すること。`config.py` は import 時に `.env` を読む）。
+
+## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
+
+WSL2 (RTX 5090) で二段目の統合時系列グラフの GPU クロック系列が 100% を超えるという報告の調査・修正。
+
+**原因**: `buildMainChart()` の `CHART_NORM` が `discrete ? 2350 : 3003`（MHz）・`discrete ? 300 : 140`（W）の
+**構築時固定値**で、R9700（atom2）前提の値だった。RTX 5090 も `memory_mode=discrete` のため
+3090 MHz が 3090/2350 = 131.5%、電力も 600 W 上限に対し最大 200% となった。
+半円ゲージ側は `tuneGauge()` が `gpu_clock_max_mhz` / `gpu_power_cap_w` で上限を実測補正するため
+影響が出ていなかった。GPU 実クロックが 3090 MHz（`nvidia-smi` の `clocks.max.sm` = ハード上限）を
+超えることはなく、表示側の換算バグ。
+
+**修正**（`front/index.html` のみ・再起動不要）: `refreshMainChart()` 冒頭で `lastMetrics` の
+`gpu_clock_max_mhz` / `gpu_power_cap_w` があれば `CHART_NORM.gpuClock` / `gpuPower` を更新した。
+換算は毎回の `toPct()` で行われるため過去点も新基準で再スケールされる。
+unified（GB10）は両キーを返さないため従来どおりの固定基準のまま。
+atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`）に追随する挙動になる
+（thermal_guard の電力制限発動中はグラフ基準も 250/210 W に連動して変わる）。
+
+**検証**（Whitebear2026 実機 2026-10-24）: `nvidia-smi -q -d CLOCK` の Max Clocks = 3090 MHz を確認。
+一時起動した API（ポート 8091）の `/api/metrics` が `gpu_clock_max_mhz=3090.0` / `gpu_power_cap_w=600.0`
+を返すことを確認。換算ロジック再現で 3090 MHz → ちょうど 100%、600 W → ちょうど 100% を確認
+（修正前はそれぞれ 131.5% / 200%）。
