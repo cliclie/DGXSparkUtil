@@ -2462,6 +2462,11 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status` が 200・thermal-guard active を確認）。
   unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
   運用に無影響）。
+- **atom2 (WhitebearATOM2)**: 2026-10-24 に同期済み（`origin/main` へ fast-forward で `e24aeec` まで更新。
+  変更は `front/index.html`（静的配信）と README のみのため API 再起動不要。`dgx-spark-api` active のまま
+  配信中の `/` に修正コードが含まれることを HTTP で確認。`/api/metrics` は
+  `gpu_clock_max_mhz=2350.0` / `gpu_power_cap_w=300.0` を返し、グラフ基準は従来どおり 2350 MHz / 300 W
+  （thermal_guard の電力制限発動中は基準も 250/210 W に連動して変わる挙動に）。
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
