@@ -61,7 +61,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 共通スタイル:
 - ゲージ上部に項目名(タイトル)
 - 半円アーチを緑(低) → オレンジ(中) → 赤(高)のゾーンで区分
-- ゲージ中央に現在値を大きく表示(例: `101.08 GiB`。現在 `font-size: 16px`)
+- ゲージ中央に現在値を大きく表示(例: `101.08 GiB`。現在 `font-size: 13px`)
 - 現在値の直下に総量/容量を表示(例: `121.62 GiB total`)
 - 2 値の項目(Storage I/O の読込/書込、Network の下り/上り)は、1 つのゲージ内に
   外側(=A)/内側(=B)の 2 つのアーチ(ストーク間隔 1px)で別々に表示し、2 行の値は
@@ -100,10 +100,16 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 ## 表示レイアウト(4段構成)
 
 ダッシュボード全体は上下 4 段の構成とし、**4 段は 2 つのタブに分割して表示する**(実装メモ 2026-10-11)。
+タブバーはヘッダ行に統合し、ヘッダ行の高さ込みで 40px に圧縮している(実装メモ 2026-10-26)。
 
 - **システム**タブ(既定): 一段目(現在値ゲージ行) + 二段目(時系列グラフ)
 - **モデル**タブ: 三段目(vLLM / モデル) + 四段目(RAG)
-- タブバーは header 直下の `.tabs`(テキスト + アクティブ下線)。`.tab-panel` を `display` で切り替える
+- タブバーは **ヘッダ行内の `.tabs`**(テキスト + アクティブ下線)。`.tab-panel` を `display` で切り替える
+  (header 直下の独立行では高さ 45px を専有していたため、2026-10-26 にヘッダ行へ統合した)
+- ヘッダ行のモデルタブの横に **モデル選択プルダウン `#hdr-model-select`** と **切替ボタン `#hdr-switch-btn`** を置く。
+  プルダウンは LLM 一覧 + **RAG を最下部**(`rag_enabled=false` の WSL では RAG を出さない)。選択値は
+  モデルタブ常設一覧の `selectedProfile` と共有する。選択中が**ロード済(現在稼働中)のモデルなら
+  ボタンは「停止」**になり、RAG 選択時も稼働中なら「停止」(停止中なら「起動」)になる
 - 非表示タブ(display:none)中のゲージは値が変わっても `chart.update()` が走るだけで視覚的に
   反映されない。システムタブへ戻る際は `redrawSystemTab()` がゲージのキャッシュ(`_last`)を
   無効化して全ゲージを `update()` し直す。ゲージは `responsive:false`(canvas 属性サイズが
@@ -114,9 +120,9 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 - 各項目のゲージ(半円アーチ)を**横方向に 1 行へ並べて表示**する(左 → 右: CPU Load, CPU Temperature, 統合メモリ, GPU Load, GPU Temperature, GPU Power, GPU Clock, Storage, Storage I/O, Network の順)
 - 表示領域(ウィンドウ幅)が狭くなれば、**自然に折り返して次の行へ表示する**(1 行に無理に詰めない)
   - 実装イメージ: CSS の flexbox + `flex-wrap: wrap`、各ゲージに固定幅
-    **`.gauge { flex: 0 0 176px }`** を割り当て、幅が足りなくなったら折り返す
-    (176px × 7枚 + gap 10px × 6 = 1292px で main 内側 1360px に収まる → **7枚/行**。
-    実装メモ(2026-10-05)参照)
+    **`.gauge { flex: 0 0 140px }`** を割り当て、幅が足りなくなったら折り返す
+    (140px × 10枚 + gap 10px × 9 = 1490px で main 内側 1560px に収まる → **10枚/行**。
+    176px → 140px は 80% 縮小。実装メモ(2026-10-05 / 2026-10-26)参照)
 - 折り返し時にも各ゲージの幅は揃え、間隔を一定にする
 - 各ゲージは「表示スタイル(ゲージ)」に定義した共通スタイル(タイトル・色ゾーン・中央に現在値・直下に総量/容量)をそのまま使用する
 - ゲージ行の末尾に **vLLM 情報のテキスト専用カード**(`.gauge.vinfo-card`)を 1 枚追加する。
@@ -124,7 +130,7 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
   `モデル名(値のみ・ラベルなし)` / `ポート` / `状態` / `prefill` / `decode`
   - 値は三段目の `#v-*` と同じ `setV()` 経由で `#vi-*` へミラーする(`V_MIRROR` 対応表)。
     稼働モデルなしの `"-"` クリア、スループットの白/灰(held)、`up`/`down` の色分けも両側で同期される
-  - カード内にタイトルは置かない。モデル名はラベルを省略して値だけを表示し、176px のカード幅に
+  - カード内にタイトルは置かない。モデル名はラベルを省略して値だけを表示し、140px のカード幅に
     収めるため 1 行省略(`white-space:nowrap` + `overflow:hidden` + `text-overflow:ellipsis`)、
     フル名は `title` に入れる(`setV()` が設定)。5 行でも既存ゲージカードと高さが揃う
     (flex の stretch で全カード同高になる)
@@ -596,11 +602,12 @@ cd /home/cliclie/DGXSparkUtil/api
 - モデル切替・パラメータ編集はバックグラウンドジョブとして実行し、`GET /api/vllm/job` で進捗(ログ末尾)を取得。同時実行は 1 件
 - パラメータ編集は `/home/cliclie/llm/compose/docker-compose.yml` の対象サービス command の値部分を書き換えた後 `docker compose up -d --force-recreate`
 - 動作検証時は稼働中の qwen38bf16 への影響を避けるため、切替・コンテナ再作成は実行していない(読み取り系 API のみ検証済み)
-- 表示は 2 タブ(システム=現在値+時系列 / モデル=vLLM+RAG)に分割。モデル切替はモーダルを持たず、
-  vLLM 行下の常設一覧 + 「切り替え実行」で操作する(実装メモ 2026-10-11)
-- 一段目は半円ゲージ 10 種 + vLLM 情報のテキストカード 1 枚(計 11 枚、7枚/行で折り返し)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 5 GB/s)
+- 表示は 2 タブ(システム=現在値+時系列 / モデル=vLLM+RAG)に分割し、タブバーはヘッダ行内。モデル切替は
+  モーダルを持たず、vLLM 行下の常設一覧 + 「切り替え実行」と、ヘッダ行のモデル選択プルダウン +
+  切替ボタン(ロード済モデル選択時は「停止」)で操作する(実装メモ 2026-10-11 / 2026-10-26)
+- 一段目は半円ゲージ 10 種 + vLLM 情報のテキストカード 1 枚(計 11 枚、10枚/行で折り返し)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 5 GB/s)。ゲージは 2026-10-26 に縦横・文字を 80% 縮小(canvas 150×76/56 → 118×60/44、カード 176px → 140px、中央値 16px → 13px、タイトル 12px → 10px。最小の 11px 文字は据え置き)
 - ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz。調整は `index.html` の `GAUGE_DEFS[].max` と `NORM` のみ
-- 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=5 GB/s で割って倍率 100)。横軸は「直近30分 / 直近3時間 / すべて」で切替可能
+- 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=5 GB/s で割って倍率 100)。横軸は「直近30分(既定) / 直近3時間 / すべて」で切替可能。見出しは「時系列 (全項目・2秒間隔)」1 行に集約し(左端に見出し・右端に範囲ボタン。副題「CPU / メモリ / GPU / ストレージ (全項目 100% 換算)」は廃止)、グラフ高さは 288px → 232px(80%、2026-10-26)
 - 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
 - `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
 - タブの favicon は `front/meter-dgx.ico`(`/static/` マウント経由で配信)
@@ -1442,6 +1449,7 @@ API 側 (`api/vllm.py`) だけ取り残されていた。
 
 - **タブ化** (`front/index.html`):
   - header 直下に `.tabs`(システム / モデル)、`<main>` 内を `#tab-system`(現在値+時系列) と
+    (※ 2026-10-26 に `.tabs` はヘッダ行内へ移動した。実装メモ 2026-10-26 参照)
     `#tab-model`(vLLM+RAG) の `.tab-panel` に分割。既定はシステム。
     `.tab-panel { display: none }` / `.tab-panel.active { display: block }` で切り替える
   - 非表示タブ内の canvas は `clientWidth=0` のため `Gauge.render()` がスキップされる。
@@ -2490,3 +2498,86 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 一時起動した API（ポート 8091）の `/api/metrics` が `gpu_clock_max_mhz=3090.0` / `gpu_power_cap_w=600.0`
 を返すことを確認。換算ロジック再現で 3090 MHz → ちょうど 100%、600 W → ちょうど 100% を確認
 （修正前はそれぞれ 131.5% / 200%）。
+
+## レイアウト圧縮: ヘッダ行タブ統合・ヘッダのモデル選択・ゲージ/時系列の 80% 縮小（2026-10-26）
+
+要件: (1) システム/モデルのタブをヘッダ行へ移動 (2) モデルタブの横にモデル選択プルダウンと切替ボタン
+（RAG もリスト上は一番下。ロード済のモデルを選択中は停止ボタン） (3) 一段目の半円グラフを縦横・文字
+80% 縮小（一番小さい文字はそのまま） (4) 二段目の線グラフを高さ 80% 縮小し、初期起動時の範囲を直近30分
+の既定値に変更。
+
+**ヘッダ行のタブ統合**（`front/index.html`）:
+
+- `<div class="tabs">` を `<header>` 内へ移す。header は `align-items: stretch` + `padding: 0 20px` +
+  `min-height: 40px` にし、`.tabs` は `align-self: stretch`、`.tabs button` は `height: 100%` にして
+  アクティブ下線が header の border-bottom に接するようにした（実測 gap 1px = border 分）
+- 従来 header 50px + tabs 43px = 93px だったヘッダ領域が **40px** になり、ページ全体は
+  `document.body.scrollHeight` **837px → 664px**（1600×1000 viewport 実測）
+- タブ切替は `showTab(key)` に集約（タブボタンとヘッダの切替ボタンで共用）
+
+**ヘッダ行のモデル選択プルダウンと切替ボタン**:
+
+- `#hdr-model-select` は `hdrModelOptions()` が LLM 一覧 + **RAG を最下部**（`__rag__`）で生成する。
+  `PLAT.rag_enabled === false`（WSL）では RAG を出さない。`#hdr-switch-btn` と共に `.hdr-model`
+  （`margin-left: 14px`）でモデルタブの直横に置く
+- 選択値は既存の `selectedProfile` を共有するため、パネル常設一覧のクリック選択と双方向に同期する。
+  毎ポーリングの `renderModelList()` が `renderHdrModel()` を呼び、選択肢ラベルに ` (稼働中)` /
+  ` (重み未導入)` / RAG の ` (稼働中)` を付与する
+- `renderHdrSwitchBtn()` の状態: 未選択=「切替」disabled / 稼働中モデル=「停止」(`.stop` 赤) →
+  `openStopModal()` / 停止中モデル=「切替」→ `runSwitch()` / 重み未導入=「切替」disabled /
+  RAG 稼働中=「停止」→ `openRagModal("stop")` / RAG 停止中=「起動」→ `openRagModal("start")` /
+  ジョブ実行中=disabled
+- `panel-switch-go` の onclick は `runSwitch()` に、`btn-stop` の onclick は `openStopModal()` に抽出して
+  ヘッダのボタンと共用した。ヘッダから切替実行するときは進捗ログが出るモデルタブへ `showTab("model")`
+  してから実行し、`runSwitch()` は即座に両ボタンを disabled にして連打を塞ぐ
+- RAG を選んだときパネルの「切り替え実行」は対象外なので `isRag` で disabled にしラベルも固定
+- RAG の稼働状態は新設の `ragStatus`（`poll()` が `/api/rag/status` を代入）で見る
+
+**一段目ゲージ（半円グラフ）の 80% 縮小**:
+
+- CSS: `.gauge` `flex: 0 0 176px` → **140px**（10枚/行）、`padding: 10px 12px 8px` → **8px 10px 6px**、
+  `.gcanvas` **76px → 60px**、`.gauge.dual .gcanvas` **56px → 44px**、`.gtitle` **12px → 10px**、
+  `.gval` **16px → 13px**、`.gtitle .gdot` 12px → 10px、`.gsub` margin-top 4px → 3px
+- **11px の最小文字**（`.gval .unit` / `.gval-dual-out` / `.gval-sub` / `.gsub`）は指示どおり据え置き
+- JS: `GW / GH_SINGLE / GH_DUAL` **150/76/56 → 118/60/44**（カード 140px − padding 10×2 − border 1×2
+  = 118px 幅、高さ `.gcanvas` と同じ）。`GAUGE_ROUT` **{70,50} → {54,38}**（`layout.padding` top4+bottom2 を
+  引いた高さ制約上の実効外径。canvas 幅 118 の半幅 59 は常に高さ制約より大きい）。
+  リング厚み `W_ZONE / W_VAL_SINGLE / W_VAL_OUTER / W_VAL_INNER` **3/11/8/6 → 2/9/6/5**。
+  `gaugeCutout()` は `GAUGE_ROUT` と weight 合計から穴比率を出すので半径変更に自動追従する
+- 実測: 単一 canvas 118×60 / dual 118×44、gtitle 10px・gval 13px・gsub/unit/sub 11px、canvas の
+  カード内はみ出しなし。カード幅 176 → 140px（79.5%）。カード高さは 137 → 128px（93%）で、これは
+  11px 文字の行（dual の 2 行値 28.6px と `.gsub` min-height 14px、幅縮小で増えたサブ行折り返し）を
+  そのまま残しているためで、ゲージ描画自体の 80% 縮小とは別枠
+
+**二段目の 80% 縮小と既定範囲の変更**:
+
+- `.chart-card .cwrap` **288px → 232px**
+- `rangeKey` の初期値 **"all" → "30m"**、HTML 側 `#range-btns` の `class="active"` を 30m へ移動。
+  サーバー側 `/api/history`（5秒間隔・30分）のバックフィルと同一範囲で初期表示される
+- 見出しを 1 行に集約: セクション先頭の `<h2>時系列 (全項目・2秒間隔)</h2>` を `.charts-head` の中へ移し、
+  副題 `<h3>CPU / メモリ / GPU / ストレージ (全項目 100% 換算)</h3>` を削除した（左端に見出し、右端に範囲ボタン）。
+  `.charts-head` は `justify-content: space-between` なので h2 を最初の子にすると自動的に左へ寄る。
+  `section > h2` でなくなるため、青い左バー + 14px グレーの見た目は `.charts-head h2` へ移設
+  （他の 3 セクションの `section > h2` は従来どおり）。見出し行は h2 30px + h3 行 27px + gap → **27px の 1 行**になり、
+  `.chart-card` の top は 406 → 376px、`body.scrollHeight` は 664 → 634px
+
+**検証**（DGX Spark 実機 2026-10-26、headless Chrome + CDP。検証スクリプトはセッション用の一時ファイル
+`/tmp/cdp_verify.py`（新版の計測）と `/tmp/cdp_old.py`（HEAD 版を `git archive` して高さ比較）で、
+リポジトリには含めない）:
+
+- ヘッダ: headerH 40px / `.tabs` は header 内（`tabsInHeader=true`・body 直下に tabs なし）/
+  下線と header 下端の gap 1px / `#hdr-model-select`・`#hdr-switch-btn` は header の枠内
+  （`selInsideHeaderBox=true`）
+- プルダウン: 18 モード + RAG が最後（`lastIsRag=true`）、ラベルに ` (稼働中)` / ` (重み未導入)` が付く
+- ボタン状態: 未選択=切替 disabled / 稼働中=停止(cls=stop) / 停止中=切替 / 重み未導入=切替 disabled /
+  RAG 稼働中=停止 / RAG 停止中=起動 / ジョブ実行中=disabled。パネル側「切り替え実行」は RAG 選択時に
+  disabled + ラベル「切り替え実行」
+- ゲージ: canvas 118×60（単一）/ 118×44（dual）、カード幅 140px、文字 10 / 13 / 11px、
+  値テキストとサブ行は canvas 内（単一 canvas 60px に対し値 21〜40px）
+- 線グラフ: cwrap 232px、`rangeActive=30m`・`rangeKey=30m`、横軸はバック履歴の全点（30分未満）。
+  見出し行は 27px の 1 行で `h3Exists=false`・`sameRow=true`、見出しは左端・範囲ボタンは右端に接（gap 0）、
+  `section > h2` は残り 3 セクション（現在値 / vLLM・モデル / RAG）
+- `Runtime.exceptionThrown` / `consoleAPICalled` のエラー 0 件、横スクロールバーなし（`overflowX=false`）
+- 実機のモデル切替・停止・RAG 起動/停止 API は**発火させていない**（稼働中の qwen38bf16 への影響を避ける。
+  ボタン状態は `currentStatus` / `ragStatus` を注入して描画ロジックのみ検証）
+

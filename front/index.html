@@ -32,23 +32,27 @@ body {
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
+/* ヘッダ行: タイトル / 時計 / P-State / サーマル + タブ + モデル選択・切替。
+   タブバーをヘッダ行に統合するため padding を上下 0 にし、min-height で高さを固定する。
+   .tabs は align-self:stretch + button height:100% で下線を header の border-bottom に付ける */
 header {
   display: flex;
-  align-items: baseline;
+  align-items: stretch;
   gap: 12px;
-  padding: 12px 20px;
+  padding: 0 20px;
+  min-height: 40px;
   border-bottom: 1px solid var(--border);
   background: var(--card);
   position: sticky;
   top: 0;
   z-index: 5;
 }
-header h1 { font-size: 17px; margin: 0; }
-header #clock { color: var(--muted); font-size: 13px; }
-header #pstate { font-size: 13px; font-weight: 600; }
-header #thermal { font-size: 13px; font-weight: 600; }
-main { padding: 16px 20px 12px; }
-section { margin-bottom: 22px; }
+header h1 { font-size: 15px; margin: 0; display: flex; align-items: center; }
+header #clock { color: var(--muted); font-size: 13px; align-self: center; }
+header #pstate { font-size: 13px; font-weight: 600; align-self: center; }
+header #thermal { font-size: 13px; font-weight: 600; align-self: center; }
+main { padding: 12px 20px 10px; }
+section { margin-bottom: 16px; }
 section:last-child { margin-bottom: 0; } /* 最下段の余白を潰し、縦スクロールバー出現を遅らせる */
 section > h2 {
   font-size: 14px;
@@ -57,25 +61,47 @@ section > h2 {
   padding-left: 8px;
   margin: 0 0 10px;
 }
-/* ---- タブ (システム / モデル) ---- */
+/* ---- タブ (システム / モデル): header 内 ---- */
 .tabs {
   display: flex;
-  gap: 22px;
-  padding: 0 20px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
+  align-self: stretch;
+  gap: 20px;
+  margin-left: 10px;
 }
 .tabs button {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  padding: 10px 2px;
-  font-size: 14px;
+  padding: 0 2px;
+  height: 100%;
+  font-size: 13px;
   color: var(--muted);
 }
 .tabs button:hover { color: var(--text); border-bottom-color: var(--border); }
 .tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--green); }
+/* ---- ヘッダ行のモデル選択 (プルダウン) と切替/停止ボタン: モデルタブの直横 ---- */
+.hdr-model {
+  margin-left: 14px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#hdr-model-select {
+  background: var(--card2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  max-width: 320px;
+}
+#hdr-model-select:hover { border-color: var(--blue); }
+#hdr-switch-btn { padding: 4px 12px; font-size: 12px; }
+#hdr-switch-btn.stop { background: #33161a; border-color: #5c2b30; color: #e5534b; }
+#hdr-switch-btn.stop:hover { border-color: var(--red); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 /* ---- 現在値: vLLM 情報テキストカード (ゲージ描画なし・文字のみ) ---- */
@@ -88,8 +114,8 @@ section > h2 {
   margin-bottom: 2px;
 }
 .gauge.vinfo-card .vi-row .k { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-.gauge.vinfo-card .vi-row .v { font-size: 13px; font-weight: 600; text-align: right; word-break: break-all; }
-/* モデル名はラベルなしで値のみ。176px のカード幅に収め、他カードと高さを揃えるため
+.gauge.vinfo-card .vi-row .v { font-size: 10px; font-weight: 600; text-align: right; word-break: break-all; }
+/* モデル名はラベルなしで値のみ。140px のカード幅に収め、他カードと高さを揃えるため
    1 行省略 (…) とし、フル名は title に入れる (setV が設定) */
 .gauge.vinfo-card .vi-row .v.name {
   flex: 1 1 auto;
@@ -106,11 +132,11 @@ section > h2 {
   gap: 10px;
 }
 .gauge {
-  flex: 0 0 176px; /* 固定幅: 7枚/行 × 176px + gap6 × 10px = 1292px (main内側1360pxに収まる) */
+  flex: 0 0 140px; /* 固定幅: 176px → 80% (140px)。10枚/行 × 140px + gap 10px × 9 = 1490px (main内側1560pxに収まる) */
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px 12px 8px;
+  padding: 8px 10px 6px;
   text-align: center;
 }
 /* GPU サーマルガード発動中: 監視対象 (atom2/R9700=GPU温度、atom1/GB10=CPU温度・GPU温度の
@@ -119,10 +145,10 @@ section > h2 {
    太さは変えない (他カードとの高さを揃えたまま色だけで判別させる) */
 .gauge.thr-high { border-color: var(--thr-yellow); }
 .gauge.thr-crit { border-color: var(--thr-red); }
-.gauge .gtitle { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-.gauge .gtitle .gdot { display: inline-block; width: 12px; height: 12px; margin-right: 6px; }
-.gauge .gcanvas { position: relative; height: 76px; } /* 96px → 80% (4の倍数) */
-.gauge.dual .gcanvas { height: 56px; } /* 二重メーター: 2行テキストをゲージ下に置くため描画領域を縮小 (単一メーターとカード高さを揃える) */
+.gauge .gtitle { color: var(--muted); font-size: 10px; margin-bottom: 3px; }
+.gauge .gtitle .gdot { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
+.gauge .gcanvas { position: relative; height: 60px; } /* 76px → 80% (4の倍数) */
+.gauge.dual .gcanvas { height: 44px; } /* 56px → 80%: 二重メーターは 2 行テキストをゲージ下に置くため描画領域を縮小 (単一メーターとカード高さを揃える) */
 /* Chart.js (responsive:false) が canvas に論理サイズの inline style を付与するため width/height は
    指定しない (position/left/top は .gval と .gval-dual-out の配置基準なので維持) */
 .gauge .gcanvas canvas { position: absolute; left: 0; top: 0; }
@@ -132,16 +158,16 @@ section > h2 {
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 16px;
+  font-size: 13px; /* 16px → 80% */
   font-weight: 600;
   pointer-events: none;
 }
 .gauge .gval .unit, .gauge .gval-dual-out .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
-/* 二重メーターの 2 行値: 縮小後 canvas (150×60) 内では内側アーチと交差するためゲージ下に配置 */
+/* 二重メーターの 2 行値: 縮小後 canvas 内では内側アーチと交差するためゲージ下に配置 */
 .gauge .gval-dual-out { font-size: 11px; line-height: 1.3; margin-top: 2px; }
 .gauge .gval .gval-line, .gauge .gval-dual-out .gval-line { white-space: nowrap; }
 .gauge .gval .gval-sub { position: absolute; top: 100%; left: 0; right: 0; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text); }
-.gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 4px; min-height: 14px; }
+.gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 3px; min-height: 14px; }
 .ok { color: var(--green); }
 .warn { color: var(--yellow); }
 .hot { color: var(--red); }
@@ -156,7 +182,15 @@ section > h2 {
   gap: 8px;
   margin-bottom: 8px;
 }
-.charts-head h3 { margin: 0; font-size: 12px; color: var(--muted); font-weight: 500; }
+/* Tier 2 の見出しは h2 を 1 行に集約 (範囲ボタンを右寄せ)。section > h2 でなくなるため
+   同じ見た目 (青い左バー + 14px グレー) をここで当てる */
+.charts-head h2 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+  border-left: 3px solid var(--blue);
+  padding-left: 8px;
+}
 .range-btns { display: flex; gap: 6px; }
 .range-btns button { padding: 4px 12px; font-size: 12px; border-radius: 14px; }
 .range-btns button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
@@ -166,7 +200,7 @@ section > h2 {
   border-radius: 8px;
   padding: 8px 10px 6px;
 }
-.chart-card .cwrap { position: relative; height: 288px; } /* 360px → 80% (4の倍数) */
+.chart-card .cwrap { position: relative; height: 232px; } /* 288px → 80% (4の倍数) */
 /* ---- Tier 3 ---- */
 #vllm-panel {
   background: var(--card);
@@ -391,11 +425,16 @@ table.params td input[readonly] { color: var(--muted); }
   <span id="clock"></span>
   <span id="pstate"></span>
   <span id="thermal"></span>
+  <!-- タブ (システム / モデル) はヘッダ行内。モデルタブの横にモデル選択と切替/停止ボタンを置く -->
+  <div class="tabs">
+    <button class="active" data-tab="system">システム</button>
+    <button data-tab="model">モデル</button>
+  </div>
+  <div class="hdr-model">
+    <select id="hdr-model-select"></select>
+    <button id="hdr-switch-btn" disabled>切替</button>
+  </div>
 </header>
-<div class="tabs">
-  <button class="active" data-tab="system">システム</button>
-  <button data-tab="model">モデル</button>
-</div>
 <main>
   <!-- タブ 1: システム (現在値 + 時系列) -->
   <div class="tab-panel active" id="tab-system">
@@ -405,15 +444,14 @@ table.params td input[readonly] { color: var(--muted); }
     <div class="grid" id="host-cards"></div>
   </section>
 
-  <!-- Tier 2: 時系列グラフ -->
+  <!-- Tier 2: 時系列グラフ (見出し行に範囲ボタンを右寄せ。h3 の副題は廃止) -->
   <section>
-    <h2>時系列 (全項目・2秒間隔)</h2>
     <div class="charts-head">
-      <h3>CPU / メモリ / GPU / ストレージ (全項目 100% 換算)</h3>
+      <h2>時系列 (全項目・2秒間隔)</h2>
       <div class="range-btns" id="range-btns">
-        <button data-range="30m">直近30分</button>
+        <button data-range="30m" class="active">直近30分</button>
         <button data-range="3h">直近3時間</button>
-        <button data-range="all" class="active">すべて</button>
+        <button data-range="all">すべて</button>
       </div>
     </div>
     <div class="chart-card">
@@ -606,8 +644,8 @@ function pushPoint(ts, m) {
 // 直近の /api/metrics レスポンス (システムタブへ戻ったときのゲージ再描画用)
 let lastMetrics = null;
 
-// 範囲切替用のフィルタ (ts 基準で先頭を切る)
-let rangeKey = "all";
+// 範囲切替用のフィルタ (ts 基準で先頭を切る)。初期起動時は直近30分を既定値とする
+let rangeKey = "30m";
 function rangeStartIdx() {
   if (rangeKey === "all" || !series.ts.length) return 0;
   const cutoff = series.ts[series.ts.length - 1] - RANGE_SECS[rangeKey];
@@ -641,14 +679,13 @@ const ARC_BG = "rgba(48,54,61,.55)";
 const ZONE_STOPS = [0.6, 0.85];
 // リング間 1px の擬似余白の色 = カード背景 var(--card)。canvas 描画は CSS var を解決できないため実値
 const CARD_BG = "#161b22";
-// canvas の論理サイズ (responsive:false では属性サイズが論理サイズ)。カード 176px − padding 12×2
-// − border 1×2 = 150px 幅、高さは .gcanvas と同じ 76px (単一) / 56px (dual)
-const GW = 150, GH_SINGLE = 76, GH_DUAL = 56;
-// layout.padding {top:4, bottom:2} での Chart.js 実効外径 (高さ制約 = canvas 高さ − top − bottom)。
-// canvas 版の R = min(w/2, h) - 6 = 69 (単一) / 50 (dual) に対応
-const GAUGE_ROUT = { single: 70, dual: 50 };
-// リング厚み = weight 配分 (1 weight ≈ 1px)。index 0 = 最外周の閾値ゾーン帯
-const W_ZONE = 3, W_VAL_SINGLE = 11, W_VAL_OUTER = 8, W_VAL_INNER = 6;
+// canvas の論理サイズ (responsive:false では属性サイズが論理サイズ)。カード 140px − padding 10×2
+// − border 1×2 = 118px 幅、高さは .gcanvas と同じ 60px (単一) / 44px (dual)
+const GW = 118, GH_SINGLE = 60, GH_DUAL = 44;
+// layout.padding {top:4, bottom:2} での Chart.js 実効外径 (高さ制約 = canvas 高さ − top − bottom)
+const GAUGE_ROUT = { single: 54, dual: 38 };
+// リング厚み = weight 配分 (1 weight ≈ 1px)。index 0 = 最外周の閾値ゾーン帯。80% 縮小 (3/11/8/6 → 2/9/6/5)
+const W_ZONE = 2, W_VAL_SINGLE = 9, W_VAL_OUTER = 6, W_VAL_INNER = 5;
 
 function fmtGiB(gib) {
   if (gib >= 1024) return (gib / 1024).toFixed(2) + " TiB";
@@ -719,7 +756,7 @@ class Gauge {
     this.valEl = document.createElement("div");
     this.subEl = card.querySelector(".gsub");
     if (def.dual) {
-      // 二重メーター (150×56): 2 行テキストが内側リングと交差するため
+      // 二重メーター (118×44): 2 行テキストが内側リングと交差するため
       // 値表示はゲージ下 (canvas 外) に配置する
       this.valEl.className = "gval-dual-out";
       card.insertBefore(this.valEl, this.subEl);
@@ -1015,13 +1052,14 @@ function redrawSystemTab() {
   }
 }
 
+// タブ切替 (ヘッダ行のタブボタン / ヘッダの切替ボタンから呼ぶ)
+function showTab(key) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === key));
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + key));
+  if (key === "system") redrawSystemTab();
+}
 document.querySelectorAll(".tabs button").forEach((btn) => {
-  btn.onclick = () => {
-    document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b === btn));
-    const key = btn.dataset.tab;
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + key));
-    if (key === "system") redrawSystemTab();
-  };
+  btn.onclick = () => showTab(btn.dataset.tab);
 });
 </script>
 <script>
@@ -1178,7 +1216,10 @@ async function poll() {
   if (PLAT.rag_enabled !== false) {
     try {
       const rst = await fetchJson(API + "/api/rag/status");
+      ragStatus = rst;
       renderRag(rst);
+      // ヘッダのプルダウンは RAG を含むので、RAG の稼働状態もここで反映する
+      renderHdrModel();
     } catch (e) {
       console.error("rag poll failed", e);
     }
@@ -1194,6 +1235,8 @@ async function poll() {
 }
 
 let currentStatus = null;
+// 直近の /api/rag/status レスポンス (ヘッダのモデル選択で RAG がロード済みかを見る)
+let ragStatus = null;
 </script>
 
 <script>
@@ -1248,8 +1291,11 @@ function updateSwitchButtons(st) {
   // modelctl (WSL): 重み未導入モードは切替対象にできない (compose 側は ready 未定義で常時 true)
   const sel = st && st.containers ? st.containers.find((c) => c.profile === selectedProfile) : null;
   const blocked = !!sel && sel.ready === false;
-  btn.disabled = busy || !selectedProfile || selectedProfile === active || blocked;
-  btn.textContent = selectedProfile ? "切り替え実行: " + selectedProfile : "切り替え実行";
+  // ヘッダのプルダウンで RAG を選んだときはパネルの「切り替え実行」の対象外 (RAG は起動/停止)
+  const isRag = selectedProfile === RAG_VALUE;
+  btn.disabled = busy || !selectedProfile || isRag || selectedProfile === active || blocked;
+  btn.textContent = selectedProfile && !isRag ? "切り替え実行: " + selectedProfile : "切り替え実行";
+  renderHdrSwitchBtn();
 }
 
 function renderModelList() {
@@ -1269,13 +1315,17 @@ function renderModelList() {
   list.innerHTML = "";
   for (const c of st.containers) list.appendChild(makeModelItem(c, st, sw));
   updateSwitchButtons(st);
+  renderHdrModel();
 }
 
-// モデル切替を実行する (一覧はパネル常設。モデル切替モーダルは廃止)
-document.getElementById("panel-switch-go").onclick = async () => {
-  if (!selectedProfile) return;
+// モデル切替を実行する (一覧はパネル常設。モデル切替モーダルは廃止)。
+// パネルの「切り替え実行」とヘッダ行の「切替」ボタンから呼ぶ
+async function runSwitch() {
+  if (!selectedProfile || selectedProfile === RAG_VALUE) return;
   const btn = document.getElementById("panel-switch-go");
   btn.disabled = true;
+  // ヘッダ行の切替ボタンから押されたときも、ジョブ状態が poll に現れるまで連打を塞ぐ
+  document.getElementById("hdr-switch-btn").disabled = true;
   const logEl = document.getElementById("panel-switch-log");
   logEl.style.display = "block";
   logEl.textContent = `切り替え開始: ${selectedProfile} ...\n`;
@@ -1296,12 +1346,95 @@ document.getElementById("panel-switch-go").onclick = async () => {
     logEl.textContent += "リクエスト失敗: " + e + "\n";
     btn.disabled = false;
   }
+}
+
+document.getElementById("panel-switch-go").onclick = runSwitch;
+
+// ------------------------------------------------- ヘッダ行のモデル選択プルダウンと切替ボタン
+// LLM 一覧 + RAG (リスト上は一番下) を並べ、選択値 selectedProfile はパネル常設一覧と共有する。
+// 選択中がロード済 (現在稼働中) のモデルなら、切替ボタンは停止ボタンになる。
+const RAG_VALUE = "__rag__";
+
+function hdrModelOptions() {
+  const st = currentStatus;
+  const opts = [];
+  for (const c of (st && st.containers ? st.containers : [])) {
+    let suffix = "";
+    if (c.ready === false) suffix = " (重み未導入)";
+    else if (st.active && st.active.profile === c.profile) suffix = " (稼働中)";
+    opts.push([c.profile, c.profile + suffix]);
+  }
+  // RAG 環境が無いプラットフォーム (WSL) は RAG を選択肢に出さない
+  if (PLAT.rag_enabled !== false) {
+    opts.push([RAG_VALUE, "RAG (sociax-rag)" + (ragStatus && ragStatus.running ? " (稼働中)" : "")]);
+  }
+  return opts;
+}
+
+function renderHdrModel() {
+  const sel = document.getElementById("hdr-model-select");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = "モデルを選択";
+  sel.appendChild(ph);
+  for (const [v, t] of hdrModelOptions()) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    sel.appendChild(o);
+  }
+  sel.value = selectedProfile || "";
+  renderHdrSwitchBtn();
+}
+
+function renderHdrSwitchBtn() {
+  const btn = document.getElementById("hdr-switch-btn");
+  if (!btn) return;
+  const st = currentStatus;
+  const busy = !!(st && st.switching);
+  const active = st && st.active ? st.active.profile : null;
+  const cont = st && st.containers ? st.containers.find((c) => c.profile === selectedProfile) : null;
+  let mode = "switch", label = "切替", dis = true;
+  if (selectedProfile === RAG_VALUE) {
+    // RAG はロード済み=稼働中。稼働中なら停止ボタン、停止中なら起動ボタン
+    if (ragStatus && ragStatus.running) { mode = "stop"; label = "停止"; }
+    else label = "起動";
+    dis = busy;
+  } else if (selectedProfile && selectedProfile === active) {
+    mode = "stop"; label = "停止"; dis = busy;
+  } else if (selectedProfile) {
+    dis = busy || !cont || cont.ready === false;
+  }
+  btn.textContent = label;
+  btn.disabled = dis;
+  btn.classList.toggle("stop", mode === "stop");
+}
+
+document.getElementById("hdr-model-select").onchange = (e) => {
+  selectedProfile = e.target.value || null;
+  renderModelList();
+};
+
+document.getElementById("hdr-switch-btn").onclick = () => {
+  if (selectedProfile === RAG_VALUE) {
+    openRagModal(ragStatus && ragStatus.running ? "stop" : "start");
+    return;
+  }
+  const active = currentStatus && currentStatus.active ? currentStatus.active.profile : null;
+  if (selectedProfile && selectedProfile === active) { openStopModal(); return; }
+  if (!selectedProfile) return;
+  // 進捗ログはモデルタブのパネルに出すので、タブを切り替えてから実行する
+  showTab("model");
+  runSwitch();
 };
 </script>
 
 <script>
 // ------------------------------------------------------------- モデル停止モーダル
-document.getElementById("btn-stop").onclick = () => {
+// モデル停止の確認モーダル (vLLM パネルの「停止」とヘッダ行の「停止」ボタンから呼ぶ)
+function openStopModal() {
   const a = currentStatus && currentStatus.active;
   if (!a) return;
   const logEl = document.getElementById("stop-log");
@@ -1311,7 +1444,9 @@ document.getElementById("btn-stop").onclick = () => {
   document.getElementById("stop-cancel").style.display = "";
   document.getElementById("stop-go").disabled = false;
   openModal("modal-stop");
-};
+}
+
+document.getElementById("btn-stop").onclick = () => openStopModal();
 
 document.getElementById("stop-cancel").onclick = () => closeModal("modal-stop");
 
@@ -1946,6 +2081,8 @@ function applyPlatform() {
   applyPlatform();
   buildHostCards();
   buildMainChart();
+  // ヘッダのモデル選択プルダウン (RAG はリスト最下部。rag_enabled=false なら RAG なし)
+  renderHdrModel();
   // ページリロード後、サーバー側が保持する直近30分の履歴で時系列グラフをバックフィルする
   try {
     const hist = await fetchJson(API + "/api/history");
