@@ -2555,6 +2555,20 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   プルダウンの稼働中モデル自動追随、dual メーターの単一レイアウト化、行高さ 108px 統一）を
   `origin/main` の HEAD として push した。**atom2 は 2026-10-26 に同期済み**（上記 atom2 項参照）、**atom1 は未同期**（各機で `git pull --ff-only origin main`。
   変更は `front/index.html` と README のみで API 再起動は不要、ブラウザのリロードで反映）。
+  **本機 (Whitebear2026) でも 2026-10-26 にリモートの更新を反映済み**: `git pull --ff-only origin main` で
+  `f44dc5a` → `a8ea7e5` の 5 コミットを fast-forward（作業ツリーはクリーン、コンフリクトなし）。
+  取り込み内容は server.log を JST 0 時に truncate する機構（`api/rotate_log.sh` /
+  `api/install_logrotate_user.sh` / `dgx-spark-logrotate.{timer,service}` と、system unit 版
+  `install_service.sh` に追加された「JST 0 時 = そのマシンの何時何分」の換算 + 導入時の初回 truncate）、
+  `server.log.*.zip` / `.rotate_log.*` を無視する `.gitignore`、タイトル行から「 Monitor」と日時計
+  （`#clock` と 1 秒間隔の `setInterval`）を削除した `front/index.html`、atom2 の同期記録の README。
+  フロントは静的配信のためブラウザリロードで反映（`dgx-spark-api` は active のまま再起動不要）。
+  実測: 本機の API はポート **8090**（`dgx-spark-api.service`）で、配信中の `/` に `id="clock"` は
+  存在せず `<h1 id="hdr-title">DGX Spark</h1>`（`document.title` は従来どおり「<ホスト名> Monitor」）、
+  `/api/metrics` は 200。`dgx-spark-logrotate.timer` は**本機では未適用**（`systemctl list-timers` /
+  `systemctl --user list-timers` とも 0 件、`api/server.log` は 13.9 MB のまま。適用するなら
+  sudo 不要の `bash api/install_logrotate_user.sh`（user timer）か、`sudo bash api/install_service.sh`
+  の再実行で system timer）。
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
