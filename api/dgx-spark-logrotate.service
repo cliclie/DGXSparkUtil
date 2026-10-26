@@ -1,0 +1,13 @@
+[Unit]
+Description=DGXSparkUtil server.log daily archive (JST)
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__USER__
+WorkingDirectory=__API_DIR__
+ExecStart=__API_DIR__/rotate_log.sh
+# 100MB 級のコピー + zip はディスク IO を食う。モデルロード / prefill 中の
+# vLLM より優先度を下げて競合を避ける (IO idle + nice 10)。
+Nice=10
+IOSchedulingClass=idle

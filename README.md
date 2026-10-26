@@ -595,7 +595,8 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   dgx-spark / atom2 は従来どおり thermal-guard も有効化する
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
-- ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード）
+- ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード。JST 0 時に前日分を
+  `server.log.YYYYMMDD.zip` へアーカイブ → 下記「server.log の日次アーカイブ」）
 - **`install_service.sh` は `thermal-guard.service`（root 特権）も同時にインストールする**。
   `api/thermal_guard.sh` に `chmod 755` して unit をレンダリングし、`enable` + 毎回 `restart`
   （`enable --now` は稼働中 unit を再起動しないため、Environment のしきい値変更が反映されない）
@@ -603,6 +604,50 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
     thermal-guard の root unit だけ
   - AMD 機（R9700）では、旧 `llm-gpu-powercap.service`（210W 常時固定の oneshot）を
     自動で `disable --now` する（`power1_cap` の書き手を thermal-guard に集約）
+
+### server.log の日次アーカイブ（JST 0 時・zip）
+
+`dgx-spark-logrotate.timer` が **JST の 0 時**に `api/rotate_log.sh` を実行し、`server.log` を
+「当日（JST）分だけ」保つ形にローテートする。
+
+- 溜まった内容は `api/server.log.YYYYMMDD.zip` に保存。`YYYYMMDD` は `server.log` の
+  **最終更新日時を JST で見た日付**なので、0 時発火なら「たった今終わった日」= 前日になる
+  （昼間に手動実行したときは当日の日付になり、日付と中身がずれない）
+- `server.log` は 0 バイトになり、以後は当日分だけが残る
+- 方式は **コピー → truncate → zip**（logrotate の `copytruncate` と同じ発想）。
+  `dgx-spark-api.service` は `StandardOutput=append:server.log` で開いた fd に追記し続けるため、
+  リネーム方式だと書込みがアーカイブ側へ流れ続ける（`run.sh -d` の `>> server.log` も同じ）。
+  truncate は inode/fd を維持するので **API を再起動しなくてよい**
+  （代償としてコピー開始〜truncate 間の数十 ms の書込みは失う）
+- アーカイブは `.gitignore` 済み（`api/server.log.*.zip`）。**自動削除はしない**ので、
+  容量が気になったら `find api -name 'server.log.*.zip' -mtime +30 -delete` 等で消す
+
+手動運用:
+
+```bash
+systemctl list-timers dgx-spark-logrotate.timer        # 次回発火時刻を確認
+sudo systemctl start dgx-spark-logrotate.service       # 今すぐローテート (API は停止しない)
+unzip -l /home/cliclie/DGXSparkUtil/api/server.log.20261025.zip   # アーカイブの中身確認
+```
+
+- 日付境界は JST 固定。`OnCalendar` はマシンのローカル TZ で評価され unit の `TZ` 環境変数は
+  `ExecStart` にしか効かないため、`install_service.sh` が「JST 0 時 = そのマシンの何時何分」を
+  換算して `OnCalendar` に焼き込む（JST 機は `*-*-* 00:00:00`、UTC 機は `*-*-* 15:00:00`。
+  日本に夏時間はないので +0900 固定 = 通年同じ）
+- `Persistent=true` なのでシャットダウン中に逃した分は起動後に実行される
+  （数日分溜まった状態での初回実行は、最終日の名前で 1 本にまとまる）
+- 手動実行とタイマーが重なったときは `flock` で後発が何もしない（二重アーカイブしない）。
+  同日分に再実行で 2 本目が必要になったときは `server.log.YYYYMMDD.2.zip` に分かれる
+- **sudo 不要で導入する方法**: `bash api/install_logrotate_user.sh`。`~/.config/systemd/user/` に
+  同内容の unit（`User=` / `Nice=` / `IOSchedulingClass=` を落とした版）を書き、
+  `loginctl enable-linger`（DGX Spark 系ではパスワード不要で通った）でブート後も起動させる。
+  `server.log` が `cliclie` 所有なのでコピー / truncate に root 特権は要らない
+  - 管理: `systemctl --user list-timers dgx-spark-logrotate.timer` /
+    `systemctl --user start dgx-spark-logrotate.service` /
+    `journalctl --user -u dgx-spark-logrotate.service -n 5`
+  - `install_service.sh`（system unit 版）を入れるときは user timer を解除する
+    （`systemctl --user disable --now dgx-spark-logrotate.timer` + unit 削除 + `daemon-reload`）。
+    両方が残っても `rotate_log.sh` の `flock` で後発は何もしない（二重アーカイブしない）
 
 ### 手動起動（開発・デバッグ用）
 
@@ -2726,3 +2771,66 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
   `Runtime.exceptionThrown` / `consoleAPICalled` のエラー 0 件
 - 検証スクリプトはセッション用の一時ファイル（`/tmp/verify_tab.py` / `/tmp/vh*.py` / `/tmp/dual*.py` /
   `/tmp/btn*.py`）でリポジトリには含めない。実機のモデル切替・停止 API は発火させていない
+
+## server.log の日次アーカイブ（JST 0 時・zip）（2026-10-26）
+
+**要望**: `api/server.log` は当日分だけを保ち、日をまたいだら前日分を
+`api/server.log.YYYYMMDD.zip` に改名＋zip 圧縮する。日付またぎの判定は JST。
+
+**追加ファイル**
+
+- `api/rotate_log.sh` — コピー → truncate → zip。`API_DIR` は `BASH_SOURCE` から導出する
+  （`/tmp` へコピーして完結する単体テストができる）。`LOG_TZ`（既定 `Asia/Tokyo`）で上書き可
+- `api/dgx-spark-logrotate.service` — `Type=oneshot` / `User=__USER__`。100MB 級のコピー＋zip が
+  prefill 中の vLLM と競合しないよう `Nice=10` + `IOSchedulingClass=idle`
+- `api/dgx-spark-logrotate.timer` — `OnCalendar=__JST_MIDNIGHT_LOCAL__` + `Persistent=true`
+- `install_service.sh` — 上記 unit をレンダリングして `enable --now` し、導入時に一度
+  `systemctl start dgx-spark-logrotate.service` して溜まったログを当日分だけに整える
+- `.gitignore` — `api/server.log.*.zip` / `api/.rotate_log.lock` / `api/.rotate_log.*`
+- `api/install_logrotate_user.sh` — **sudo 不要版**。`~/.config/systemd/user/` に unit を書き、
+  `loginctl enable-linger` を有効化してタイマーをブート後も生かす（`server.log` は
+  `cliclie` 所有なのでコピー / truncate に root 特権は要らない）
+
+**「改名」ではなく copytruncate にした理由**: 書き手が `StandardOutput=append:server.log`
+（systemd unit）と `>> server.log`（`run.sh -d`）で fd を保持し続けるため、rename すると
+書込みがアーカイブ側へ流れ続けて `server.log` は以後増えない。truncate は inode/fd を保つので
+追記側を再起動せずに済む。logrotate の `copytruncate` と同じトレードオフで、
+コピー開始〜truncate 間（数十 ms）の書込みを失う。
+
+**JST 判定の 2 箇所**
+
+1. アーカイブ名: `TZ=Asia/Tokyo` を export したうえで
+   `date -d "@$(stat -c %Y server.log)" +%Y%m%d`（最終書込みの JST 日付）。
+   ログ行にタイムスタンプがない（uvicorn 既定の `INFO:     IP:port - "GET …" 200 OK`）ため、
+   行単位の時刻分割はできずファイル単位の分割 + 最終日命名になる
+2. 発火時刻: `OnCalendar` はマシンのローカル TZ で評価される（unit の `TZ` 環境変数は
+   `ExecStart` にしか効かない）。`install_service.sh` が `TZ=Asia/Tokyo date -d 'today 00:00:00' +%s`
+   を取り、その epoch をローカル TZ で `+%H:%M:%S` して `*-*-* HH:MM:SS` を生成する
+
+**検証サマリ（atom1 = WhitebearATOM1 実機・`TZ=Asia/Tokyo`。サンドボックス `/tmp/rot_test*` と実サービスの両方）**
+
+- 前日 mtime のログ → `server.log.20261025.zip`（zip 内エントリ名は `server.log`）、
+  `server.log` は 0 バイト、展開内容は原文と一致
+- 昼間の手動実行（当日 mtime）→ `server.log.20261026.zip`。同日分の再実行 → `…2.zip` へ連番
+- JST 境界: mtime `2026-10-25 23:59:59 +0900` → `20261025`、`2026-10-26 00:00:01 +0900` → `20261026`
+- 空ログ・ログなしは zip を作らない。作業 tmpdir の残骸 0（`.rotate_log.lock` は flock の対象なので残る）
+- **fd 生存**: `exec 3>>server.log` で 0.05 秒間隔に追記し続ける書き手の途中でローテート →
+  zip に `writer 1..8`、`server.log` に `writer 9..37`（同じ fd で追記が継続、欠番なし）
+- `flock`: 同時起動した 2 本目は rc=0 で何もしない、zip は 1 本
+- **実サービスに対する初回ローテート**（`api/server.log` 196,292,515 B = 187 MB）→
+  `server.log.20261026.zip` **1,264,094 B（1.2 MB、99.4% 圧縮）**。zip 内は先頭
+  `INFO:     Started server process [295023]` から 2,904,909 行。`server.log` は 0 バイトになり、
+  以後も稼働中の uvicorn（pid 2191）が同じ fd で追記を継続（+404 B/2 秒で単調増加、
+  `/proc/2191/fdinfo/1` の flags に `O_APPEND`、`NRestarts=0` = API 無停止、`GET /` は 200）
+- **user timer 実導入**（`install_logrotate_user.sh`）: `systemctl --user list-timers` の次回発火が
+  `Tue 2026-10-27 00:00:00 JST`。`systemctl --user start` の oneshot は `status=0/SUCCESS` で
+  journal に `rotated 27388 bytes -> server.log.20261026.2.zip (440 bytes)`
+  （連番命名が実運用で機能）。`systemd-analyze --user verify` は無警告
+- `bash -n` 通過。`systemd-analyze verify`（レンダリング後 unit）は無警告
+  （`rotate_log.sh` に実行権が必要 → repo 側は 755、`install_service.sh` も chmod 755 する）
+- レンダリング実測: プレースホルダ残 0、`OnCalendar=*-*-* 00:00:00`（JST 機）。
+  同じ換算式は TZ=UTC 機で `15:00:00` を返すことを確認
+- **本機 (atom1) は user timer で稼働中**: `install_logrotate_user.sh` を実適用済み
+  （`loginctl enable-linger cliclie` はパスワードなしで通った）。`sudo bash api/install_service.sh`
+  の system unit 版はパスワード必須のため未実行（次の保守時に）。他機 (atom2 / DGX Spark / WSL) は
+  `git pull` 後に `bash api/install_logrotate_user.sh`（sudo 不要）で有効化できる

@@ -1,0 +1,18 @@
+[Unit]
+Description=Archive DGXSparkUtil server.log at JST midnight
+
+[Timer]
+# JST の 0 時に発火する。OnCalendar は **マシンのローカルタイムゾーン**で評価され、
+# unit の TZ 環境変数は効かない (Environment=TZ=Asia/Tokyo は ExecStart にのみ適用)。
+# そこで install_service.sh が「JST 0 時 = このマシンの何時何分か」を換算して
+# __JST_MIDNIGHT_LOCAL__ に流し込む。日本に夏時間はないので +0900 固定 = 通年同じ。
+#   JST がローカル TZ のマシン (DGX Spark / atom1 / atom2) -> "*-*-* 00:00:00"
+#   TZ=UTC のマシン (WSL2 等)                              -> "*-*-* 15:00:00"
+OnCalendar=__JST_MIDNIGHT_LOCAL__
+AccuracySec=1min
+# マシン停止などで取り逃した分を起動後に一度実行する (server.log が数日分
+# 溜まった状態での初回実行は、最終日の名前で 1 本にまとまる)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

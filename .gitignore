@@ -3,8 +3,11 @@ api/venv/
 __pycache__/
 *.pyc
 
-# サーバーログ
+# サーバーログ (rotate_log.sh が JST 0 時に server.log.YYYYMMDD.zip へアーカイブする)
 api/server.log
+api/server.log.*.zip
+api/.rotate_log.lock
+api/.rotate_log.*
 .clinerules/01-always.md
 
 # 更新前の依存スナップショット（ロールバック用ローカル残置。再現用の requirements.lock は追跡する）

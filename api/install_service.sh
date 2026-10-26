@@ -89,6 +89,22 @@ if [ "${TG_ENABLED}" = "1" ]; then
     "${API_DIR}/${TG_SERVICE}" > "${TG_UNIT_PATH}"
   chmod 644 "${TG_UNIT_PATH}"
 fi
+# server.log の日次アーカイブ (rotate_log.sh + JST 0 時タイマー)。
+# OnCalendar はマシンのローカル TZ で評価され、unit の TZ 環境変数は ExecStart に
+# しか効かない。そこで「JST 0 時 = このマシンの何時何分か」をここで換算する。
+# 日本に夏時間はないので +0900 固定 = 通年同じ時刻 (JST 機は 00:00:00、UTC 機は 15:00:00)。
+LR_SERVICE="dgx-spark-logrotate.service"
+LR_TIMER="dgx-spark-logrotate.timer"
+JST_MIDNIGHT_EPOCH="$(TZ=Asia/Tokyo date -d 'today 00:00:00' +%s)"
+JST_MIDNIGHT_LOCAL="*-*-* $(date -d "@${JST_MIDNIGHT_EPOCH}" +%H:%M:%S)"
+chmod 755 "${API_DIR}/rotate_log.sh"
+echo "==> Rendering log-rotate units -> ${LR_SERVICE} / ${LR_TIMER} (OnCalendar='${JST_MIDNIGHT_LOCAL}' = JST 0 時)"
+sed -e "s|__API_DIR__|${API_DIR}|g" -e "s|__USER__|${RUN_USER}|g" \
+  "${API_DIR}/${LR_SERVICE}" > "/etc/systemd/system/${LR_SERVICE}"
+sed -e "s|__API_DIR__|${API_DIR}|g" -e "s|__USER__|${RUN_USER}|g" \
+  -e "s|__JST_MIDNIGHT_LOCAL__|${JST_MIDNIGHT_LOCAL}|g" \
+  "${API_DIR}/${LR_TIMER}" > "/etc/systemd/system/${LR_TIMER}"
+chmod 644 "/etc/systemd/system/${LR_SERVICE}" "/etc/systemd/system/${LR_TIMER}"
 systemctl daemon-reload
 
 echo "==> Enabling and starting services"
@@ -102,6 +118,13 @@ if [ "${TG_ENABLED}" = "1" ]; then
 else
   echo "==> Skipping thermal-guard (WSL2 or DGXUTIL_THERMAL=0)"
 fi
+
+# server.log 日次アーカイブ。タイマーを有効化し、導入時に一度ローテートして
+# 溜まった server.log を「当日分だけ」に整える。oneshot なので start は zip 完了まで
+# ブロックする (100MB 級で数十秒)。API 本体は停止しない (copytruncate 方式)。
+echo "==> Enabling ${LR_TIMER} and running the first rotation"
+systemctl enable --now "${LR_TIMER}"
+systemctl start "${LR_SERVICE}"
 
 # R9700 (atom2): 旧 llm-gpu-powercap.service は power1_cap を 210W に常時固定する
 # oneshot。thermal-guard が power1_cap の唯一の書き手になるので無効化する
