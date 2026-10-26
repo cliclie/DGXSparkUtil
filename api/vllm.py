@@ -159,6 +159,9 @@ _job: dict | None = None
 # /metrics のトークンカウンタ差分(スループット算出用: 入力/出力分離)
 _prev_metrics: dict = {"ts": None, "prompt": None, "generation": None}
 
+# Strata の直近スループットキャッシュ（idle/unloaded で 5s 以内は前回値を返す）
+_strata_last_metrics: dict = {}
+
 
 def _tps_of(key: str, metric: str, pm: dict, now: float) -> float | None:
     """key に対応する系列の差分 tok/s を算出する。
@@ -455,14 +458,15 @@ def _strata_health_info(port: int) -> dict:
 def _strata_server_metrics(port: int) -> dict:
     """Strata の /metrics (Bearer 必須・JSON。Prometheus 形式ではない) をマッピングする。
 
-    生成中は live の瞬時値 (tok_s / prefill_tok_s_mean)、アイドル時は requests
-    直近 (先頭) の実測値で補完する。
-    - 出力スループット = live.tok_s → requests[0].decode_tok_s
+    生成中は live の瞬時値 (tok_s / prefill_tok_s_mean)、リクエスト直後は完了済み
+    リクエストの実測値を short TTL キャッシュ (5s) で返す（llama.cpp の /metrics が
+    idle で 0 を返すのと同じ「直近値表示」体験）。アイドル継続・unloaded 時は 0。
+    - 出力スループット = live.tok_s → requests 直近完了の decode_tok_s
     - 入力スループット = live.prefill_tok_s_mean → prompt_tokens ÷ (prompt_ms/1000)
     - E2E = duration_s / TTFT = first_engine_token_s (直近完了リクエスト)
-    - KVCache 使用率 = (prompt+output) ÷ engine.context × 100 (直近リクエスト)
-    前回値保持は front 側で行うため、ここでは取得値をそのまま返す。
+    - KVCache 使用率 = (prompt+output) ÷ engine.context × 100 → idle/unloaded で 0
     """
+    now = time.time()
     m = {
         "requests_running": None,
         "requests_waiting": None,
@@ -487,7 +491,15 @@ def _strata_server_metrics(port: int) -> dict:
     live = d.get("live") or {}
     engine = d.get("engine") or {}
     reqs = d.get("requests") or []
-    last = reqs[0] if reqs and isinstance(reqs[0], dict) else {}
+    # クライアント切断で cancel されたリクエストは decode_tok_s 等が null のため、
+    # 直近の「完了」リクエスト（stop/length）を代表に選ぶ
+    last: dict = {}
+    for r in reqs:
+        if isinstance(r, dict) and r.get("finish") in ("stop", "length"):
+            last = r
+            break
+    if not last and reqs and isinstance(reqs[0], dict):
+        last = reqs[0]
     m["requests_running"] = live.get("running")
     m["requests_waiting"] = live.get("queued")
     if isinstance(last.get("duration_s"), (int, float)):
@@ -508,6 +520,31 @@ def _strata_server_metrics(port: int) -> dict:
     if ctx and last.get("prompt_tokens") is not None:
         used = (last.get("prompt_tokens") or 0) + (last.get("output_tokens") or 0)
         m["kv_cache_usage_pct"] = min(100.0, used / float(ctx) * 100.0)
+    # Strata はアイドルが暫く続くとモデルを unload する（/health の loaded が false、
+    # live.state=unloaded）。稼働判定（front の stale 表示）が running>0 参照のため
+    # unloaded では running を 0 に正規化し、スループット・KV は 0 を返す
+    # （llama.cpp の idle 時 /metrics と同じ挙動）。直後 (5s 以内) は計測値を維持
+    if live.get("state") == "unloaded":
+        m["requests_running"] = 0
+    if not m["requests_running"]:
+        cached = _strata_last_metrics
+        if now - cached.get("ts", 0.0) <= 5.0:
+            for k in ("prompt_tokens_per_s", "generation_tokens_per_s",
+                      "kv_cache_usage_pct"):
+                m[k] = cached.get(k)
+        else:
+            m["prompt_tokens_per_s"] = 0.0
+            m["generation_tokens_per_s"] = 0.0
+            m["kv_cache_usage_pct"] = 0.0
+    else:
+        _strata_last_metrics.update(
+            {
+                "ts": now,
+                "prompt_tokens_per_s": m["prompt_tokens_per_s"],
+                "generation_tokens_per_s": m["generation_tokens_per_s"],
+                "kv_cache_usage_pct": m["kv_cache_usage_pct"],
+            }
+        )
     return m
 
 
