@@ -2554,7 +2554,22 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status` が 200・thermal-guard active を確認）。
   unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
   運用に無影響）。
-- **atom2 (WhitebearATOM2)**: 2026-10-26 に `861d946` まで同期済み（本機。`git pull --ff-only origin main`
+- **atom2 (WhitebearATOM2)**: 2026-10-27 に `77a5dd2` まで同期済み（本機。`git fetch --all --prune` +
+  `git merge --ff-only origin/main` で `04930ca` → `77a5dd2` の 4 コミットを fast-forward、作業ツリーは
+  クリーン・コンフリクトなし）。取り込み内容はヘッダのモデル選択プルダウンで重み未導入を灰色表示
+  （Whitebear2026 実装。`front/index.html` の `#hdr-model-select option.not-ready { color: var(--muted); }`
+  と `hdrModelOptions()` が返す 3 番目の `notReady` フラグ、`6fbf245`）と、各機の同期状況を記録する
+  README 追記（`728decf` / `4700cc8` / `77a5dd2`）のみで **`api/` 配下の変更はゼロ**。よって API 再起動は
+  不要で、フロントは静的配信のためブラウザリロードで反映。実測: 配信中の `/`（ポート **8080**）は
+  リポジトリの `front/index.html` とバイト一致し灰色表示コード（`not-ready` が両ファイルで 6 箇所）を
+  含む、`dgx-spark-api` は active のまま `/api/metrics`・`/api/platform`・`/api/vllm/status` が 200。
+  なお本機は strata 系 3 コミット（`ef845fa` Cline 設定値対応 / `24c36bd` prefill/decode スループット対応 /
+  `04930ca` idle/unloaded 正規化と直後 5 秒キャッシュ）の実装元で 2026-10-26 にコミット済み、稼働中の
+  `dgx-spark-api`（MainPID の cwd は `/home/cliclie/DGXSparkUtil/api`、`NRestarts=0`）は 2026-10-27
+  **06:43:53 起動**で今回の pull（08:00:35）より後のため strata 系のコードはランタイムに反映済み
+  （Whitebear2026 で必要だった 07:49 の再起動は本機では不要）。`atom2対応` ブランチも
+  `origin/atom2対応` と同期済み（差分なし）。
+  2026-10-26 に `861d946` まで同期済み（`git pull --ff-only origin main`
   で `a8ea7e5` → `861d946` の 2 コミットを fast-forward。vLLM 情報カードの状態表示を「稼働中」/「API応答なし」へ
   短縮するフロント変更（`front/index.html` 1 行）と、Whitebear2026 のリモート更新反映を記録する README 追記を
   取り込み。フロントは静的配信のためブラウザリロードで反映（API 再起動不要）。
@@ -2602,7 +2617,8 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   （`front/index.html` と README のみ。フロントは静的配信のためブラウザリロードで反映、
   `dgx-spark-api` は active のまま再起動不要。headless Chrome + CDP で展開時の描画（未導入 13 件が
   `--muted`、導入済みと RAG が `--text`）と、閉じた表示色・切替ボタン状態・ヘッダ高さの回帰なしを
-  確認。詳細は実装メモ 2026-10-27）。**atom1 / atom2 は未同期**（各機で `git pull --ff-only origin main`）
+  確認。詳細は実装メモ 2026-10-27）。**atom1 / atom2 も 2026-10-27 に同期済み**（上記各機項参照。
+  atom1 は `4700cc8`、atom2 は `77a5dd2` まで）
   **2026-10-27: 同じく本機でリモートの 3 コミットも反映した**（`git pull --rebase origin main` で
   `e0fb35c` → `04930ca` の 3 件を、自前の灰色表示コミット（`6fbf245`）の下に積んだ。内容は
   `ef845fa` strata の Cline 設定値対応（API key 表示と `/health` 動的取得）、`24c36bd` strata の
