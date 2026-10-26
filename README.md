@@ -2573,6 +2573,16 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `systemctl --user list-timers` とも 0 件、`api/server.log` は 13.9 MB のまま。適用するなら
   sudo 不要の `bash api/install_logrotate_user.sh`（user timer）か、`sudo bash api/install_service.sh`
   の再実行で system timer）。
+  **さらに 2026-10-26 にリモートの更新を反映済み**: `git fetch --all --prune` +
+  `git pull --ff-only origin main` で `c77202f` → `9fe469f` の 2 コミットを fast-forward
+  （作業ツリーはクリーン、コンフリクトなし）。取り込み内容は、vLLM 情報カードの状態表示を
+  「稼働中 (API応答)」/「稼働中 (API応答なし)」から「稼働中」/「API応答なし」へ短縮する
+  `front/index.html` の 1 行変更（`861d946` / `renderVllm()` 内の `setV("v-status", …)`）と、
+  atom2 が `861d946` まで同期したことを記録する README 追記（`9fe469f`）。
+  フロントは静的配信のためブラウザリロードで反映（`dgx-spark-api` は active のまま再起動不要）。
+  実測: 配信中の `/`（ポート **8090**）はリポジトリの `front/index.html` とバイト一致し
+  `a.health ? "稼働中" : "API応答なし"` を含む（`/api/metrics` は 200）。
+  なお 1552 行目の modelctl 側 `稼働中 (API応答)` は今回の変更対象外で従来どおり。
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
