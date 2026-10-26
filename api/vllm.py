@@ -452,6 +452,65 @@ def _strata_health_info(port: int) -> dict:
     return out
 
 
+def _strata_server_metrics(port: int) -> dict:
+    """Strata の /metrics (Bearer 必須・JSON。Prometheus 形式ではない) をマッピングする。
+
+    生成中は live の瞬時値 (tok_s / prefill_tok_s_mean)、アイドル時は requests
+    直近 (先頭) の実測値で補完する。
+    - 出力スループット = live.tok_s → requests[0].decode_tok_s
+    - 入力スループット = live.prefill_tok_s_mean → prompt_tokens ÷ (prompt_ms/1000)
+    - E2E = duration_s / TTFT = first_engine_token_s (直近完了リクエスト)
+    - KVCache 使用率 = (prompt+output) ÷ engine.context × 100 (直近リクエスト)
+    前回値保持は front 側で行うため、ここでは取得値をそのまま返す。
+    """
+    m = {
+        "requests_running": None,
+        "requests_waiting": None,
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": None,
+        "prompt_tokens_per_s": None,
+        "generation_tokens_per_s": None,
+    }
+    headers = (
+        ["-H", f"Authorization: Bearer {config.STRATA_API_KEY}"]
+        if config.STRATA_API_KEY
+        else None
+    )
+    txt = _http_get(f"http://localhost:{port}/metrics", 5, headers)
+    if not txt:
+        return m
+    try:
+        d = json.loads(txt)
+    except ValueError:
+        return m
+    live = d.get("live") or {}
+    engine = d.get("engine") or {}
+    reqs = d.get("requests") or []
+    last = reqs[0] if reqs and isinstance(reqs[0], dict) else {}
+    m["requests_running"] = live.get("running")
+    m["requests_waiting"] = live.get("queued")
+    if isinstance(last.get("duration_s"), (int, float)):
+        m["e2e_latency_s"] = last["duration_s"]
+    if isinstance(last.get("first_engine_token_s"), (int, float)):
+        m["ttft_s"] = last["first_engine_token_s"]
+    gen = live.get("tok_s")
+    if not gen:
+        gen = last.get("decode_tok_s")
+    m["generation_tokens_per_s"] = gen
+    pre = live.get("prefill_tok_s_mean")
+    if not pre:
+        pt, pms = last.get("prompt_tokens"), last.get("prompt_ms")
+        if pt and pms:
+            pre = pt / (pms / 1000.0)
+    m["prompt_tokens_per_s"] = pre
+    ctx = engine.get("context") or engine.get("max_context")
+    if ctx and last.get("prompt_tokens") is not None:
+        used = (last.get("prompt_tokens") or 0) + (last.get("output_tokens") or 0)
+        m["kv_cache_usage_pct"] = min(100.0, used / float(ctx) * 100.0)
+    return m
+
+
 # ---------------------------------------------------------------- 状態
 
 def _parse_vllm_metrics(text: str) -> dict:
@@ -1160,6 +1219,17 @@ def get_status() -> dict:
         mm = re.search(r'"id"\s*:\s*"([^"]+)"', models)
         if mm:
             active["model_name"] = mm.group(1)
+
+    # Strata: /metrics は JSON（Bearer 必須・Prometheus 形式ではない）→
+    # live + requests からマッピングする（_strata_server_metrics 参照）
+    if running_profile == "strata":
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _strata_server_metrics(port)
+        logs = _run(["docker", "logs", "--tail", "30", info["container"]], timeout=10)
+        active["logs"] = logs.splitlines()[-30:]
+        out["active"] = active
+        return out
 
     # 組み込みメトリクス (/metrics): vLLM は常時公開、SGLang は --enable-metrics 指定時のみ
     # vLLM 26.x の系列名: e2e 相当は request_inference_time_seconds、
