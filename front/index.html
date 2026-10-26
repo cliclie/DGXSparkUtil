@@ -1165,7 +1165,7 @@ function renderVllm(st) {
     // 稼働中 → 停止中…(赤) → 完了後は active が null になり「停止中」(灰)
     setV("v-status", "停止中…", "hot");
   } else {
-    setV("v-status", a.health ? "稼働中 (API応答)" : "稼働中 (API応答なし)", a.health ? "up" : "warn");
+    setV("v-status", a.health ? "稼働中" : "API応答なし", a.health ? "up" : "warn");
   }
   setV("v-uptime", a.uptime_str || "-");
   // モデル切替(稼働 profile 変化)で保持値・白/灰状態をリセット(エンジン別で値が非連続)
