@@ -2536,7 +2536,19 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
-- **atom1 (WhitebearATOM1)**: 2026-10-24 に同期済み（`c3fbe98` へ reset + `atom2対応` ブランチ同期 /
+- **atom1 (WhitebearATOM1)**: 2026-10-27 に `4700cc8` まで同期済み（本機。`git pull --ff-only origin main`
+  で `861d946` → `4700cc8` の 8 コミットを fast-forward、作業ツリーはクリーン・コンフリクトなし）。
+  取り込み内容は strata（Strata / atom2）の Cline 設定値対応（API key 表示と `/health` 動的取得、`ef845fa`）、
+  strata の prefill/decode スループット対応（`/metrics` JSON・Bearer 必須からマッピング、`24c36bd`）、
+  strata metrics の idle/unloaded 正規化と直後 5 秒キャッシュ（`04930ca`）（`api/config.py` / `api/vllm.py`）、
+  ヘッダのモデル選択プルダウンで重み未導入を灰色表示（`front/index.html`、`6fbf245`）、
+  各機の同期状況記録 README（`9fe469f` / `e0fb35c` / `728decf` / `4700cc8`）。
+  フロントは静的配信のためブラウザリロードで反映（API 再起動不要）。実測: 配信中の `/`（ポート **8080**）は
+  リポジトリの `front/index.html` とバイト一致し灰色表示コード（`muted` / 「未導入」）を含む、
+  `/api/metrics` は 200、`dgx-spark-api` は active。
+  strata 系の API 変更は strata プロファイル（atom2）でのみトリガーされるため本機（dgx-spark）の
+  ランタイムには影響なし（`CLINE_MODEL_TABLE` の strata 項は atom2 用セクション）。
+  2026-10-24 に同期済み（`c3fbe98` へ reset + `atom2対応` ブランチ同期 /
   venv を `pip install -U -r requirements.txt` で更新: fastapi 0.162.0 / starlette 1.9.0 / pydantic 2.14.1 /
   uvicorn 0.54.0 / opentelemetry-api 1.45.1 / API 再起動し `/`・`/api/platform`・`/api/metrics`・
   `/api/vllm/status` が 200・thermal-guard active を確認）。
