@@ -2591,6 +2591,15 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `dgx-spark-api` は active のまま再起動不要。headless Chrome + CDP で展開時の描画（未導入 13 件が
   `--muted`、導入済みと RAG が `--text`）と、閉じた表示色・切替ボタン状態・ヘッダ高さの回帰なしを
   確認。詳細は実装メモ 2026-10-27）。**atom1 / atom2 は未同期**（各機で `git pull --ff-only origin main`）
+  **2026-10-27: 同じく本機でリモートの 3 コミットも反映した**（`git pull --rebase origin main` で
+  `e0fb35c` → `04930ca` の 3 件を、自前の灰色表示コミット（`6fbf245`）の下に積んだ。内容は
+  `ef845fa` strata の Cline 設定値対応（API key 表示と `/health` 動的取得）、`24c36bd` strata の
+  prefill/decode スループット対応（`/metrics` JSON・Bearer 必須）、`04930ca` strata metrics の
+  idle/unloaded 正規化と直後 5 秒キャッシュ。更新対象は `api/config.py` / `api/vllm.py`）
+  - 注意: 稼働中の `dgx-spark-api`（systemd system unit、起動 2026-10-27 06:39）は pull（07:46）
+    前のコードで動いているため **strata 系 3 件はランタイムに未反映。反映には
+    `sudo systemctl restart dgx-spark-api` が必要（本記録時点では未実施）**。フロントの
+    灰色表示は静的配信のためブラウザリロードで反映済み
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
