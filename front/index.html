@@ -48,7 +48,6 @@ header {
   z-index: 5;
 }
 header h1 { font-size: 15px; margin: 0; display: flex; align-items: center; }
-header #clock { color: var(--muted); font-size: 13px; align-self: center; }
 header #pstate { font-size: 13px; font-weight: 600; align-self: center; }
 header #thermal { font-size: 13px; font-weight: 600; align-self: center; }
 main { padding: 12px 20px 10px; }
@@ -429,7 +428,6 @@ table.params td input[readonly] { color: var(--muted); }
 <body>
 <header>
   <h1 id="hdr-title">DGX Spark</h1>
-  <span id="clock"></span>
   <span id="pstate"></span>
   <span id="thermal"></span>
   <!-- タブ (システム / モデル) はヘッダ行内。モデルタブの横にモデル選択と切替/停止ボタンを置く -->
@@ -2008,13 +2006,7 @@ function onJobDone(job) {
   }
 }
 
-// ------------------------------------------------------------- クロック
-setInterval(() => {
-  document.getElementById("clock").textContent =
-    new Date().toLocaleString("ja-JP", { hour12: false });
-}, 1000);
-
-// ------------------------------------------------------------- P-State(タイトルの現在日時の右)
+// ------------------------------------------------------------- P-State(タイトル右)
 // P0=緑 / P2・P3・P5・P7・P8・P12・P15=黄 / それ以外=赤
 //   P5・P7 は GeForce (WSL2 の RTX 5090) で頻出する中間状態。追加前は「それ以外」に
 //   落ちて赤 (異常に見える) だった (実測: アイドルでも P8 と P5 が秒刻みで交互)。

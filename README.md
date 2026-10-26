@@ -2777,7 +2777,15 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
     `document.title="DGX Spark Monitor"`（意図どおり未変更）
   - `--dump-dom --virtual-time-budget` は fetch 待ちの JS 初期化が完了せず静的値しか返さなかった。
     CDP で `Runtime.evaluate` を 5 秒後に実行して実描画を確認する
-
+- **タイトル行の日時計（`yyyy/mm/dd hh:mm:ss`）を削除**（同日の追加指示）: `header` の
+  `<span id="clock">`、CSS `header #clock`、1 秒間隔の `setInterval`（`toLocaleString("ja-JP",
+  {hour12:false})` を流し込む block）を削除。要素を消すと `getElementById("clock")` が
+  1 秒後に `null` 参照で落ちるので **setInterval も同時に消すのが必須**。
+  後続コメント「P-State(タイトルの現在日時の右)」→「P-State(タイトル右)」に修正
+  - 実測（atom1、headless Chrome + CDP `/tmp/cdp_clock_check.py`）: `#clock` は `null`、
+    ヘッダ text は `DGX Spark | P0 | システム | モデル | …`（日時なし）、
+    時系列 360 → 362 点に増加（ポーリング生存）、gauges 11 枚、
+    `Runtime.exceptionThrown` / `consoleAPICalled(error|warning)` / `Log.entryAdded(error|warning)` **0 件**
 
 ## server.log の日次アーカイブ（JST 0 時・zip）（2026-10-26）
 
