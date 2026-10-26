@@ -437,6 +437,21 @@ def _magn_context_length(port: int) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _strata_health_info(port: int) -> dict:
+    """Strata の /health (key 不要) から max_context / images を読む (Cline 設定補完用)。"""
+    txt = _http_get(f"http://localhost:{port}/health", 5)
+    if not txt:
+        return {}
+    out: dict = {}
+    m = re.search(r'"max_context"\s*:\s*(\d+)', txt)
+    if m:
+        out["max_context"] = int(m.group(1))
+    m = re.search(r'"images"\s*:\s*(true|false)', txt)
+    if m:
+        out["images"] = m.group(1) == "true"
+    return out
+
+
 # ---------------------------------------------------------------- 状態
 
 def _parse_vllm_metrics(text: str) -> dict:
@@ -1135,8 +1150,11 @@ def get_status() -> dict:
     # API 健全性 (vLLM の /health は本文空・HTTP 200 が正常)
     active["health"] = _http_ok(f"{base}/health", timeout=3)
 
-    # サーブ中モデル名
-    models = _http_get(f"{base}/v1/models", timeout=3)
+    # サーブ中モデル名（Strata は /v1/* に Bearer key 必須）
+    models_headers = None
+    if running_profile == "strata" and config.STRATA_API_KEY:
+        models_headers = ["-H", f"Authorization: Bearer {config.STRATA_API_KEY}"]
+    models = _http_get(f"{base}/v1/models", timeout=3, headers=models_headers)
     active["model_name"] = None
     if models:
         mm = re.search(r'"id"\s*:\s*"([^"]+)"', models)
@@ -1643,6 +1661,13 @@ CLINE_MODEL_TABLE = {
         "temperature": 0.6,
     },
     # --- WhitebearATOM2 (R9700 / VRAM 32GB) 用 -----------------
+    "strata": {
+        "images": True,  # 動的: /health の images（table はフォールバック）
+        "context_max": 131072,  # 動的: /health の max_context（IQ3_XXS 既定 128K）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
     "qwen38radiance": {
         "images": True,  # 動的: --limit-mm-per-prompt
         "context_max": 262144,
@@ -1763,6 +1788,11 @@ def get_cline_config() -> dict:
     if is_magn:
         base_url = f"http://{hostname}.local:{port}/{config.MAGN_BASE_PATH}/"
         api_key = config.MAGN_API_KEY
+    elif profile == "strata":
+        # Strata は /health のみ key 不要。/v1/* は Bearer 認証が必須のため
+        # compose/.env の STRATA_API_KEY をそのまま返す（前面でコピー可能）
+        base_url = f"http://{hostname}.local:{port}/v1/"
+        api_key = config.STRATA_API_KEY
     else:
         base_url = f"http://{hostname}.local:{port}/v1/"
         api_key = "認証なし(任意の値でOK)"
@@ -1804,6 +1834,14 @@ def get_cline_config() -> dict:
         if magn_ctx is not None:
             context_recommended = magn_ctx
             context_max = magn_ctx
+    # Strata は compose の command が無く環境変数設定 → /health から動的取得
+    if profile == "strata":
+        hi = _strata_health_info(port)
+        if hi.get("max_context"):
+            context_recommended = hi["max_context"]
+            context_max = hi["max_context"]
+        if "images" in hi:
+            images = hi["images"]
     max_output_recommended = table.get("max_output_recommended", 8192)
     max_output_max = table.get("max_output_max", 32768)
     if temperature is None:

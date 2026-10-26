@@ -205,3 +205,9 @@ MAGN_SYSTEMD_UNIT = MAGN_ENV.get("MAGN_SYSTEMD_UNIT", "magn-headless.service")
 MAGN_USAGE_DB = Path(
     MAGN_ENV.get("MAGN_USAGE_DB", str(Path.home() / ".magnitude" / "serving-usage.sqlite"))
 ).expanduser()
+
+# ---------------------------------------------------------------- Strata (strata)
+# Strata は compose サービス (port 8009・コンテナ内 8080)。/health のみ key 不要で
+# max_context / images を返す。/v1/* と /metrics・/slots は Bearer ${STRATA_API_KEY} 必須。
+
+STRATA_API_KEY = MAGN_ENV.get("STRATA_API_KEY", "")
