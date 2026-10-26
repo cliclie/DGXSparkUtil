@@ -981,21 +981,21 @@ function buildMainChart() {
   CHART_NORM = { cpuTemp: 100, gpuPower: discrete ? 300 : 140, gpuClock: discrete ? 2350 : 3003, diskIO: 5000 };
   const N = CHART_NORM;
   chartDs = {
-    cpuLoad: lineDS("CPU負荷", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
-    cpuTemp: lineDS("CPU温度", toPct(series.cpuTemp, N.cpuTemp), "#f85149"),
-    memUsed: { ...lineDS(discrete ? "RAM使用率" : "メモリ使用率", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
-    gpuLoad: { ...lineDS("GPU負荷", series.gpuLoad, "#d29922", "rgba(210,153,34,.30)"), fill: true },
-    gpuTemp: lineDS("GPU温度", toPct(series.gpuTemp, N.cpuTemp), "#ff7b72"),
-    gpuPower: lineDS("GPU電力", toPct(series.gpuPower, N.gpuPower), "#bc8cff"),
-    gpuClock: lineDS("GPUクロック", toPct(series.gpuClock, N.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
-    diskUsed: lineDS("DISK使用率", series.diskUsed, "#79c0ff"),
+    cpuLoad: lineDS("CPU %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
+    cpuTemp: lineDS("CPU ℃", toPct(series.cpuTemp, N.cpuTemp), "#f85149"),
+    memUsed: { ...lineDS(discrete ? "RAM %" : "メモリ %", series.memUsed, "#3fb950", "rgba(63,185,80,.30)"), fill: true },
+    gpuLoad: { ...lineDS("GPU %", series.gpuLoad, "#d29922", "rgba(210,153,34,.30)"), fill: true },
+    gpuTemp: lineDS("GPU ℃", toPct(series.gpuTemp, N.cpuTemp), "#ff7b72"),
+    gpuPower: lineDS("GPU W", toPct(series.gpuPower, N.gpuPower), "#bc8cff"),
+    gpuClock: lineDS("GPU MHz", toPct(series.gpuClock, N.gpuClock), "#8b949e"), // グレー=ゲージラベルマーカーと同色
+    diskUsed: lineDS("DISK %", series.diskUsed, "#79c0ff"),
     diskRead: lineDS("DISK Read", toPct(series.diskRead, N.diskIO), "#56d364"),
     diskWrite: lineDS("DISK Write", toPct(series.diskWrite, N.diskIO), "#e3b341"),
   };
   const datasets = [chartDs.cpuLoad, chartDs.cpuTemp, chartDs.memUsed];
   if (discrete) {
     // atom2: VRAM は RAM と別系列 (シアン=VRAM ゲージと同色)
-    chartDs.vramUsed = { ...lineDS("VRAM使用率", series.vramUsed, "#39c5cf", "rgba(57,197,207,.30)"), fill: true };
+    chartDs.vramUsed = { ...lineDS("VRAM %", series.vramUsed, "#39c5cf", "rgba(57,197,207,.30)"), fill: true };
     datasets.push(chartDs.vramUsed);
   }
   datasets.push(chartDs.gpuLoad, chartDs.gpuTemp, chartDs.gpuPower, chartDs.gpuClock,
