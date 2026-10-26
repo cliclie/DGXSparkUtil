@@ -99,7 +99,11 @@ section > h2 {
   max-width: 320px;
 }
 #hdr-model-select:hover { border-color: var(--blue); }
-#hdr-switch-btn { padding: 4px 12px; font-size: 12px; }
+/* 幅は最大ラベル (4 文字 = 「再作成中」) + 余白で決める。
+   4em (日本語 1 字 = 1em = 12px × 4) + padding 8×2 + border 1×2 = 4em + 18px。
+   em 指定なのでフォントや実機の違いにも追従する (固定 px だと「…」込みの実測値に縛られる)。
+   white-space: nowrap で折り返しによる高さ変化 (2 行 = 38px) を防ぐ */
+#hdr-switch-btn { padding: 4px 8px; font-size: 12px; min-width: calc(4em + 18px); text-align: center; white-space: nowrap; }
 #hdr-switch-btn.stop { background: #33161a; border-color: #5c2b30; color: #e5534b; }
 #hdr-switch-btn.stop:hover { border-color: var(--red); }
 .tab-panel { display: none; }
@@ -147,10 +151,9 @@ section > h2 {
 .gauge.thr-crit { border-color: var(--thr-red); }
 .gauge .gtitle { color: var(--muted); font-size: 10px; margin-bottom: 3px; }
 .gauge .gtitle .gdot { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
-.gauge .gcanvas { position: relative; height: 60px; } /* 76px → 80% (4の倍数) */
-.gauge.dual .gcanvas { height: 44px; } /* 56px → 80%: 二重メーターは 2 行テキストをゲージ下に置くため描画領域を縮小 (単一メーターとカード高さを揃える) */
+.gauge .gcanvas { position: relative; height: 60px; } /* 76px → 80% (4の倍数)。dual も単一と同じ 60px */
 /* Chart.js (responsive:false) が canvas に論理サイズの inline style を付与するため width/height は
-   指定しない (position/left/top は .gval と .gval-dual-out の配置基準なので維持) */
+   指定しない (position/left/top は .gval の配置基準なので維持) */
 .gauge .gcanvas canvas { position: absolute; left: 0; top: 0; }
 .gauge .gval {
   position: absolute;
@@ -162,10 +165,14 @@ section > h2 {
   font-weight: 600;
   pointer-events: none;
 }
-.gauge .gval .unit, .gauge .gval-dual-out .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
-/* 二重メーターの 2 行値: 縮小後 canvas 内では内側アーチと交差するためゲージ下に配置 */
-.gauge .gval-dual-out { font-size: 11px; line-height: 1.3; margin-top: 2px; }
-.gauge .gval .gval-line, .gauge .gval-dual-out .gval-line { white-space: nowrap; }
+.gauge .gval .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+/* 二重メーターの 2 行値: 単一メーターと同じ書式に揃える。数値 (.gnum) は .gval の 13px 白をそのまま、
+   接頭語 (.unit) は 11px グレー。ラベル (.glabel) は対応リングの色を inline style で当てる
+   (DISK: R=緑 #56d364 / W=黄 #e3b341、NW: UP=青 #58a6ff / DL=紫 #bc8cff)。
+   2 行目は RAM/VRAM の subVal と同じ .gval-sub に載せるため、その中の .gnum だけ 11px への上書きを 13px に戻す */
+.gauge .gval .glabel { font-size: 11px; font-weight: 400; margin-right: 2px; }
+.gauge .gval .gval-sub .gnum { font-size: 13px; }
+.gauge .gval .gval-line { white-space: nowrap; }
 .gauge .gval .gval-sub { position: absolute; top: 100%; left: 0; right: 0; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text); }
 .gauge .gsub { color: var(--muted); font-size: 11px; margin-top: 3px; min-height: 14px; }
 .ok { color: var(--green); }
@@ -680,21 +687,26 @@ const ZONE_STOPS = [0.6, 0.85];
 // リング間 1px の擬似余白の色 = カード背景 var(--card)。canvas 描画は CSS var を解決できないため実値
 const CARD_BG = "#161b22";
 // canvas の論理サイズ (responsive:false では属性サイズが論理サイズ)。カード 140px − padding 10×2
-// − border 1×2 = 118px 幅、高さは .gcanvas と同じ 60px (単一) / 44px (dual)
-const GW = 118, GH_SINGLE = 60, GH_DUAL = 44;
+// − border 1×2 = 118px 幅、高さは .gcanvas と同じ 60px (単一・dual 共通)
+const GW = 118, GH_SINGLE = 60;
 // layout.padding {top:4, bottom:2} での Chart.js 実効外径 (高さ制約 = canvas 高さ − top − bottom)
-const GAUGE_ROUT = { single: 54, dual: 38 };
+const GAUGE_ROUT = 54;
 // リング厚み = weight 配分 (1 weight ≈ 1px)。index 0 = 最外周の閾値ゾーン帯。80% 縮小 (3/11/8/6 → 2/9/6/5)
 const W_ZONE = 2, W_VAL_SINGLE = 9, W_VAL_OUTER = 6, W_VAL_INNER = 5;
-
-function fmtGiB(gib) {
-  if (gib >= 1024) return (gib / 1024).toFixed(2) + " TiB";
-  return Math.round(gib) + " GiB";
-}
 
 // 値 → アーチ %。canvas 版の Math.max(0, Math.min(1, val/max)) と同一 (null は 0 = アーチなし)
 function toArcPct(v, max) {
   return v == null ? 0 : Math.max(0, Math.min(100, (v / max) * 100));
+}
+
+// 2 重メーター (DISK / NW) の値を「数値 + 接頭語」に分割する。単一メーターと同じ書式
+// (数値=13px 白 / 接頭語=11px グレー) で出すため、文字列ではなく {n, s} で返す。
+//   v >= base → G (GiB・Gbps)、それ以外 → M (MiB・Mbps)。1 未満も M のまま小数 1 桁 (例 R 0.4M)
+// base は API の換算と同一基数 (disk は /1024/1024 = 1024、net は /1e6 = 1000)
+function pfxParts(v, base) {
+  if (v == null) return { n: "-", s: "" };
+  if (v >= base) return { n: (v / base).toFixed(1), s: "G" };
+  return { n: v.toFixed(1), s: "M" };
 }
 
 // 単一ゲージのアーチ色 (canvas 版 Gauge._zoneColor と同一の閾値判定)
@@ -708,9 +720,8 @@ function zoneColor(v, def) {
 
 // 1 weight ≈ 1px になる穴比率 (canvas 版の値アーチ内縁 rA - lwA/2 相当)
 function gaugeCutout(dual) {
-  const R = dual ? GAUGE_ROUT.dual : GAUGE_ROUT.single;
   const sum = W_ZONE + (dual ? W_VAL_OUTER + W_VAL_INNER : W_VAL_SINGLE);
-  return Math.round(((R - sum) / R) * 100) + "%";
+  return Math.round(((GAUGE_ROUT - sum) / GAUGE_ROUT) * 100) + "%";
 }
 
 // dataset 1 本 = 1 同心リング (index 0 = 最外周)。
@@ -755,15 +766,10 @@ class Gauge {
     this.cardEl = card; // 項目未提供時の非表示制御用
     this.valEl = document.createElement("div");
     this.subEl = card.querySelector(".gsub");
-    if (def.dual) {
-      // 二重メーター (118×44): 2 行テキストが内側リングと交差するため
-      // 値表示はゲージ下 (canvas 外) に配置する
-      this.valEl.className = "gval-dual-out";
-      card.insertBefore(this.valEl, this.subEl);
-    } else {
-      this.valEl.className = "gval";
-      wrap.appendChild(this.valEl);
-    }
+    // dual も単一メーターと同じ .gval（canvas 中央）に 2 行を置く
+    // (従来は 44px で内側アーチと交差したためゲージ下 .gval-dual-out に出していた)
+    this.valEl.className = "gval";
+    wrap.appendChild(this.valEl);
     // 半円ゲージ = doughnut の circumference:180 / rotation:-90 (operations-ui 準拠)。
     // responsive:false + canvas 属性サイズ固定: responsive:true はコンテナ計測が効かず
     // canvas が既定 300px 幅のまま右へはみ出す (operations-ui で実測済み)
@@ -790,13 +796,18 @@ class Gauge {
     this._last = key;
     this.render(v);
     if (this.def.dual) {
-      const line = (label, val, color) =>
-        `<div class="gval-line" style="color:${color}">${label} ` +
-        (val == null ? "-" : this.def.fmt(val)) +
-        `<span class="unit">${this.def.unit}</span></div>`;
+      // 単一メーターと同じ書式・同じ開始位置: 1 行目 = A (外側リング) を中央、2 行目 = B (内側リング) を
+      // その下 (RAM/VRAM の subVal と同じ .gval-sub)。数値は 13px 白、ラベルは対応リングの色、
+      // 接頭語は 11px グレー
+      const line = (label, val, color, sub) => {
+        const p = this.def.pfx(val);
+        return `<div class="gval-line${sub ? " gval-sub" : ""}">` +
+          `<span class="glabel" style="color:${color}">${label}</span>` +
+          `<span class="gnum">${p.n}</span><span class="unit">${p.s}</span></div>`;
+      };
       this.valEl.innerHTML =
-        line(this.def.labelA, v.a, this.def.colorA) +
-        line(this.def.labelB, v.b, this.def.colorB);
+        line(this.def.labelA, v.a, this.def.colorA, false) +
+        line(this.def.labelB, v.b, this.def.colorB, true);
     } else {
       this.valEl.innerHTML =
         (v == null ? "-" : this.def.fmt(v)) +
@@ -861,21 +872,28 @@ function gaugeDefs() {
       sub: (m) => `上限 ${m.gpu_temp_crit_c ? m.gpu_temp_crit_c.toFixed(0) : (discrete ? 110 : 100)}°C` },
     { id: "g-gpu-power", title: "GPU 電力", max: discrete ? 300 : 140, unit: "W", color: "#bc8cff",
       get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1),
-      sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W ${!discrete ? "(GB10 TDP)" : (m.gpu_vendor === "nvidia" ? "(GPU power limit)" : "(R9700 PPT)")}` },
+      sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W` },
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
       sub: (m) => `最大 ${m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003)} MHz` },
     { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
-      get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1), sub: (m) => `${fmtGiB(m.disk_used_gib)} / ${fmtGiB(m.disk_total_gib)} total` },
-    { id: "g-disk-io", title: "ストレージ負荷", dual: true, max: 5000, unit: "MB/s",
-      colorA: "#56d364", colorB: "#e3b341", labelA: "読込", labelB: "書込",
+      // サブ行は必ず 1 行に収める (カード幅 118px で 2 行折り返しになると行高さが 14px 増えるため、
+      // 単位は総量に合わせて末尾に 1 回だけ付ける)
+      get: (m) => m.disk_used_pct, fmt: (v) => v.toFixed(1),
+      sub: (m) => (m.disk_total_gib >= 1024
+        ? `${(m.disk_used_gib / 1024).toFixed(2)} / ${(m.disk_total_gib / 1024).toFixed(2)} TiB`
+        : `${Math.round(m.disk_used_gib)} / ${Math.round(m.disk_total_gib)} GiB`) },
+    // タイトルに単位、値は接頭語のみ (R 0.0M / W 1.2G)。A = 外側リング = 1 行目
+    { id: "g-disk-io", title: "DISK(B/s)", dual: true, max: 5000,
+      colorA: "#56d364", colorB: "#e3b341", labelA: "R", labelB: "W",
       getA: (m) => m.disk_read_mbps, getB: (m) => m.disk_write_mbps,
-      fmt: (v) => v.toFixed(1), sub: () => "上限 5 GB/s" },
-    { id: "g-net", title: "ネットワーク負荷", dual: true, max: netMax, unit: "Mbps",
-      colorA: "#58a6ff", colorB: "#bc8cff", labelA: "下り", labelB: "上り",
-      getA: (m) => m.net_down_mbps, getB: (m) => m.net_up_mbps,
-      fmt: (v) => v.toFixed(0),
+      pfx: (v) => pfxParts(v, 1024), sub: () => "上限 5 GB/s" },
+    // 上り (UP) を A (=外側リング・1 行目) にした (従来は下りが A)。単位は bps でタイトルに明記
+    { id: "g-net", title: "NW(bps)", dual: true, max: netMax,
+      colorA: "#58a6ff", colorB: "#bc8cff", labelA: "UP", labelB: "DL",
+      getA: (m) => m.net_up_mbps, getB: (m) => m.net_down_mbps,
+      pfx: (v) => pfxParts(v, 1000),
       // 上限は実測リンク速度 (/api/metrics の net_max_mbps で tuneGauge が随時更新)
       sub() { const v = this.max; return `上限 ${v >= 1000 ? v / 1000 + " Gbps" : v + " Mbps"}` } },
   );
@@ -904,7 +922,7 @@ function buildHostCards() {
       : `<span class="gdot" style="background:${d.dotBg || "transparent"};border:1px solid ${d.color}"></span>`;
     return `<div class="gauge${d.dual ? " dual" : ""}"${d.bg ? ` style="background:${d.bg}"` : ""}>
        <div class="gtitle">${dots}${d.title}</div>
-       <div class="gcanvas"><canvas id="${d.id}" width="${GW}" height="${d.dual ? GH_DUAL : GH_SINGLE}"></canvas></div>
+       <div class="gcanvas"><canvas id="${d.id}" width="${GW}" height="${GH_SINGLE}"></canvas></div>
        <div class="gsub"></div>
      </div>`;
   }).join("") + VINFO_CARD;
@@ -1243,6 +1261,22 @@ let ragStatus = null;
 // ------------------------------------------------------------- モデル切替 (パネル常設の一覧)
 let selectedProfile = null;
 
+// ヘッダのプルダウンは稼働中モデルへ自動追随する。ユーザーがプルダウン / 一覧クリックで選んだときは
+// HDR_MANUAL_MS の間だけ追随を止め、切替操作の対象を維持する (2026-10-26)
+const HDR_MANUAL_MS = 10000;
+let hdrManualUntil = 0;
+
+function markHdrManual() {
+  hdrManualUntil = Date.now() + HDR_MANUAL_MS;
+}
+
+// 自動追随: 手動選択の猶予を過ぎたら selectedProfile を稼働中モデル (無ければ未選択) へ戻す。
+// 毎ポーリング (2秒) の renderModelList() から呼ぶので、猶予経過の実効遅れは最大 2 秒。
+function syncHdrModelSelection() {
+  if (Date.now() < hdrManualUntil) return;
+  selectedProfile = currentStatus && currentStatus.active ? currentStatus.active.profile : null;
+}
+
 function openModal(id) { document.getElementById(id).classList.remove("hidden"); }
 function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 
@@ -1277,6 +1311,7 @@ function makeModelItem(c, st, sw) {
   div.onclick = () => {
     if (notReady) return;
     selectedProfile = c.profile;
+    markHdrManual();
     renderModelList();
   };
   return div;
@@ -1299,6 +1334,7 @@ function updateSwitchButtons(st) {
 }
 
 function renderModelList() {
+  syncHdrModelSelection();
   const st = currentStatus || { containers: [], active: null };
   // 排他環境: RAG embedding 稼働中に LLM へ切替すると embedding が停止される警告
   const on = !!st.rag_running;
@@ -1322,10 +1358,17 @@ function renderModelList() {
 // パネルの「切り替え実行」とヘッダ行の「切替」ボタンから呼ぶ
 async function runSwitch() {
   if (!selectedProfile || selectedProfile === RAG_VALUE) return;
+  // 切替実行から HDR_MANUAL_MS は自動追随を止める。ジョブが 10 秒を超えると猶予が切れ、旧稼働中へ
+  // 選択が戻って「切り替え実行」が稼働中と同モデル扱いで disabled になるが、その間は poll が
+  // switching 中なのでボタンは不可のまま (状態はヘッダラベル「切替中…」で分かる)
+  markHdrManual();
   const btn = document.getElementById("panel-switch-go");
   btn.disabled = true;
   // ヘッダ行の切替ボタンから押されたときも、ジョブ状態が poll に現れるまで連打を塞ぐ
-  document.getElementById("hdr-switch-btn").disabled = true;
+  const hdrBtn = document.getElementById("hdr-switch-btn");
+  hdrBtn.disabled = true;
+  // poll (2秒間隔) を待たず、押した瞬間に進行中ラベルへ変える (以降は renderHdrSwitchBtn が維持)
+  hdrBtn.textContent = HDR_JOB_LABELS.switch;
   const logEl = document.getElementById("panel-switch-log");
   logEl.style.display = "block";
   logEl.textContent = `切り替え開始: ${selectedProfile} ...\n`;
@@ -1389,6 +1432,10 @@ function renderHdrModel() {
   renderHdrSwitchBtn();
 }
 
+// ジョブ進行中はヘッダボタンラベルで状態を示す (ヘッダからの切替でタブを遷移させないため)。
+// 省略記号は付けず最大 4 文字に揃える (ボタン幅 = 最長ラベル「再作成中」+ padding で決める)
+const HDR_JOB_LABELS = { switch: "切替中", stop: "停止中", recreate: "再作成中" };
+
 function renderHdrSwitchBtn() {
   const btn = document.getElementById("hdr-switch-btn");
   if (!btn) return;
@@ -1407,6 +1454,7 @@ function renderHdrSwitchBtn() {
   } else if (selectedProfile) {
     dis = busy || !cont || cont.ready === false;
   }
+  if (busy) label = HDR_JOB_LABELS[st.switching.kind] || "実行中";
   btn.textContent = label;
   btn.disabled = dis;
   btn.classList.toggle("stop", mode === "stop");
@@ -1414,6 +1462,7 @@ function renderHdrSwitchBtn() {
 
 document.getElementById("hdr-model-select").onchange = (e) => {
   selectedProfile = e.target.value || null;
+  markHdrManual();
   renderModelList();
 };
 
@@ -1425,8 +1474,7 @@ document.getElementById("hdr-switch-btn").onclick = () => {
   const active = currentStatus && currentStatus.active ? currentStatus.active.profile : null;
   if (selectedProfile && selectedProfile === active) { openStopModal(); return; }
   if (!selectedProfile) return;
-  // 進捗ログはモデルタブのパネルに出すので、タブを切り替えてから実行する
-  showTab("model");
+  // 表示中のタブは維持したまま切替を実行する (進捗ログはモデルタブのパネルに出る)
   runSwitch();
 };
 </script>

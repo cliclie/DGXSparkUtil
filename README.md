@@ -15,8 +15,8 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
      - GPU負荷
      - GPU温度
      - ストレージの使用率(使用量・空き容量)
-     - ストレージの負荷(読込/書込)
-     - ネットワークの負荷(下り/上り)
+     - ストレージの負荷(読込/書込。タイトル `DISK(B/s)`)
+     - ネットワークの負荷(上り/下り。タイトル `NW(bps)`)
 2. **dockerで作動中のvLLMの状態モニタリング**
    - 稼働中のモデルコンテナの状態(稼働/停止・稼働時間・健全性)を表示
    - APIの健全性(`/health`)、サーブ中のモデル名(`/v1/models`)、
@@ -63,10 +63,12 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - 半円アーチを緑(低) → オレンジ(中) → 赤(高)のゾーンで区分
 - ゲージ中央に現在値を大きく表示(例: `101.08 GiB`。現在 `font-size: 13px`)
 - 現在値の直下に総量/容量を表示(例: `121.62 GiB total`)
-- 2 値の項目(Storage I/O の読込/書込、Network の下り/上り)は、1 つのゲージ内に
-  外側(=A)/内側(=B)の 2 つのアーチ(ストーク間隔 1px)で別々に表示し、2 行の値は
-  **ゲージの直下**に表示する(合計値ではない。中央配置では縮小後 canvas で内側アーチと
-  交差するためゲージ下に配置 — 実装メモ(2026-09-27)・実装メモ(2026-10-05)参照)
+- 2 値の項目(`DISK(B/s)` の R=読込/W=書込、`NW(bps)` の UP=上り/DL=下り)は、1 つのゲージ内に
+  外側(=A)/内側(=B)の 2 つのアーチ(ストーク間隔 1px)で別々に表示し、値は**ゲージ中央に 2 行**
+  (1 行目=A、2 行目=B。合計値ではない)。数値は単一メーターと同じ 13px 白、ラベルは対応リングの色、
+  接頭語(M/G)は 11px グレー。従来は縮小後 canvas(44px) で内側アーチと交差するためゲージ下に出していたが、
+  2026-10-26 に canvas を単一と同じ 60px へ拡大して中央配置へ戻した
+  (実装メモ(2026-09-27 / 2026-10-05 / 2026-10-26)参照)
 
 Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 
@@ -78,24 +80,30 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
   canvas 版の「背景アーチ + 値アーチ」を 1 本のリングで再現する
 - リング間 1px は `borderWidth:1` + `borderColor=カード背景 #161b22` の**擬似余白**で出す
   (`spacing` はリング端が引っ込むため不使用)
-- 中央の現在値・単位・2 行目は canvas に描かず** HTML オーバーレイ**(`.gval` / `.gval-dual-out` /
-  `.gsub`)で重ねる。canvas は `responsive:false` + 属性サイズ 150×76(単一)/ 150×56(dual) 固定
+- 中央の現在値・単位・2 行目は canvas に描かず** HTML オーバーレイ**(`.gval` / `.gsub`)で重ねる。
+  canvas は `responsive:false` + 属性サイズ **118×60 固定(単一・dual 共通)**。dual の 2 行値も単一と
+  同じ `.gval` に載せ、**数値は 13px 白(`.gnum`)、接頭語は 11px グレー(`.unit`)、ラベル(`.glabel`)は
+  対応リングの色**(DISK: R=緑/W=黄、NW: UP=青/DL=紫)。2 行目は RAM/VRAM の `subVal` と同じ
+  `.gval-sub` を使うので、1 行目の中心は canvas 内 30px・2 行目は 47px で単一メーターと同じ位置に揃う
+  (2026-10-26 に dual の canvas を 44px → 60px へ拡大し、ゲージ下へ出していた `.gval-dual-out` は廃止)
 
 項目ごとのレイアウト:
 
 | 項目 | ゲージタイトル | 中央(現在値) | 下部(総量/容量) |
 |---|---|---|---|
-| CPU負荷 | CPU Load | 使用率 % | コア数(例: `20 cores`) |
-| CPU温度 | CPU Temperature | 現在温度(例: `38°C`) | 上限(例: `100°C`) |
-| 統合メモリの使用率 | 統合メモリ | 使用率 %(例: `75.2%`) + 2行目に空き量(例: `空き 20.5 GiB`) | 使用/総量(例: `101.08 / 121.62 GiB`) |
-| GPU負荷 | GPU Load | 使用率 % | — |
-| GPU温度 | GPU Temperature | 現在温度(例: `38°C`) | 上限(例: `100°C`) |
-| ストレージの使用率 | Storage | 使用量(例: `663 GiB`) | 容量(例: `3.6 TiB total`) |
-| ストレージの負荷 | Storage I/O | 読込/書込速度を2値表示(例: 読込 `120 MB/s` / 書込 `45 MB/s`) | 上限(例: `5 GB/s`) |
-| ネットワークの負荷 | Network | 下り/上り速度を2値表示(例: 下り `1200 Mbps` / 上り `300 Mbps`) | 上限=**実測リンク速度**(例: `10 Gbps`、実装メモ 2026-10-06 参照) |
+| CPU負荷 | `CPU 負荷` | 使用率 % | コア数(例: `24 cores`) |
+| CPU温度 | `CPU 温度` | 現在温度(例: `38°C`) | 上限(例: `上限 100°C`) |
+| メモリ使用率 | `統合メモリ`(GB10) / `RAM` + `VRAM`(atom2・WSL2) | 使用率 % + 2行目に空き量(例: `空き 74.7 GiB`) | 使用/総量(例: `7.7 / 82.5 GiB`) |
+| GPU負荷 | `GPU 負荷` | 使用率 % | — |
+| GPU温度 | `GPU 温度` | 現在温度(例: `40°C`) | 上限(例: `上限 95°C`) |
+| GPU電力 | `GPU 電力` | 現在消費電力(例: `51.5W`) | 上限(例: `上限 600 W`) |
+| GPUクロック | `GPU クロック` | 現在クロック(例: `772 MHz`) | 最大(例: `最大 3090 MHz`) |
+| ストレージの使用率 | `ストレージ使用率` | 使用率 % | 使用/総量(例: `232 / 1007 GiB`) |
+| ストレージの負荷 | **`DISK(B/s)`** | 読込/書込を 2 行(1 行目 `R 120.0M` / 2 行目 `W 45.2M`。数値 13px 白、接頭語 M/G 11px グレー、ラベルは対応リング色) | 上限(例: `上限 5 GB/s`) |
+| ネットワークの負荷 | **`NW(bps)`** | 上り/下りを 2 行(1 行目 `UP 300.5M` / 2 行目 `DL 1.2G`) | 上限=**実測リンク速度**(例: `上限 10 Gbps`、実装メモ 2026-10-06 参照) |
 
 - 色ゾーンの閾値は設定可能(デフォルト: 緑 < 60%、オレンジ 60〜85%、赤 > 85%)
-- ストレージの使用率は、下部に空き容量を2行目で表示可能(例: `free 2.8 TiB`)
+- ストレージの使用率の下部は使用/総量(例: `232 / 1007 GiB`。総量 1024 GiB 超は `1.20 / 1.82 TiB`)
 
 ## 表示レイアウト(4段構成)
 
@@ -110,6 +118,16 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
   プルダウンは LLM 一覧 + **RAG を最下部**(`rag_enabled=false` の WSL では RAG を出さない)。選択値は
   モデルタブ常設一覧の `selectedProfile` と共有する。選択中が**ロード済(現在稼働中)のモデルなら
   ボタンは「停止」**になり、RAG 選択時も稼働中なら「停止」(停止中なら「起動」)になる
+- プルダウンは**稼働中モデルへ自動追随**する(2026-10-26)。ページを開いたときも、ターミナル側で
+  切替わったときも、毎ポーリングの追随で稼働中モデルが選択表示される(稼働中なしは「モデルを選択」)。
+  ただし**プルダウン選択 / 一覧クリック / 切替実行から 10 秒間(`HDR_MANUAL_MS`)は追随を止める**ので、
+  選んだ対象のまま切替操作ができる。猶予を過ぎると(実効は次のポーリング、最大 2 秒後)稼働中モデルへ
+  表示を戻す。選択値はモデルタブ常設一覧と共有しているため、一覧側の選択も同じ条件で戻る
+- ヘッダの「切替」ボタンは**表示中のタブを維持したまま**切替ジョブを開始する(2026-10-26: 従来は
+  モデルタブへ遷移していた)。進行中はボタンラベルが「切替中/停止中/再作成中」(最大 4 文字・
+  省略記号なし)になり、完了で通常のラベルへ戻る(進捗ログ自体はモデルタブのパネルに出る)。ボタン幅は
+  `min-width: calc(4em + 18px)`(4 文字分のテキスト + padding 8×2 + border 1×2)+ `white-space: nowrap`
+  で固定し、ラベルが変わってもヘッダ行は揺れない
 - 非表示タブ(display:none)中のゲージは値が変わっても `chart.update()` が走るだけで視覚的に
   反映されない。システムタブへ戻る際は `redrawSystemTab()` がゲージのキャッシュ(`_last`)を
   無効化して全ゲージを `update()` し直す。ゲージは `responsive:false`(canvas 属性サイズが
@@ -117,7 +135,9 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 
 ### 一段目: 現在値ゲージ行
 
-- 各項目のゲージ(半円アーチ)を**横方向に 1 行へ並べて表示**する(左 → 右: CPU Load, CPU Temperature, 統合メモリ, GPU Load, GPU Temperature, GPU Power, GPU Clock, Storage, Storage I/O, Network の順)
+- 各項目のゲージ(半円アーチ)を**横方向に 1 行へ並べて表示**する(左 → 右: CPU 負荷, CPU 温度,
+  RAM / VRAM(atom2・WSL2 は 2 枚、GB10 は「統合メモリ」1 枚), GPU 負荷, GPU 温度, GPU 電力,
+  GPU クロック, ストレージ使用率, DISK(B/s), NW(bps) の順。末尾に vLLM 情報のテキストカード 1 枚)
 - 表示領域(ウィンドウ幅)が狭くなれば、**自然に折り返して次の行へ表示する**(1 行に無理に詰めない)
   - 実装イメージ: CSS の flexbox + `flex-wrap: wrap`、各ゲージに固定幅
     **`.gauge { flex: 0 0 140px }`** を割り当て、幅が足りなくなったら折り返す
@@ -2065,6 +2085,12 @@ chart 内部を直接実測した。初回は `--headless=new --dump-dom` で if
 （`--remote-debugging-port` + websocket の `Runtime.evaluate`）** に切り替えている
 （再現手順とハマりどころは「検証 3」にまとめた）。
 
+※ 上記は DGX Spark 実機の記録。**Whitebear2026 (WSL2) には当初 Chrome が無く**、2026-10-26 に
+公式 `.deb` を rootless で展開して導入した（`sudo` が対話認証必須のため apt は使えない）。
+`~/.local/opt/google/chrome` へ展開 + `~/.local/bin/google-chrome` にリンク + `~/.bashrc` の PATH へ
+`~/.local/bin` を追加。起動は `--no-sandbox` 必須（`chrome-sandbox` を setuid root にできないため）。
+導入版は 156.0.8078.47 で、`--headless=new` + CDP により前項と同じ実測が行える
+
 - **canvas 属性 / inline style**: 単一 `150×76`・dual `150×56` が全 10 枚に付与されることを確認
   （`responsive:true` はコンテナ計測が効かず 300px 固定で右へはみ出す — operations-ui の教訓どおり）
 - **dataset**: 単一 2 本・dual 3 本、`weight [3,11]` / `[3,8,6]`、`cutout 80%` / `66%`、
@@ -2475,6 +2501,10 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   配信中の `/` に修正コードが含まれることを HTTP で確認。`/api/metrics` は
   `gpu_clock_max_mhz=2350.0` / `gpu_power_cap_w=300.0` を返し、グラフ基準は従来どおり 2350 MHz / 300 W
   （thermal_guard の電力制限発動中は基準も 250/210 W に連動して変わる挙動に）。
+- **Whitebear2026 (WSL2 / RTX 5090)**: 2026-10-26 の一連のフロント改良（ヘッダ切替のタブ維持、
+  プルダウンの稼働中モデル自動追随、dual メーターの単一レイアウト化、行高さ 108px 統一）を
+  `origin/main` の HEAD として push した。**atom1 / atom2 は未同期**（各機で `git pull --ff-only origin main`。
+  変更は `front/index.html` と README のみで API 再起動は不要、ブラウザのリロードで反映）。
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
@@ -2513,7 +2543,7 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
   アクティブ下線が header の border-bottom に接するようにした（実測 gap 1px = border 分）
 - 従来 header 50px + tabs 43px = 93px だったヘッダ領域が **40px** になり、ページ全体は
   `document.body.scrollHeight` **837px → 664px**（1600×1000 viewport 実測）
-- タブ切替は `showTab(key)` に集約（タブボタンとヘッダの切替ボタンで共用）
+- タブ切替は `showTab(key)` に集約（ヘッダ行のタブボタンのみ呼ぶ。ヘッダの切替ボタンはタブを遷移させない）
 
 **ヘッダ行のモデル選択プルダウンと切替ボタン**:
 
@@ -2528,8 +2558,7 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
   RAG 稼働中=「停止」→ `openRagModal("stop")` / RAG 停止中=「起動」→ `openRagModal("start")` /
   ジョブ実行中=disabled
 - `panel-switch-go` の onclick は `runSwitch()` に、`btn-stop` の onclick は `openStopModal()` に抽出して
-  ヘッダのボタンと共用した。ヘッダから切替実行するときは進捗ログが出るモデルタブへ `showTab("model")`
-  してから実行し、`runSwitch()` は即座に両ボタンを disabled にして連打を塞ぐ
+  ヘッダのボタンと共用した。`runSwitch()` は即座に両ボタンを disabled にして連打を塞ぐ
 - RAG を選んだときパネルの「切り替え実行」は対象外なので `isRag` で disabled にしラベルも固定
 - RAG の稼働状態は新設の `ragStatus`（`poll()` が `/api/rag/status` を代入）で見る
 
@@ -2547,7 +2576,8 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 - 実測: 単一 canvas 118×60 / dual 118×44、gtitle 10px・gval 13px・gsub/unit/sub 11px、canvas の
   カード内はみ出しなし。カード幅 176 → 140px（79.5%）。カード高さは 137 → 128px（93%）で、これは
   11px 文字の行（dual の 2 行値 28.6px と `.gsub` min-height 14px、幅縮小で増えたサブ行折り返し）を
-  そのまま残しているためで、ゲージ描画自体の 80% 縮小とは別枠
+  そのまま残していたためで、ゲージ描画自体の 80% 縮小とは別枠
+  （**dual の 44px とサブ行折り返しは、同日後半の「ヘッダ操作とゲージ表示の改訂」で解消した**）
 
 **二段目の 80% 縮小と既定範囲の変更**:
 
@@ -2572,8 +2602,8 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 - ボタン状態: 未選択=切替 disabled / 稼働中=停止(cls=stop) / 停止中=切替 / 重み未導入=切替 disabled /
   RAG 稼働中=停止 / RAG 停止中=起動 / ジョブ実行中=disabled。パネル側「切り替え実行」は RAG 選択時に
   disabled + ラベル「切り替え実行」
-- ゲージ: canvas 118×60（単一）/ 118×44（dual）、カード幅 140px、文字 10 / 13 / 11px、
-  値テキストとサブ行は canvas 内（単一 canvas 60px に対し値 21〜40px）
+- ゲージ: canvas 118×60（単一）/ 118×44（dual。dual は同日後半の改訂で 60px に統一）、カード幅
+  140px、文字 10 / 13 / 11px、値テキストとサブ行は canvas 内（単一 canvas 60px に対し値 21〜40px）
 - 線グラフ: cwrap 232px、`rangeActive=30m`・`rangeKey=30m`、横軸はバック履歴の全点（30分未満）。
   見出し行は 27px の 1 行で `h3Exists=false`・`sameRow=true`、見出しは左端・範囲ボタンは右端に接（gap 0）、
   `section > h2` は残り 3 セクション（現在値 / vLLM・モデル / RAG）
@@ -2581,3 +2611,102 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 - 実機のモデル切替・停止・RAG 起動/停止 API は**発火させていない**（稼働中の qwen38bf16 への影響を避ける。
   ボタン状態は `currentStatus` / `ragStatus` を注入して描画ロジックのみ検証）
 
+## ヘッダ操作とゲージ表示の改訂: タブ維持・自動追随・dual メーター統一（2026-10-26）
+
+前項（レイアウト圧縮）を受けた運用面の改善。すべて `front/index.html` のみで API 再起動は不要。
+検証はいずれも Whitebear2026 の headless Chrome + CDP（`Runtime.evaluate` と `Page.captureScreenshot`）。
+
+**ヘッダの切替ボタン: 表示中のタブを維持する**:
+
+- 実装時は進捗ログが出るモデルタブへ `showTab("model")` してから `runSwitch()` を呼んでいたが、
+  閲覧中のタブが切り替わるとの指摘で廃止した。ヘッダからの切替は `runSwitch()` を直接呼ぶ。
+  タブ切替は `showTab(key)`（ヘッダ行のタブボタンのみ）に集約したまま
+- 進行中は `renderHdrSwitchBtn()` がボタンラベルを `HDR_JOB_LABELS`（switch=切替中 / stop=停止中 /
+  recreate=再作成中、未知の kind は 実行中）へ差し替えて状態を示す。`runSwitch()` は押した瞬間に
+  「切替中」へ変え（poll 待ちの 2 秒の空白をなくす）、以降は毎ポーリングの `renderHdrSwitchBtn()` が
+  維持する。進捗ログは従来どおりモデルタブの `#panel-switch-log` に出る（見たければモデルタブを開く）
+
+**ヘッダ切替ボタンの幅は「最大 4 文字 + 余白」**:
+
+- `#hdr-switch-btn` は `min-width: calc(4em + 18px)` + `white-space: nowrap` + `text-align: center`。
+  `4em` = 最長ラベル 4 文字（日本語 1 字 = 1em、`font-size: 12px` → 48px）、`+18px` =
+  `padding: 4px 8px`（`#hdr-model-select` と揃えた）+ `border 1px × 2`。**em 指定なので環境のフォントに
+  追従する**（headless のフォールバックは 1 字 7.2px、実機の日本語フォントは 1 字 12px）
+- 変遷: `min-width: 84px`（実装直後。通常ラベル「切替」の実測 32.4px に対し過剰）→
+  `padding 4px 8px` + `60px` → ラベルから `…` を外して `calc(4em + 18px)`（headless 実測 66px）
+- **`nowrap` がないと 58〜60px で 3 文字目以降が 2 行へ折り返して `h=38px` になった**（高さ 14px 増）。
+  実測は全ラベル（切替/停止/起動/切替中/停止中/再作成中/実行中）で `w=66px h=24px`、右端 745px 固定、
+  header は 40px のまま
+
+**プルダウンの稼働中モデル自動追随と 10 秒猶予**:
+
+- `selectedProfile` は従来ページ開時 `null`（プレースホルダ「モデルを選択」）で、ターミナル側で
+  切替わってもプルダウンは動かなかった。新設 `syncHdrModelSelection()` を毎ポーリングの
+  `renderModelList()` **先頭**で呼び、`Date.now() >= hdrManualUntil` のときだけ `selectedProfile` を
+  `currentStatus.active.profile`（無ければ `null`）へ揃える。先頭に置いたのは、一覧の `.selected` と
+  `sel.value` を同一ポーリングで揃えるため（`renderHdrModel()` は `renderModelList()` の末尾から呼ばれる）
+- ユーザー操作側（`#hdr-model-select` の onchange / `.model-item` の onclick / `runSwitch()`）は
+  `markHdrManual()` で `hdrManualUntil = Date.now() + HDR_MANUAL_MS`（10 秒）を更新して追随を止める。
+  過ぎると（実効は次のポーリング、最大 2 秒後）稼働中モデルへ戻る
+- 選択値はモデルタブ常設一覧と共有しているため、一覧側の選択も同じ条件で戻る
+- RAG を選んだ場合も猶予が切れると稼働中 LLM へ戻る（本機は `rag_enabled=false` で RAG 選択肢が無く、
+  RAG 環境での挙動は未実測）
+
+**ゲージのサブ行折り返しを解消して行高さを 108px に統一**:
+
+- `g-gpu-power.sub` は従来 `上限 600 W (GPU power limit)` のように末尾へ種別
+  （`(GB10 TDP)` / `(GPU power limit)` / `(R9700 PPT)`）を付いていたが、カード幅 140px では 2 行へ
+  折り返って行高さを押上げるため `上限 600 W` のみにした（`.gsub` 26 → 14px）
+- `g-disk-used.sub` の `232 GiB / 1007 GiB total`（24ch）も折り返していたため単位を末尾 1 回に統合して
+  `232 / 1007 GiB`（総量 1024 GiB 超は `1.20 / 1.82 TiB`）へ。専用関数 `fmtGiB()` は参照が
+  なくなったため削除した
+- 3 行目を押上げていた実際の要因は「ストレージ使用率」ではなく **dual メーター**だった
+  （→ 次項で単一レイアウトへ統合）。`.gauge.vinfo-card` は natural 89px で、`.grid` の stretch に
+  引き伸ばされているだけだった
+- 実測: 行高さ 120 / 120 / 122.6 → **108 / 108 / 108**、`#host-cards` 370.6 → **344px**、
+  `body.scrollHeight` 755 → **728px**
+
+**dual メーター（DISK / NW）を単一レイアウトへ統合**:
+
+- `GH_DUAL`（44）を廃止して `GH_SINGLE` 60px に統一（`GW / GH_SINGLE` = 118/60、
+  `GAUGE_ROUT` は `{single:54, dual:38}` → **54 共通**）。`gaugeCutout(dual)` は weight 合計だけで
+  穴比率を出す（単一 80% / dual **76%** → 穴の内径 82px）。CSS の `.gauge.dual .gcanvas` と
+  `.gval-dual-out` 系（`.gauge .gval-dual-out` / `.gauge.dual .gval-dual-out` / 合同セレクタ）は削除
+- `Gauge` コンストラクタは dual でも値要素を `.gcanvas` 内へ `appendChild` し、クラスは単一と同じ
+  **`.gval`** に統一（`gval-dual` は不要になった）。`set()` の dual 分岐は 1 行目 = A（外側リング）、
+  2 行目 = B（内側リング）を `<div class="gval-line">`（2 行目は `gval-line gval-sub`）で並べる
+- **タイトルへ単位を移動**: `ストレージ負荷` → **`DISK(B/s)`**、`ネットワーク負荷` → **`NW(bps)`**。
+  値は `読込 0.0 / 書込 0.0MB/s` のような幅を取る表記をやめ、**`R 0.0M` / `W 0.0M`**、
+  **`UP 0.0M` / `DL 0.0M`**（ラベル 1〜2 文字 + 接頭語のみ）にした
+- 新設 `pfxParts(v, base)` が値を **`{n: 数値, s: 接頭語}`** に分割して返す（`v >= base` → `G`、
+  それ以外 → `M`。**1 未満も M のまま小数 1 桁**なのでアイドル時は `R 0.0M`、0.42 MiB/s は `R 0.4M`）。
+  `base` は API の換算と同一基数で disk=1024（`/1024/1024`）、net=1000（`/1e6`）。dual の `def.unit`
+  と `def.fmt` は不要になったため削除
+- **NW は A/B を入換**えて上り（UP）を外側リング・1 行目にした（従来は下りが A）。ネットワーク系列は
+  時系列グラフに無いため凡例色との対応は崩れない（DISK の緑=読込・黄=書込は `#56d364` / `#e3b341`
+  のままグラフ系列と一致）
+- **メーター内の書式も単一メーターに統一**: 数値は `.gnum`（`.gval` の 13px 白を継承）、接頭語は既存の
+  `.unit`（11px `--muted`）、ラベル `.glabel` は 11px で **対応リングの色を inline style 指定**
+  （`R`=`colorA` 緑 `#56d364` / `W`=`colorB` 黄 `#e3b341`、`UP`=青 `#58a6ff` / `DL`=紫 `#bc8cff`）。
+  2 行目は RAM/VRAM の `subVal` と同じ `.gval-sub` に載せるため
+  `.gauge .gval .gval-sub .gnum { font-size: 13px }` で 11px への上書きを戻す
+- 実測: dual canvas **118×60**、外側 R 52/46・内側 46/41（穴 82px）で 2 行テキストと交差なし、
+  カード高さは **3 行とも 108px**。1 行目の中心 = canvas 内 **30px**・2 行目 = **47px** で、
+  RAM の値（29px）と `subVal`（46px）に一致。`.glabel` の computed color は `def.colorA` / `def.colorB` と
+  **4/4 一致**、`.gnum` は `#e6edf3` 13px、`.unit` は `#8b949e` 11px。表示例 `R 0.0M` / `W 0.3M`、
+  `UP 0.0M` / `DL 0.0M`（1 行のテキスト幅 23px）。最大値ストレス（`R 4.9G` / `W 4.9G`、
+  `UP 10.0G` / `DL 10.0G`）でも 1 行を維持
+
+**検証サマリ（Whitebear2026 / headless Chrome + CDP）**:
+
+- ヘッダ切替: システムタブで「切替」を押しても `active tab=system` / `showTab()` 呼び出し 0 件 /
+  `runSwitch()` は実行される（モデルタブでも `model` のまま）。`/api/vllm/switch` だけモックして
+  走らせた本物の `runSwitch()` で猶予が 10 秒へリセットされ、ラベルが「切替中」・両ボタン disabled を確認
+- プルダウン: 読込時に稼働中 `swift40` が選択表示 / `strataq3` 選択後 6 秒経過でも維持（残り 4 秒）/
+  猶予切れで `swift40` へ復帰 / `currentStatus.active` を差し替えると追随 / `active=null` では
+  「モデルを選択」+ 切替ボタン disabled。一覧クリックの猶予は `ready=false`（重み未導入）品だと
+  `notReady` で早期 return するため **`ready=true` の品で確認**する（`.model-item:not(.not-ready)`）
+- 前項の機能（タブ統合・80% 縮小）への回帰: 全ラベルでボタン 66px、行高さ 108px、gauges 11 枚、
+  `Runtime.exceptionThrown` / `consoleAPICalled` のエラー 0 件
+- 検証スクリプトはセッション用の一時ファイル（`/tmp/verify_tab.py` / `/tmp/vh*.py` / `/tmp/dual*.py` /
+  `/tmp/btn*.py`）でリポジトリには含めない。実機のモデル切替・停止 API は発火させていない
