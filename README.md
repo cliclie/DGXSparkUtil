@@ -117,7 +117,9 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 - ヘッダ行のモデルタブの横に **モデル選択プルダウン `#hdr-model-select`** と **切替ボタン `#hdr-switch-btn`** を置く。
   プルダウンは LLM 一覧 + **RAG を最下部**(`rag_enabled=false` の WSL では RAG を出さない)。選択値は
   モデルタブ常設一覧の `selectedProfile` と共有する。選択中が**ロード済(現在稼働中)のモデルなら
-  ボタンは「停止」**になり、RAG 選択時も稼働中なら「停止」(停止中なら「起動」)になる
+  ボタンは「停止」**になり、RAG 選択時も稼働中なら「停止」(停止中なら「起動」)になる。
+  展開時の一覧で**重み未導入(ロード済みの重みが無い)項目はモデルタブ一覧と同じ灰色 `--muted`** にして
+  色で識別できるようにした(実装メモ 2026-10-27)
 - プルダウンは**稼働中モデルへ自動追随**する(2026-10-26)。ページを開いたときも、ターミナル側で
   切替わったときも、毎ポーリングの追随で稼働中モデルが選択表示される(稼働中なしは「モデルを選択」)。
   ただし**プルダウン選択 / 一覧クリック / 切替実行から 10 秒間(`HDR_MANUAL_MS`)は追随を止める**ので、
@@ -2301,8 +2303,9 @@ RTX 5090 1 枚では `model-ctl.sh` が 14 モードを **VRAM 排他**で管理
 - **API の待ち受けは 8090**：Strata 系が 8080 を占有するため本リポジトリの既定 8080 は
   使えない (`install_service.env` の `PORT=8090`)
 - 重み未導入のモードは `ready=false` で返り、フロントは**モデル名を灰色**にして
-  選択・切替を不可とする (`model-ctl.sh` 側はその場 DL を尋ねるが、
-  ブリッジでは `_mc_mode_download` を上書きして走らせない)
+  選択・切替を不可とする（モデルタブ常設一覧とヘッダのモデル選択プルダウンが対象。
+  プルダウン側の灰色は実装メモ 2026-10-27。`model-ctl.sh` 側はその場 DL を尋ねるが、
+  ブリッジでは `_mc_mode_download` を上書きして走らせない）
 
 ### エンジン種別ごとのメトリクス源 (ログ解析は初期実装)
 
@@ -2583,6 +2586,11 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   実測: 配信中の `/`（ポート **8090**）はリポジトリの `front/index.html` とバイト一致し
   `a.health ? "稼働中" : "API応答なし"` を含む（`/api/metrics` は 200）。
   なお 1552 行目の modelctl 側 `稼働中 (API応答)` は今回の変更対象外で従来どおり。
+  **2026-10-27: 本機でヘッダのモデル選択プルダウンの重み未導入灰色表示を実装して push した**
+  （`front/index.html` と README のみ。フロントは静的配信のためブラウザリロードで反映、
+  `dgx-spark-api` は active のまま再起動不要。headless Chrome + CDP で展開時の描画（未導入 13 件が
+  `--muted`、導入済みと RAG が `--text`）と、閉じた表示色・切替ボタン状態・ヘッダ高さの回帰なしを
+  確認。詳細は実装メモ 2026-10-27）。**atom1 / atom2 は未同期**（各機で `git pull --ff-only origin main`）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
@@ -2954,3 +2962,44 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 - 四段目 RAG セクション（Embedding / Qdrant）の「稼働中 (API応答)」「起動中… (API応答なし)」は
   別セクションのため据え置き
 
+## ヘッダのモデル選択プルダウンで重み未導入を灰色表示（2026-10-27）
+
+**要望**: ヘッダのモデル切り替えプルダウンで、展開時の一覧にて未ロード（重みが無い）項目の文字色を
+灰色にして、ロード済みの重みと色で識別できるようにしたい。
+
+**検討**:
+
+- モデルタブ常設の一覧（`.model-item`）は既に `ready === false` を `.not-ready` クラスで
+  `--muted`（灰色）にしている。ヘッダのプルダウンも同じ判定・同じ色で揃えるのが最小の変更
+- ネイティブ `<select>` の `<option>` は `color` が効く（Chrome / Edge / Firefox の
+  Windows・Linux）。`disabled` にすると灰色になるが**選択自体ができなくなる**ため不採用
+  （現状、未導入でも選択はでき、切替ボタンが disabled になる挙動を維持したい）
+- 完全カスタム（div ベースのドロップダウン）にすれば macOS の OS ネイティブピッカーでも色を
+  制御できるが、自動追随（`syncHdrModelSelection()`）や 2 秒ポーリングごとの再描画の移植が必要で
+  過剰。ネイティブ option の CSS で実装し、macOS ではラベル末尾の「 (重み未導入)」表記が
+  補助になるままとした
+
+**変更内容**（`front/index.html` のみ。API 再起動不要）:
+
+- `hdrModelOptions()`: 各要素を `[value, label, notReady]` の 3 元組にし、`c.ready === false` を
+  `notReady` として返す。RAG は「未起動 = 停止中」で重み未導入ではないため常に `false`
+- `renderHdrModel()`: `notReady` の option だけ `o.className = "not-ready"` を付与
+- CSS: `#hdr-model-select option.not-ready { color: var(--muted); }` を追加
+
+**検証**（Whitebear2026-WSL = modelctl / `rag_enabled=false`、headless Chrome 156 + CDP
+`/tmp/cdp_gray_check.py`。実機の切替・停止 API は発火させていない）:
+
+- 選択肢 16 件（プレースホルダ + LLM 15。RAG は WSL のため無し）。`cls=not-ready` の 13 件は
+  `rgb(139, 148, 158)`（=`--muted`）、導入済みの `swift40` / `strataq3` とプレースホルダは
+  `rgb(230, 237, 243)`（=`--text`）で、クラスと色の不一致 0 件
+- `Page.captureScreenshot` で展開時のドロップダウンを撮影し、未導入行が灰色・導入済み行が白で
+  描画されることを確認（ホバー中の先頭行は OS の選択背景で白になる）
+- 副作用なし: 未導入を選択しても**閉じた状態の `select` 本体は `--text` のまま**（option の色が
+  表示部へ継承しない）／選択値は従来どおり `selectedProfile` へ入り、`#hdr-switch-btn` は
+  `disabled` のまま（従来挙動を維持）
+- 回帰なし: パネル常設一覧の `.model-item.not-ready .name` は `--muted` のまま。`PLAT.rag_enabled = true` と
+  `currentStatus.active = {profile: 'swift40'}` を注入した状態でも RAG 選択肢と稼働中モデルは `--text`
+  （選択肢 17 件）。`#hdr-switch-btn` は 66×24px、header は 40px、`Runtime.exceptionThrown` と
+  error コンソール 0 件
+- 検証スクリプトはセッション用の一時ファイル（`/tmp/cdp_gray_check.py` / `/tmp/cdp_gray_regress.py` /
+  `/tmp/cdp_gray_shot.py`）でリポジトリには含めない

@@ -98,6 +98,11 @@ section > h2 {
   max-width: 320px;
 }
 #hdr-model-select:hover { border-color: var(--blue); }
+/* 重み未導入 (ready=false) はパネル常設一覧 (.model-item.not-ready .name) と同じ --muted で灰色にし、
+   導入済みと色で区別する。ネイティブ option の color は Chrome / Edge / Firefox (Windows・Linux) の
+   展開時ドロップダウンで反映される。macOS の OS ネイティブピッカーでは無視されるため、
+   ラベル末尾の「 (重み未導入)」表記を補助として残す (2026-10-27) */
+#hdr-model-select option.not-ready { color: var(--muted); }
 /* 幅は最大ラベル (4 文字 = 「再作成中」) + 余白で決める。
    4em (日本語 1 字 = 1em = 12px × 4) + padding 8×2 + border 1×2 = 4em + 18px。
    em 指定なのでフォントや実機の違いにも追従する (固定 px だと「…」込みの実測値に縛られる)。
@@ -1400,14 +1405,17 @@ function hdrModelOptions() {
   const st = currentStatus;
   const opts = [];
   for (const c of (st && st.containers ? st.containers : [])) {
+    // modelctl (WSL): ready=false は重み未導入。灰色表示のため 3 番目の要素に持たせる
+    const notReady = c.ready === false;
     let suffix = "";
-    if (c.ready === false) suffix = " (重み未導入)";
+    if (notReady) suffix = " (重み未導入)";
     else if (st.active && st.active.profile === c.profile) suffix = " (稼働中)";
-    opts.push([c.profile, c.profile + suffix]);
+    opts.push([c.profile, c.profile + suffix, notReady]);
   }
-  // RAG 環境が無いプラットフォーム (WSL) は RAG を選択肢に出さない
+  // RAG 環境が無いプラットフォーム (WSL) は RAG を選択肢に出さない。
+  // RAG は「未起動 = 停止中」で重み未導入ではないため灰色にしない
   if (PLAT.rag_enabled !== false) {
-    opts.push([RAG_VALUE, "RAG (sociax-rag)" + (ragStatus && ragStatus.running ? " (稼働中)" : "")]);
+    opts.push([RAG_VALUE, "RAG (sociax-rag)" + (ragStatus && ragStatus.running ? " (稼働中)" : ""), false]);
   }
   return opts;
 }
@@ -1420,10 +1428,11 @@ function renderHdrModel() {
   ph.value = "";
   ph.textContent = "モデルを選択";
   sel.appendChild(ph);
-  for (const [v, t] of hdrModelOptions()) {
+  for (const [v, t, notReady] of hdrModelOptions()) {
     const o = document.createElement("option");
     o.value = v;
     o.textContent = t;
+    if (notReady) o.className = "not-ready";
     sel.appendChild(o);
   }
   sel.value = selectedProfile || "";
