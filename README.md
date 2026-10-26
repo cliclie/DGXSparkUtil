@@ -2539,7 +2539,11 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status` が 200・thermal-guard active を確認）。
   unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
   運用に無影響）。
-- **atom2 (WhitebearATOM2)**: 2026-10-26 に `abbc63d` まで同期済み（本機。`git pull --ff-only origin main`
+- **atom2 (WhitebearATOM2)**: 2026-10-26 に `861d946` まで同期済み（本機。`git pull --ff-only origin main`
+  で `a8ea7e5` → `861d946` の 2 コミットを fast-forward。vLLM 情報カードの状態表示を「稼働中」/「API応答なし」へ
+  短縮するフロント変更（`front/index.html` 1 行）と、Whitebear2026 のリモート更新反映を記録する README 追記を
+  取り込み。フロントは静的配信のためブラウザリロードで反映（API 再起動不要）。
+  同じく 2026-10-26 に `abbc63d` まで同期済み（`git pull --ff-only origin main`
   で `993073b` → `abbc63d` の 8 コミットを fast-forward。WSL2 側が push した 2026-10-26 の一連のフロント改良
   （ヘッダ切替のタブ維持、プルダウンの稼働中モデル自動追随、dual メーターの単一レイアウト化、
   二段目グラフの凡例短縮、タイトル行から「 Monitor」と日時計を削除）と、server.log を JST 0 時に
