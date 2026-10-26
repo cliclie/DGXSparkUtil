@@ -2767,6 +2767,18 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 - 検証スクリプトはセッション用の一時ファイル（`/tmp/verify_tab.py` / `/tmp/vh*.py` / `/tmp/dual*.py` /
   `/tmp/btn*.py`）でリポジトリには含めない。実機のモデル切替・停止 API は発火させていない
 
+- **タイトル行から「 Monitor」を削除**（同日の追加指示）: `h1#hdr-title` の初期値を
+  「DGX Spark Monitor」→「DGX Spark」、`applyPlatform()` の
+  `h1.textContent = name + " Monitor"` → `h1.textContent = name`（`name` は dgx-spark が
+  `PLAT.label`、atom2 / wsl は `PLAT.hostname`）。**ブラウザタブの `<title>` と
+  `document.title` の「… Monitor」は対象外として残した**
+  - 実測（atom1 = WhitebearATOM1、headless Chrome + CDP `/tmp/cdp_title_check.py`）:
+    `PLAT.platform="dgx-spark"` / `label="DGX Spark"` の環境で `h1="DGX Spark"`（`Monitor` 無し）、
+    `document.title="DGX Spark Monitor"`（意図どおり未変更）
+  - `--dump-dom --virtual-time-budget` は fetch 待ちの JS 初期化が完了せず静的値しか返さなかった。
+    CDP で `Runtime.evaluate` を 5 秒後に実行して実描画を確認する
+
+
 ## server.log の日次アーカイブ（JST 0 時・zip）（2026-10-26）
 
 > **同日に truncate へ切り替えた**: ログの中身を精査した結果、アーカイブは廃止し

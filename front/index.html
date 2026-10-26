@@ -428,7 +428,7 @@ table.params td input[readonly] { color: var(--muted); }
 </head>
 <body>
 <header>
-  <h1 id="hdr-title">DGX Spark Monitor</h1>
+  <h1 id="hdr-title">DGX Spark</h1>
   <span id="clock"></span>
   <span id="pstate"></span>
   <span id="thermal"></span>
@@ -2092,7 +2092,7 @@ function applyPlatform() {
   // dgx-spark は固定ラベル「DGX Spark」、atom2 / wsl はホスト名 (例: WhitebearATOM2)
   const name = PLAT.platform === "dgx-spark" ? PLAT.label : (PLAT.hostname || PLAT.label);
   const h1 = document.getElementById("hdr-title");
-  if (h1) h1.textContent = name + " Monitor";
+  if (h1) h1.textContent = name;
   document.title = name + " Monitor";
   if (PLAT.exclusive_llm_rag) {
     const note = document.getElementById("rag-excl-note");
