@@ -2597,9 +2597,16 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   prefill/decode スループット対応（`/metrics` JSON・Bearer 必須）、`04930ca` strata metrics の
   idle/unloaded 正規化と直後 5 秒キャッシュ。更新対象は `api/config.py` / `api/vllm.py`）
   - 注意: 稼働中の `dgx-spark-api`（systemd system unit、起動 2026-10-27 06:39）は pull（07:46）
-    前のコードで動いているため **strata 系 3 件はランタイムに未反映。反映には
-    `sudo systemctl restart dgx-spark-api` が必要（本記録時点では未実施）**。フロントの
-    灰色表示は静的配信のためブラウザリロードで反映済み
+    前のコードで動いていたため strata 系 3 件がランタイムに未反映だった → **2026-10-27 07:49 に
+    `sudo systemctl restart dgx-spark-api` を実行して反映済み**（`ActiveState=active` /
+    `Result=success` / `NRestarts=0`、MainPID の cwd は `/home/cliclie/DGXSparkUtil/api` で
+    作業ツリーを import。`04930ca` の新キャッシュ `_strata_last_metrics`（`api/vllm.py:163`）が
+    稼働コードに存在）。実測: `/`・`/api/platform`・`/api/metrics`・`/api/vllm/status`・
+    `/api/thermal`・`/api/rag/status` すべて 200、`journalctl -p warning` 0 件、
+    `active=null`（LLM は未稼働のまま。containers 15 件、`ready=true` は swift40 / strataq3）。
+    `/api/vllm/cline?profile=strataq3` は未稼働のため 409「稼働中のモデルがありません」で
+    従来どおりの業務エラー。headless Chrome + CDP でも JS エラー 0 件、プルダウンの灰色表示
+    （未導入 `--muted` / 導入済み・RAG `--text`）とボタン 66×24px・header 40px を再確認
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
