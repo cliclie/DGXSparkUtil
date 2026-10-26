@@ -89,7 +89,7 @@ if [ "${TG_ENABLED}" = "1" ]; then
     "${API_DIR}/${TG_SERVICE}" > "${TG_UNIT_PATH}"
   chmod 644 "${TG_UNIT_PATH}"
 fi
-# server.log の日次アーカイブ (rotate_log.sh + JST 0 時タイマー)。
+# server.log の日次 truncate (rotate_log.sh + JST 0 時タイマー)。アーカイブは作らない。
 # OnCalendar はマシンのローカル TZ で評価され、unit の TZ 環境変数は ExecStart に
 # しか効かない。そこで「JST 0 時 = このマシンの何時何分か」をここで換算する。
 # 日本に夏時間はないので +0900 固定 = 通年同じ時刻 (JST 機は 00:00:00、UTC 機は 15:00:00)。
@@ -119,10 +119,9 @@ else
   echo "==> Skipping thermal-guard (WSL2 or DGXUTIL_THERMAL=0)"
 fi
 
-# server.log 日次アーカイブ。タイマーを有効化し、導入時に一度ローテートして
-# 溜まった server.log を「当日分だけ」に整える。oneshot なので start は zip 完了まで
-# ブロックする (100MB 級で数十秒)。API 本体は停止しない (copytruncate 方式)。
-echo "==> Enabling ${LR_TIMER} and running the first rotation"
+# server.log 日次 truncate。タイマーを有効化し、導入時に一度 truncate して溜まった
+# server.log を空にする。API 本体は停止しない (開いた fd を保つ truncate のみ)。
+echo "==> Enabling ${LR_TIMER} and running the first truncate"
 systemctl enable --now "${LR_TIMER}"
 systemctl start "${LR_SERVICE}"
 

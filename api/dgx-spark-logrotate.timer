@@ -1,5 +1,5 @@
 [Unit]
-Description=Archive DGXSparkUtil server.log at JST midnight
+Description=Truncate DGXSparkUtil server.log at JST midnight
 
 [Timer]
 # JST の 0 時に発火する。OnCalendar は **マシンのローカルタイムゾーン**で評価され、
@@ -10,8 +10,8 @@ Description=Archive DGXSparkUtil server.log at JST midnight
 #   TZ=UTC のマシン (WSL2 等)                              -> "*-*-* 15:00:00"
 OnCalendar=__JST_MIDNIGHT_LOCAL__
 AccuracySec=1min
-# マシン停止などで取り逃した分を起動後に一度実行する (server.log が数日分
-# 溜まった状態での初回実行は、最終日の名前で 1 本にまとまる)
+# マシン停止などで取り逃した分を起動後に一度実行する (server.log は丸ごと
+# 空になるので、取り逃しは「溜まった分をまとめて捨てる」ことになる)
 Persistent=true
 
 [Install]

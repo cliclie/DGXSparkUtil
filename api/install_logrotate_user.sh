@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# server.log の日次アーカイブを **sudo 不要** で有効化する (systemd user unit)
+# server.log の日次 truncate を **sudo 不要** で有効化する (systemd user unit)
 #
 #   dgx-spark-api.service (system unit) が書く server.log は cliclie 所有なので、
-#   同じ cliclie 権限の user unit でコピー/truncate できる (特権は要らない)。
+#   同じ cliclie 権限の user unit で truncate できる (特権は要らない)。
 #   Linger を有効化するので、ログインなし (ブート直後) も user manager が起動し、
 #   timer は JST 0 時に発火する。
 #
@@ -12,7 +12,7 @@
 #          systemctl --user daemon-reload
 #
 # 同一マシンで `sudo bash api/install_service.sh` (system unit 版) を後に実行しても、
-# rotate_log.sh の flock Later 発火は何もしないので二重アーカイブしない。
+# rotate_log.sh の flock により後発は何もしないので二重実行しない。
 # system unit 版を入れたら、こちらの user timer は解除する (下記「解除」)。
 set -euo pipefail
 
@@ -49,6 +49,6 @@ if [ "$(loginctl show-user "${RUN_USER}" -p Linger 2>/dev/null | cut -d= -f2)" !
     || echo "WARN: loginctl enable-linger に失敗。手動で 'sudo loginctl enable-linger ${RUN_USER}' を実行してください"
 fi
 
-echo "==> Running the first rotation now"
+echo "==> Running the first truncate now"
 systemctl --user start "${LR_SERVICE}"
 systemctl --user list-timers "${LR_TIMER}" --no-pager | head -n 3

@@ -595,8 +595,8 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   dgx-spark / atom2 は従来どおり thermal-guard も有効化する
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
-- ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード。JST 0 時に前日分を
-  `server.log.YYYYMMDD.zip` へアーカイブ → 下記「server.log の日次アーカイブ」）
+- ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード。JST 0 時に 0 バイトへ
+  truncate → 下記「server.log の日次 truncate」）
 - **`install_service.sh` は `thermal-guard.service`（root 特権）も同時にインストールする**。
   `api/thermal_guard.sh` に `chmod 755` して unit をレンダリングし、`enable` + 毎回 `restart`
   （`enable --now` は稼働中 unit を再起動しないため、Environment のしきい値変更が反映されない）
@@ -605,49 +605,44 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   - AMD 機（R9700）では、旧 `llm-gpu-powercap.service`（210W 常時固定の oneshot）を
     自動で `disable --now` する（`power1_cap` の書き手を thermal-guard に集約）
 
-### server.log の日次アーカイブ（JST 0 時・zip）
+### server.log の日次 truncate（JST 0 時）
 
 `dgx-spark-logrotate.timer` が **JST の 0 時**に `api/rotate_log.sh` を実行し、`server.log` を
-「当日（JST）分だけ」保つ形にローテートする。
+**0 バイトにする**（アーカイブは作らない。中身は uvicorn のアクセスログだけで行に
+タイムスタンプが無く、保存価値がないと実運用で判断した。実測 187 MB は 1.2 MB に圧縮できたが、
+その 1.2 MB にも残す値がなかった = 2026-10-26）。
 
-- 溜まった内容は `api/server.log.YYYYMMDD.zip` に保存。`YYYYMMDD` は `server.log` の
-  **最終更新日時を JST で見た日付**なので、0 時発火なら「たった今終わった日」= 前日になる
-  （昼間に手動実行したときは当日の日付になり、日付と中身がずれない）
-- `server.log` は 0 バイトになり、以後は当日分だけが残る
-- 方式は **コピー → truncate → zip**（logrotate の `copytruncate` と同じ発想）。
-  `dgx-spark-api.service` は `StandardOutput=append:server.log` で開いた fd に追記し続けるため、
-  リネーム方式だと書込みがアーカイブ側へ流れ続ける（`run.sh -d` の `>> server.log` も同じ）。
-  truncate は inode/fd を維持するので **API を再起動しなくてよい**
-  （代償としてコピー開始〜truncate 間の数十 ms の書込みは失う）
-- アーカイブは `.gitignore` 済み（`api/server.log.*.zip`）。**自動削除はしない**ので、
-  容量が気になったら `find api -name 'server.log.*.zip' -mtime +30 -delete` 等で消す
+- 方式は **truncate のみ**（リネームしない）。書き手は fd を開いたまま追記し続ける
+  （`dgx-spark-api.service` の `StandardOutput=append:server.log`、`run.sh -d` の `>> server.log`）
+  ため、リネームだと書込みがリネーム先へ流れ続けて `server.log` は以後増えない。
+  truncate は inode/fd を維持するので **API を再起動しない**
+- 空ファイル・ログ不在のときは何もしない。`flock` で多重実行防止
+  （タイマーと手動実行が重なっても後発は何もしない）
 
 手動運用:
 
 ```bash
-systemctl list-timers dgx-spark-logrotate.timer        # 次回発火時刻を確認
-sudo systemctl start dgx-spark-logrotate.service       # 今すぐローテート (API は停止しない)
-unzip -l /home/cliclie/DGXSparkUtil/api/server.log.20261025.zip   # アーカイブの中身確認
+systemctl list-timers dgx-spark-logrotate.timer        # 次回発火時刻 (JST 0 時) を確認
+sudo systemctl start dgx-spark-logrotate.service       # 今すぐ空にする (API は停止しない)
+bash /home/cliclie/DGXSparkUtil/api/rotate_log.sh      # 素のスクリプトでも可 (cliclie 権限で)
 ```
 
 - 日付境界は JST 固定。`OnCalendar` はマシンのローカル TZ で評価され unit の `TZ` 環境変数は
   `ExecStart` にしか効かないため、`install_service.sh` が「JST 0 時 = そのマシンの何時何分」を
   換算して `OnCalendar` に焼き込む（JST 機は `*-*-* 00:00:00`、UTC 機は `*-*-* 15:00:00`。
   日本に夏時間はないので +0900 固定 = 通年同じ）
-- `Persistent=true` なのでシャットダウン中に逃した分は起動後に実行される
-  （数日分溜まった状態での初回実行は、最終日の名前で 1 本にまとまる）
-- 手動実行とタイマーが重なったときは `flock` で後発が何もしない（二重アーカイブしない）。
-  同日分に再実行で 2 本目が必要になったときは `server.log.YYYYMMDD.2.zip` に分かれる
+- `Persistent=true` なのでマシンの停止中に逃した分は起動後に実行される
+  （＝停止中に書かれた分はまとめて捨てられる）
 - **sudo 不要で導入する方法**: `bash api/install_logrotate_user.sh`。`~/.config/systemd/user/` に
-  同内容の unit（`User=` / `Nice=` / `IOSchedulingClass=` を落とした版）を書き、
-  `loginctl enable-linger`（DGX Spark 系ではパスワード不要で通った）でブート後も起動させる。
-  `server.log` が `cliclie` 所有なのでコピー / truncate に root 特権は要らない
+  同内容の unit（`User=` 行を落とした版）を書き、`loginctl enable-linger`
+  （DGX Spark 系ではパスワード不要で通った）でブート後も起動させる。
+  `server.log` が `cliclie` 所有なので truncate に root 特権は要らない
   - 管理: `systemctl --user list-timers dgx-spark-logrotate.timer` /
     `systemctl --user start dgx-spark-logrotate.service` /
     `journalctl --user -u dgx-spark-logrotate.service -n 5`
   - `install_service.sh`（system unit 版）を入れるときは user timer を解除する
     （`systemctl --user disable --now dgx-spark-logrotate.timer` + unit 削除 + `daemon-reload`）。
-    両方が残っても `rotate_log.sh` の `flock` で後発は何もしない（二重アーカイブしない）
+    両方が残っても `rotate_log.sh` の `flock` で後発は何もしない
 
 ### 手動起動（開発・デバッグ用）
 
@@ -2774,6 +2769,11 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
 
 ## server.log の日次アーカイブ（JST 0 時・zip）（2026-10-26）
 
+> **同日に truncate へ切り替えた**: ログの中身を精査した結果、アーカイブは廃止し
+> **JST 0 時に 0 バイトへ truncate するだけ**にした。現行仕様は
+> 「server.log の日次 truncate（JST 0 時）」と「server.log はアーカイブせず JST 0 時に
+> truncate（2026-10-26）」を参照。以下は zip 版の実装記録（命名方式の検証は残る）。
+
 **要望**: `api/server.log` は当日分だけを保ち、日をまたいだら前日分を
 `api/server.log.YYYYMMDD.zip` に改名＋zip 圧縮する。日付またぎの判定は JST。
 
@@ -2834,3 +2834,53 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
   （`loginctl enable-linger cliclie` はパスワードなしで通った）。`sudo bash api/install_service.sh`
   の system unit 版はパスワード必須のため未実行（次の保守時に）。他機 (atom2 / DGX Spark / WSL) は
   `git pull` 後に `bash api/install_logrotate_user.sh`（sudo 不要）で有効化できる
+
+## server.log はアーカイブせず JST 0 時に truncate（2026-10-26）
+
+**要望**: `server.log.YYYYMMDD.zip` の `YYYYMMDD` を「その zip に含まれる行の JST
+0:00〜23:59」の意味にしたい（前項の mtime 命名は 10/23〜26 が混在していた）。
+
+**調査で「既存アーカイブの日付分割は不可能」と判明**（対象 = 187 MB・2,904,909 行・
+実カバレッジ 2026-10-23 03:37〜10-26 09:50）
+
+- ログ行に日付が無い。uvicorn 既定のアクセスログ書式で
+  `INFO:     192.168.0.26:64020 - "GET /api/metrics HTTP/1.1" 200 OK` の 1 行のみ
+- journald にアクセスログ行は入っていない。`StandardOutput=append:` は journal へ
+  コピーしないため `journalctl -u dgx-spark-api` は 56 行だけ（`GET /api/metrics` は 0 件）
+- journal に残る unit 起動は 10/23〜10/26 で **9 回**（23 日 2 / 24 日 3 / 25 日 2 / 26 日 2）。
+  一方ログ内の `Started server process [pid]` は **136 個**で、差分の 127 個は
+  `run.sh -d` (nohup) 起動 = 時刻が復元できない。→ 判明する時刻境界は 290 万行中 9 点
+
+**結論**: 中身に保存価値が無いので **zip を廃止し、JST 0 時に 0 バイトへ truncate するだけ**にした。
+
+**変更内容**
+
+- `api/rotate_log.sh`: `cp` / `zip` / 連番命名を削除。`flock` → 空・不在チェック →
+  `: > server.log` → journal に 1 行。`LOG_TZ`（既定 `Asia/Tokyo`）は出力時刻の
+  JST 表示にのみ使う（リネームしない設計理由は前項と同じ: 書き手の fd は inode に紐づく）
+- `api/dgx-spark-logrotate.service`: `Description` を truncate に。zip で必要だった
+  `Nice=10` / `IOSchedulingClass=idle` は削除（truncate は IO を食わない）
+- `api/dgx-spark-logrotate.timer`: 変更なし（`OnCalendar` = JST 0 時、`Persistent=true`）。
+  停止中に逃すと「溜まった分をまとめて捨てる」挙動になる
+- `install_service.sh` / `install_logrotate_user.sh`: コメントと進捗メッセージのみ
+- `.gitignore` の `api/server.log.*.zip` は**据え置き**（zip 版が残した
+  `server.log.20261026.zip` / `.2.zip` が untracked に出ないようにする）。
+  中身に価値は無いので不要なら `rm api/server.log.*.zip` で消してよい
+
+**検証（atom1 = WhitebearATOM1 実機・`TZ=Asia/Tokyo`）**
+
+- サンドボックス `/tmp/rot_test_run.sh` **PASS=17 / FAIL=0**: 0 バイト化／zip を作らない／
+  出力は 1 行で `truncated server.log (34 bytes)`・時刻は `+09:00`／空ログ・ログ不在は
+  無動作・無出力／`flock` 保持中は無動作でサイズも不変、解除後は実行／
+  追記し続ける fd は truncate 後も 29 行が新しい `server.log` へ継続／inode は truncate で不変
+- 実サービス: `systemctl --user start dgx-spark-logrotate.service` → `status=0/SUCCESS`、
+  journal に `2026-10-26T10:09:32+09:00 truncated server.log (207371 bytes)`。
+  truncate 後も 6 秒で 2,424 → 3,688 B に成長（同じ fd で追記継続）、`GET /` = 200、
+  `NRestarts=0`（API 無停止）
+- `systemd-analyze verify`（system 版 / user 版）は無警告。`bash -n` は 3 スクリプトとも通過
+  - 教訓 1: `editor` でスクリプトを**作り直すと実行権が落ちる**。
+    `systemd-analyze verify` が `Command ... is not executable` で検出できた（`chmod 755` で解消）
+  - 教訓 2: truncate は速すぎるため「同じスクリプトを 2 本並列」では `flock` を
+    検証できない（1 本目が完了してロックが解ける）。`( exec 9>lock; flock 9; sleep 2 ) &` で
+    **明示的にロックを保持**して検証する
+
