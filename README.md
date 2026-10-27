@@ -425,6 +425,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | 同上(TabbyAPI) | `docker logs` (リクエスト毎統計の解析、実装メモ 2026-09-14 参照) |
 | 同上(llama.cpp) | `GET /metrics` (`--metrics` 指定時、Prometheus 形式) + `GET /slots` (KVキャッシュ使用率) |
 | 同上(Magnitude / magn) | `~/.magnitude/serving-usage.sqlite` (usage 表) + GPU 負荷から実行中を推定 (`/metrics` 無し、実装メモ 2026-10-06) |
+| 同上(Strata / strata・atom2 compose) | `GET /metrics` (**JSON 形式・Bearer key 必須**。Prometheus ではない) + `/health` (key 不要・Cline 設定の max_context/images 用)。実装メモ 2026-10-28 |
 | 同上(modelctl / WSL2) | TabbyAPI=起動ログ解析、Strata=`/metrics/prometheus`(`llamacpp:*` 同名系列)+`/slots`+`[strata] done:` ログ、llama.cpp=`/slots`+`print_timing` ログ、ExLlamaV3=`/health` のカウンタ差分 (実装メモ 2026-10-21) |
 | 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`、modelctl は `logs/ctl-*.log` 等のログファイル末尾) |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
@@ -440,6 +441,15 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   (実装メモ 2026-10-08)。`/metrics` は無く、ルート `/health` は serve のライフサイクル状態のみを返す。
   メトリクスは `~/.magnitude/serving-usage.sqlite` の usage 表と GPU 負荷から算出し、直近ログは
   `journalctl --user` を読む(実装メモ 2026-10-06)
+- **Strata (strata・atom2 compose のみ) は `/metrics` が JSON 形式で Bearer key 必須**
+  (Prometheus 系列ではないため既存の `vllm:`/`sglang:`/`llamacpp:` 検出チェーンには入れず、
+  `get_status()` の strata 分岐で `_strata_server_metrics()` がマッピングする)。
+  `/health` のみ key 不要で Cline 設定値の max_context/images をそこから読む。
+  Strata は暫く idle でモデルを **auto-unload** するため (`live.state=unloaded`)、
+  `requests_running` を 0 に正規化しスループット・KV も 0 を返す
+  (リクエスト直後 5 秒はモジュールレベルキャッシュで計測値を維持。実装メモ 2026-10-28)。
+  なお modelctl/WSL2 の `engine == "strata"` は**別物** (llama.cpp 系フォークの
+  `/metrics/prometheus` + ログ解析、実装メモ 2026-10-21) で本分岐とは無関係
 - **E2E・TTFT・入力/出力スループット(表示ラベルは `prefill` / `decode`)の前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
   `front/index.html` の `pickMetric()` が直近の非ゼロ値を保持し、API が 0/None を返した間は前回値を維持表示する(実装メモ 2026-10-06)。
   稼働モデル消失・モデル切替(profile 変化)で保持値をリセット。スループットの白/灰は「API が非ゼロの新しい計測値を返した」側を白とする相対判定
@@ -2554,7 +2564,17 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status` が 200・thermal-guard active を確認）。
   unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
   運用に無影響）。
-- **atom2 (WhitebearATOM2)**: 2026-10-27 に `77a5dd2` まで同期済み（本機。`git fetch --all --prune` +
+- **atom2 (WhitebearATOM2)**: 2026-10-28 に `1323f68` まで同期済み（本機。HEAD の
+  `1323f68` を含む。本機は strata 系 3 コミット（`ef845fa` / `24c36bd` / `04930ca`）の
+  **実装元**で、2026-10-28 の Strata 0.2.7（engine 0.1.52）更新後も `/metrics` JSON・`/health` の
+  フィールド互換を維持していることを実 HTTP で再確認（**コード変更不要**）。`dgx-spark-api` は
+  `.env` の `STRATA_API_KEY` 更新（2026-10-27）と strata 系コミットのたびに `systemctl restart` 済み
+  （`config.py` は import 時に `.env` を読むため）。実測: `GET /api/vllm/cline` は
+  `api_key=実キー48文字` / `model_id=qwen3.8-flash-next-iq3_xxs` / `context 131072` / `images true`、
+  `GET /api/vllm/status` は strata 稼働カードで decode/prefill（0.2.7 実測 60.12 / 158.75 T/s の
+  live 瞬時値）を返し、アイドル時は 0 表示。詳細は「Strata (strata・atom2) の Cline 設定値と
+  prefill/decode 表示（2026-10-26 / 10-28）」セクション参照。
+  2026-10-27 に `77a5dd2` まで同期済み（`git fetch --all --prune` +
   `git merge --ff-only origin/main` で `04930ca` → `77a5dd2` の 4 コミットを fast-forward、作業ツリーは
   クリーン・コンフリクトなし）。取り込み内容はヘッダのモデル選択プルダウンで重み未導入を灰色表示
   （Whitebear2026 実装。`front/index.html` の `#hdr-model-select option.not-ready { color: var(--muted); }`
@@ -3047,3 +3067,57 @@ atom2 はゲージと同じく実測上限（2350 MHz / 現在の `power1_cap`�
   error コンソール 0 件
 - 検証スクリプトはセッション用の一時ファイル（`/tmp/cdp_gray_check.py` / `/tmp/cdp_gray_regress.py` /
   `/tmp/cdp_gray_shot.py`）でリポジトリには含めない
+
+## Strata (strata・atom2) の Cline 設定値と prefill/decode 表示（2026-10-26 / 10-28）
+
+**経緯**: 2026-10-26 に atom2 へ Strata エンジン（Qwen3.8-Flash-Next IQ3_XXS、
+compose プロファイル `strata`、ホストポート 8009）を追加した。profiles 対応表は
+`_load_profiles()` の compose 動的パースで自動追従するが、Cline 設定値の API key と
+メトリクスは Strata 固有の認証・形式に対応する必要があった（コミット ef845fa /
+24c36bd / 04930ca）。2026-10-28 の 0.2.7（engine 0.1.52）更新後も JSON 構造は
+フィールド互換を維持しておりコード変更不要だった。
+
+**Strata の API 仕様（本機実測）**:
+
+| エンドポイント | 認証 | 形式 |
+|---|---|---|
+| `GET /health` | 不要 | JSON（`max_context` / `images` / `loaded` / `model`） |
+| `GET /v1/models`・`/v1/*` | **Bearer 必須** | OpenAI / Anthropic 互換 |
+| `GET /metrics`・`/slots` | **Bearer 必須** | **JSON**（Prometheus ではない。`engine` / `live` / `requests` の 3 ブロック） |
+
+key は `~/LLM/compose/.env` の `STRATA_API_KEY`（`config.py` が既存の
+`_read_compose_env()` で読む。サービス起動時のみ読込のため .env 変更時は
+`systemctl restart dgx-spark-api` が必要）。
+
+**実装**（`api/vllm.py` のみ。フロント無変更 = 既存の行別コピー/一括コピーが有効化される）:
+
+- `get_cline_config()`: strata 分岐で `config.STRATA_API_KEY` を返す（従来は
+  「認証なし(任意の値でOK)」表示）。コンテキスト・画像対応は key 不要の `/health` から
+  動的取得（`_strata_health_info()`）。compose の command ブロックが無い
+  （環境変数設定型）ため `--max-model-len` 等の動的取得は使えない。
+  `CLINE_MODEL_TABLE` にフォールバック値（131072 / images: true）
+- `get_status()`: モデル名取得（`/v1/models`）を strata のみ Bearer 付きに。
+  メトリクスは Prometheus チェーンに入れない early-return 分岐で
+  `_strata_server_metrics()` がマッピング:
+  - decode = `live.tok_s`（生成中の瞬時値）→ 直近**完了**リクエストの `decode_tok_s`
+  - prefill = `live.prefill_tok_s_mean` → `prompt_tokens ÷ (prompt_ms/1000)`
+  - E2E = `duration_s` / TTFT = `first_engine_token_s` / KV = `(prompt+output)÷context×100`
+  - `finish=cancel`（クライアント切断）のリクエストは値が null のため
+    `stop`/`length`（完了）から代表を選ぶ
+  - idle / auto-unload（`live.state=unloaded`）では running=0 に正規化し
+    スループット・KV は 0（llama.cpp の idle と同じ体験）。直後 5 秒は
+    `_strata_last_metrics` キャッシュで計測値を維持
+- Strata は暫く idle でモデルを auto-unload し、次回リクエストで自動再ロードする
+  （magn の on-demand と同様の運用。`/health` の `loaded` で確認できる）
+
+**検証**（実 HTTP・strata 0.2.3 / 0.2.7 の両方で確認）:
+
+- `GET /api/vllm/cline` → `api_key=実キー48文字` / `model_id=qwen3.8-flash-next-iq3_xxs` /
+  `context 131072` / `images true`
+- `GET /api/vllm/status` → `model_name` 取得 OK。生成中は live 瞬時値
+  （decode 60.7 / prefill 297.7 T/s 等が追従変動）、アイドル時は 0 表示
+- 0.2.7（engine 0.1.52）で `/metrics` JSON の `live` / `requests` フィールド互換を
+  全て確認（`all(k in d['live'] ...)=True`、`req0 keys ok=True`）
+- 「重み未導入」灰色表示（2026-10-27・modelctl 専用）は `ready === false` の strict
+  判定で、compose 側は `ready` 未定義（undefined）のため strata が誤って
+  切替不可・灰色になる回帰なしを確認
