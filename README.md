@@ -1907,9 +1907,31 @@ run1 req=196000 -> prompt=199210 comp=80 elapsed=117.5s prefill=1695.8 tok/s
 | D | `THERMAL_CONTAINER=vllm-nemotron120b` | `tabbyapi-ornith122b` | 0（単一指定がリストを置き換える） |
 | E | 既定（**実 docker**） | `tabbyapi-ornith122b` のみ | **1** |
 
-反映には root unit の再起動が必要（`sudo systemctl restart thermal-guard`）。反映後の確認は
-`cat /run/thermal/state` の `model_running` が ornith 稼働時に `1`（起動ログは
-`containers=vllm-nemotron120b tabbyapi-ornith122b`）。
+反映は **2026-10-28 11:18:22 に `sudo systemctl restart thermal-guard` で実施済み**。起動ログは
+`containers=vllm-nemotron120b tabbyapi-ornith122b`、`/run/thermal/state` の `model_running` は
+ornith 稼働時に **1**（アイドル時は 41℃ / 2398 MHz / `locked_mhz=0`）。
+
+### 実戦検証（2026-10-28 11:21・反映後に同一負荷を再投）
+
+97℃ を出したのと同じ needle を再投した。ただし **filler が同一のプロンプトは ExLlamaV3 の
+KV キャッシュに全ヒットして prefill が走らない**（259,040 tok が **5.1 s** で PASS）ため、
+`needle_test_2p05.py` に `--seed`（200 文ごとに salt を混ぜる）を追加してキャッシュを外し、
+260,442 tok で再投した。
+
+| 項目 | 反映前（10:56・対象外） | 反映後（11:21・対象化） |
+|---|---|---|
+| prompt tokens | 259,040 | 260,442（salt 分 +1,402） |
+| フロント監視温度のピーク | **97℃**（CRIT 98 の 1℃下） | **91℃** |
+| 発動 | **なし**（`model_running=0` → `want=0`） | **18 回**（`90C -> 1665MHz`） |
+| ロック時間 | 0 s | **216 s / 560 s = 39%**（実クロック **1651 MHz**） |
+| 90℃ 以上に居た時間 | 97℃ まで上昇し続ける | **42 s**（21 サンプル / 2 秒解像度） |
+| prefill 経過 | 503.6 s = 518 T/s | 558.8 s = **466 T/s（−10%）** |
+| needle 結果 | PASS（739241） | **PASS（739248）** |
+| 完了後 | — | `11:30:53 76C -> 0MHz` で解除（低クロック固定は残らない） |
+
+- **発動は 90℃ 交差から 2 秒以内**。発振は残るが周期は約 30 秒（90℃ → ロック → 73〜81℃ → 解除 → 上昇）で、前節の実測傾向どおり
+- **代价は prefill −10%**。decode は 90℃ に届かないので影響しない
+- 教訓: **同一プロンプトの再投は prefill を通らない**。発熱・長文速度の実測は `--seed` でキャッシュを外して行う
 
 ### 教訓
 
