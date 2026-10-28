@@ -1753,6 +1753,13 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
+    "ornith122b": {
+        "images": False,  # config_ornith.yml vision: false（作者未検証のため初回は無効）
+        "context_max": 262144,  # ネイティブ（YaRN 未適用・cache_size 262144・Q8）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,  # 作者推奨（base generation_config.json: temp 0.6 / top-k 20 / top-p 0.95）
+    },
     "mimo_flash": {
         "images": False,  # テキスト専用（Vision/Audio なし）
         "context_max": 262144,  # KV cache_size（1M Q8 は MemAvailable 不足のため 262K）
