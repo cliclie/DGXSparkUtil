@@ -3199,3 +3199,90 @@ key は `~/LLM/compose/.env` の `STRATA_API_KEY`（`config.py` が既存の
 - 「重み未導入」灰色表示（2026-10-27・modelctl 専用）は `ready === false` の strict
   判定で、compose 側は `ready` 未定義（undefined）のため strata が誤って
   切替不可・灰色になる回帰なしを確認
+
+## ダッシュボードのポーリング緩和と GPU クロックの実値表示 (2026-10-28)
+
+### 症状 (Ornith 122B の長文 prefill 中)
+
+`~/llm` の Ornith 122B (TabbyAPI / ExLlamaV3) で 260K prefill を流すと、モデルカードが
+「API応答なし」になり、ゲージもサーマル表示も 20 秒近く固まった。prefill 中の実測:
+
+| 項目 | 修正前 |
+|---|---|
+| `GET /api/vllm/status` | **20.46 秒** |
+| `active.health` | false |
+| `active.model_name` / `active.metrics` | null / null |
+
+原因は **モデルの HTTP が塞がれたときのプロブの直列積み上げ**。1 リクエストで次を順に
+叩いており、各 curl は max-time まで待つ (塞がれていると全部満額):
+
+| 呼び出し | max-time |
+|---|---|
+| `/health` (health 判定) | 3 s |
+| `/v1/models` (health フォールバック) | 3 s |
+| `/v1/models` (モデル名) | 3 s |
+| `/metrics` (エンジン種別 + メトリクス) | 5 s |
+| `/.well-known/serviceinfo` (`_is_tabbyapi`) | 3 s |
+| `/v1/models` (`_is_llamacpp`) | 3 s |
+| `/v1/model` (`_tabbyapi_metrics` の cache_size) | 3 s |
+
+ExLlamaV3 は推論中に uvicorn ワーカーが塞がるので、**プロセスが生きていても HTTP は
+返らない**。「応答なし = 落ちた」ではない。
+
+### API 側の緩和 (`api/vllm.py`)
+
+1. **変わらないものをキャッシュ** (TTL 付き、失敗時は前値を返して表示を止めない)
+   - エンジン種別 `_engine_kind`: 判定**成功**時 120 s。判定**失敗 (混雑) は 10 s だけ**
+     — 失敗を 120 s すると TabbyAPI が永久にメトリクス無し表示になる (検証で発覚)。
+     種別が既知なら `/metrics` が空でも serviceinfo / `/v1/models` の追加プロブ (計 6 s)
+     を払わず stale で返す
+   - モデル名 `_model_name`: 成功 30 s / 失敗 10 s
+   - `docker logs` 末尾 `_logs_tail`: 5 s (2 秒ポーリングの重複を省く)
+   - TabbyAPI `/v1/model` の `cache_size` / `max_batch_size` は静的 → `_tabby_model_txt` 120 s
+   - **`ts` は判定完了時刻で書く**。開始時刻を入れると 8 秒かかった判定の TTL が実質
+     2 秒になり毎コール再判定していた (cProfile で発覚、11 s/回)
+2. **`busy` / `api_listening`** を追加: `/health` が 1.2 秒で返らないとき TCP 接続だけを
+   試みる (`_tcp_open`)。listener が受け付ければ `busy=true` = 生きていて混雑中
+3. プロブの max-time 短縮: `/health` 3→1.2 s、`/v1/models` 3→1.5 s、`/metrics` 5→2 s、
+   `/v1/model` 3→1.5 s
+4. `/get_load` 等の `None` を `{}` に正規化 (front のキー参照を揃える)
+
+**効果 (prefill 継続中に `get_status()` を 5 回連続実行)**:
+
+| コール | 修正前 | 修正後 |
+|---|---|---|
+| 1 回目 (キャッシュ寒結) | 20.5 s | 11.1 s |
+| 2 回目以降 | 20.5 s | **1.5 / 3.1 / 1.6 / 1.5 s** |
+| health / busy | false / 項目なし | false / **true** |
+
+### フロント側の緩和 (`front/index.html`)
+
+- `fetchJson(url, timeoutMs)` に **AbortController 期限** (既定 6 s)。期限がないと
+  status が詰まったとき ゲージ・RAG・サーマルまで一緒に止まっていた
+- `poll()` は 4 エンドポイントを **`Promise.allSettled` で並列**に引き、それぞれ期限を
+  付ける (metrics 5 s / status 9 s / rag 5 s / thermal 3 s)。失敗したカードは前回の値を残す
+- 状態表示: `health` → 「稼働中」/ `busy` → **「稼働中（推論中）」(hot)** /
+  どちらも false → 「API応答なし」(warn)
+
+### GPU クロックゲージは実値とロック段を表示
+
+サブ行は従来 `最大 3003 MHz` だけ。3003 MHz は `clocks.max.sm` の HW 上限で、実 boost は
+2400〜2515 MHz、サーマルガード発動中は 1651 MHz。**目盛りが 3003 固定なので 1651 MHz に
+落とされても針が 55% 付近に張り付き、発動の判断がつきなかった** (運用者指摘)。
+
+- サブ行を **`実 <現在値> / 最大 <clocks.max.sm> MHz`** に変更
+- **発動中は目盛りをロック段に寄せる**: `tuneGauge()` が `thermalClockLockMhz()`
+  (`/api/thermal` の `locked_mhz`。power モード = atom2 は `mode:"power"` で対象外) を
+  返し `max = locked_mhz` → 発動中は `実 1651 / ロック 1665 MHz` で針はほぼ振り切る。
+  解除時は `clocks.max.sm` (3003) へ戻る
+- 二段目の時系列グラフの 100% 基準 (`CHART_NORM.gpuClock`) は HW 上限のまま。発動中は
+  線が 55% 付近へ下がるので発動の目視確認に使える
+
+検証: 発動中の `/api/thermal` は `locked_mhz:1665 / clock_mhz:1651` (clock モード、
+`mode` キーなし) → `thermalClockLockMhz()` は 1665 を返す。atom2 の power モード状態は
+`mode:"power"` かつ `locked_mhz` なし → null。フロント構文は括弧バランスが HEAD 版と
+同じ 0 になることを確認 (node 未導入のため構文パーサなし)。`py_compile` 通過。
+
+反映には `sudo systemctl restart dgx-spark-api` が必要 (front は静的ファイルなので
+ブラウザ再読み込みだけでよい)。
+
