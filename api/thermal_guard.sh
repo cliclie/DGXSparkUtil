@@ -18,7 +18,10 @@
 #   <= LOW(80) が LOW_SECS(10)秒 継続 -> -rgc で解除
 # 下げるのは即時、上げるのは 10 秒継続。GB10 の熱時定数が約 100 秒あるので、
 # 対称な条件だと発振する。
-# 対象は THERMAL_CONTAINER の LLM が稼働中の時だけ (ExLlama 系は圏外)。
+# 対象は THERMAL_CONTAINERS (空白区切りリスト) の LLM が稼働中の時だけ。既定は
+# vllm-nemotron120b と tabbyapi-ornith122b。2026-10-16 は ExLlama 系 (Qwen 4p05) が
+# 259K prefill で 88℃/71W と HIGH(90) に届かず圏外だったが、2026-10-28 に Ornith 122B の
+# 259,040 tok prefill で acpitz 97℃ を実測したため ExLlama 系も対象に含めた。
 # 終了時は必ず -rgc する。低クロックに固定されたまま性能を失い続ける方が害が大きい。
 #
 # --- power (R9700) --------------------------------------------------------------
@@ -56,7 +59,10 @@ LOW="${THERMAL_LOW_C:-80}"
 LOW_SECS="${THERMAL_LOW_SECS:-10}"
 LOCK_HIGH="${THERMAL_LOCK_HIGH_MHZ:-1500}"
 LOCK_CRIT="${THERMAL_LOCK_CRIT_MHZ:-1000}"
-CONTAINER="${THERMAL_CONTAINER:-vllm-nemotron120b}"
+# 対象コンテナは空白区切りのリスト (docker ps の名前と完全一致)。
+# THERMAL_CONTAINER (単一指定) は後方互換として残し、指定があればそれを優先する。
+CONTAINERS="${THERMAL_CONTAINERS:-vllm-nemotron120b tabbyapi-ornith122b}"
+[ -z "${THERMAL_CONTAINER:-}" ] || CONTAINERS="$THERMAL_CONTAINER"
 # 監視間隔: GB10 の温度上昇は 0.4℃/秒なので 2 秒で十分。R9700 は電力切替の応答が
 # 速いので 1 秒 (解放の 2 秒判定を 2 サンプルで見る)。
 INTERVAL="${THERMAL_INTERVAL_S:-2}"
@@ -166,7 +172,7 @@ loop_clock() {
   # current=0 と実状態が不整合になり want=0 == current=0 で apply が走らず、
   # 永久に解除されない。なので起動時に必ず 1 回解除して既知の状態から始める。
   nvidia-smi -rgc >/dev/null 2>&1
-  echo "thermal-guard start: mode=clock high=${HIGH} crit=${CRIT} low=${LOW}x${LOW_SECS}s lock=${LOCK_HIGH}/${LOCK_CRIT}MHz interval=${INTERVAL}s container=${CONTAINER}" >&2
+  echo "thermal-guard start: mode=clock high=${HIGH} crit=${CRIT} low=${LOW}x${LOW_SECS}s lock=${LOCK_HIGH}/${LOCK_CRIT}MHz interval=${INTERVAL}s containers=${CONTAINERS}" >&2
 
   while :; do
     a="$(acpitz_max_c)"
@@ -176,11 +182,15 @@ loop_clock() {
     [ "$g" -gt "$t" ] && t="$g"
 
     running=0
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER" && running=1
+    names="$(docker ps --format '{{.Names}}' 2>/dev/null)"
+    for c in $CONTAINERS; do
+      echo "$names" | grep -qx "$c" && { running=1; break; }
+    done
 
     want="$(target_mhz "$t")"
     if [ "$running" -eq 0 ]; then
-      # nemotron 以外 (ExLlama 系は CPU/RAM 主体で 88℃/71W 圏外) は絞らない
+      # 対象リスト (CONTAINERS) 外のときは絞らない。対象は既定で nemotron と
+      # tabbyapi-ornith122b (2026-10-28 に 259K prefill で acpitz 97℃ を実測して追加)
       want=0
       low_count=0
     elif [ "$want" -gt 0 ]; then

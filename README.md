@@ -1691,11 +1691,12 @@ thermal-guard.service (root)  ── 2 秒ループ ──> nvidia-smi -lgc / -r
 - **下げるのは即時、上げるのは 10 秒継続**。GB10 の熱時定数が約 100 秒あるので対称条件は発振する
 - 熱応答実測: 70→80℃ を 28 秒、80→90℃ を 24 秒(=0.4℃/秒)。**2 秒制御で余裕がある**
 - 1475 MHz では 68〜72℃ で**飽和**するので 90℃ に届かない(制御の安定性はこれに支えられている)
-- **nemotron 稼働時のみ作動**。ExLlama 系は CPU/RAM 主体で 88℃/71W 圏外なので絞らない
+- **対象コンテナが稼働中のときだけ作動**（既定は `vllm-nemotron120b` と `tabbyapi-ornith122b`）。2026-10-16 は ExLlama 系が 88℃/71W で HIGH(90) に届かず圏外だったが、**2026-10-28 に Ornith 122B の 259K prefill で監視温度 97℃ を実測して対象に追加した**（下記「2026-10-28: 対象をコンテナ名リスト化」節）
 - **終了時は必ず `-rgc`**(`trap ... EXIT TERM INT`)。低クロック固定で性能を失い続ける方が害が大きい
 - 全しきい値は環境変数で上書き可(`THERMAL_HIGH_C` / `THERMAL_CRIT_C` / `THERMAL_LOW_C` /
   `THERMAL_LOW_SECS` / `THERMAL_LOCK_HIGH_MHZ` / `THERMAL_LOCK_CRIT_MHZ` /
-  `THERMAL_INTERVAL_S` / `THERMAL_CONTAINER`)
+  `THERMAL_INTERVAL_S` / `THERMAL_CONTAINERS`（対象リスト。既定 `vllm-nemotron120b tabbyapi-ornith122b`）/
+  `THERMAL_CONTAINER`（単一指定の後方互換。指定時はリストを置き換える）)
 
 ### 追加ファイル
 
@@ -1862,6 +1863,61 @@ run1 req=196000 -> prompt=199210 comp=80 elapsed=117.5s prefill=1695.8 tok/s
 
 ---
 
+## GB10 サーマルガード: 対象をコンテナ名リスト化し Ornith 122B を追加（2026-10-28）
+
+運用者が Ornith 1.5 122B（`tabbyapi-ornith122b`・ポート 8018）の needle テスト中に
+フロントの監視温度が **97℃** に達したのを確認した。2026-10-16 の「ExLlama 系は圏外」判定が
+覆ったため、**ガード対象を単一コンテナ名からリスト化**して追加した。
+
+### 実測（2026-10-28・Ornith 122B / EXL3 4.049bpw / 259,040 tok prefill）
+
+| 項目 | 値 |
+|---|---|
+| フロントの監視温度 `max(acpitz, GPU温度)` | **97℃**（運用者の目視。**CRIT 98℃ の 1℃ 下**） |
+| `nvidia-smi temperature.gpu`（当方の 30 秒ポーリング） | **84〜85℃** |
+| 差の意味 | **GPU 温度ではなく acpitz が 97℃ に達していた**。制御変数は `max(acpitz, GPU温度)` なので、GPU 温度だけを見ると圏外に見える（2026-10-16 の誤判定の原因） |
+| prefill | 259,040 tok を 500.4 s = **518 T/s**（ネイティブ 262,144 の 98.8%） |
+| アイドル復帰 | 約 3 分で acpitz 41℃ / GPU 39℃（全 acpitz ゾーン 39〜41℃） |
+
+`acpitz` は SoC 内 7 ポイントの総合で、アイドル時は GPU 温度（39℃）と揃う。
+**高負荷長文では acpitz が GPU 温度を 10℃ 以上上回る**。
+
+### 変更内容（`api/thermal_guard.sh`）
+
+| 箇所 | 変更前 | 変更後 |
+|---|---|---|
+| 対象指定 | `CONTAINER="${THERMAL_CONTAINER:-vllm-nemotron120b}"`（単一） | `CONTAINERS="${THERMAL_CONTAINERS:-vllm-nemotron120b tabbyapi-ornith122b}"`（空白区切りリスト） |
+| 後方互換 | — | `THERMAL_CONTAINER` 指定時はリストを置き換える（unit 側は未設定＝新既定が効く） |
+| 稼働判定 | `docker ps \| grep -qx "$CONTAINER"` | `docker ps` の名前を 1 回取得し、`CONTAINERS` のいずれかと `grep -qx` で完全一致（`break`） |
+| 起動ログ | `container=<name>` | `containers=<list>` |
+
+- 判定は**完全一致**なので部分一致で他モデルを巻き込まない（`tabbyapi-flashnext-4p05` は対象外のまま）
+- **しきい値・段・ヒステリシスは一切変えていない**（HIGH 90 / CRIT 98 / LOW 85×10s / 1665・1000 MHz）
+- `power` モード（atom2）は常時監視で対象リストを使わないため**無影響**
+
+### 検証
+
+`sh -n` / `dash -n` 通過。稼働判定は `docker` を差し替えて 5 ケース確認した:
+
+| ケース | 対象指定 | 稼働コンテナ | `running` |
+|---|---|---|---|
+| A | 既定 | `tabbyapi-ornith122b` + 他 | **1**（追加が効いた） |
+| B | 既定 | `tabbyapi-flashnext-4p05` + 他 | 0（対象外を維持） |
+| C | 既定 | `vllm-nemotron120b` | 1（既存動作不変） |
+| D | `THERMAL_CONTAINER=vllm-nemotron120b` | `tabbyapi-ornith122b` | 0（単一指定がリストを置き換える） |
+| E | 既定（**実 docker**） | `tabbyapi-ornith122b` のみ | **1** |
+
+反映には root unit の再起動が必要（`sudo systemctl restart thermal-guard`）。反映後の確認は
+`cat /run/thermal/state` の `model_running` が ornith 稼働時に `1`（起動ログは
+`containers=vllm-nemotron120b tabbyapi-ornith122b`）。
+
+### 教訓
+
+1. **「ExLlama 系は圏外」は GPU 温度だけを見た判定だった**。ガードは `max(acpitz, GPU温度)` を
+   見るので、**対象の合否は acpitz 側の実測で判断する**
+2. **対象は既定値のリストなので unit の `Environment=` を足さなくても効く**。既存機（atom2 は
+   `power` モードで常時監視）に影響なし
+
 ## atom2 サーマルガード: 温度連動の GPU 電力上限制御 (2026-10-17)
 
 GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したもの。**同一の
@@ -1873,7 +1929,7 @@ GB10 サーマルガード(前節)を WhitebearATOM2 (R9700) へ移植したも�
 | モード | `clock` | `power` |
 | 書き込み先 | `nvidia-smi -lgc / -rgc` (GPU クロック) | sysfs `power1_cap` (GPU 電力上限) |
 | 監視温度 | `max(acpitz, GPU温度)` | **GPU 温度 (junction) のみ** |
-| 対象 LLM | `THERMAL_CONTAINER` の稼働中だけ | **常時** (ロード中のモデルを問わない) |
+| 対象 LLM | `THERMAL_CONTAINERS`（既定 `vllm-nemotron120b` + `tabbyapi-ornith122b`）の稼働中だけ | **常時** (ロード中のモデルを問わない) |
 | 段 | 1000 / 1665 MHz / 解除 | **210 / 250 / 300 W** |
 
 ### 自動判定
