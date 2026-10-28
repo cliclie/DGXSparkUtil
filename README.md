@@ -547,6 +547,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - LAN 外に公開する場合のみ Basic 認証/リバースプロキシを追加
 - vLLM のモデル API ポート(8000〜8007)とは別に、監視UIは独立ポート(例: 8080)を使用
 - 調査フェーズでは、本 README 以外のファイル変更・docker の起動停止・切替スクリプトの実行は行っていない
+- **長文推論中の `/health` 未応答は落下ではない**: ExLlamaV3 / TabbyAPI は推論中に uvicorn
+  ワーカーが塞がる。`/api/vllm/status` は TCP 接続だけで `busy`(混雑中) を返し、フロントは
+  「稼働中（推論中）」を表示する。status はエンジン種別・モデル名・ログ末尾をキャッシュして
+  混雑時も 1.6 秒で返す(2026-10-28 節)
 
 ## 実行
 
@@ -681,7 +685,7 @@ cd /home/cliclie/DGXSparkUtil/api
   モーダルを持たず、vLLM 行下の常設一覧 + 「切り替え実行」と、ヘッダ行のモデル選択プルダウン +
   切替ボタン(ロード済モデル選択時は「停止」)で操作する(実装メモ 2026-10-11 / 2026-10-26)
 - 一段目は半円ゲージ 10 種 + vLLM 情報のテキストカード 1 枚(計 11 枚、10枚/行で折り返し)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限 5 GB/s)。ゲージは 2026-10-26 に縦横・文字を 80% 縮小(canvas 150×76/56 → 118×60/44、カード 176px → 140px、中央値 16px → 13px、タイトル 12px → 10px。最小の 11px 文字は据え置き)
-- ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz。調整は `index.html` の `GAUGE_DEFS[].max` と `NORM` のみ
+- ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz。調整は `index.html` の `GAUGE_DEFS[].max` と `NORM` のみ。ただし GPU クロックゲージは**サーマルガード発動中に限り目盛りをロック段(1665 MHz)へ寄せる**(`thermalClockLockMhz()`、2026-10-28 節)。二段目の時系列グラフは HW 上限基準のまま
 - 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=5 GB/s で割って倍率 100)。横軸は「直近30分(既定) / 直近3時間 / すべて」で切替可能。見出しは「時系列 (全項目・2秒間隔)」1 行に集約し(左端に見出し・右端に範囲ボタン。副題「CPU / メモリ / GPU / ストレージ (全項目 100% 換算)」は廃止)、グラフ高さは 288px → 232px(80%、2026-10-26)
 - 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
 - `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
@@ -2624,7 +2628,17 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
-- **atom1 (WhitebearATOM1)**: 2026-10-27 に `4700cc8` まで同期済み（本機。`git pull --ff-only origin main`
+- **atom1 (WhitebearATOM1)**: 2026-10-28 に `2df7683` まで反映・push 済み（**本機が実装元**）。
+  取り込み内容は 5 コミット — ornith122b の Cline 設定値対応（`a92c5d5`）、サーマルガード対象の
+  コンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中のポーリング緩和と
+  GPU クロック実値表示（`8d7ad6c`）、同期状況の記録（`2df7683`）。`sudo systemctl restart
+  dgx-spark-api` を **12:00:21 に実施済み**（実測: prefill 中 `/api/vllm/status` 1.58〜1.61 秒で
+  `busy=true`・モデル名と metrics を維持、アイドル 0.31 秒、`server.log` 直近 200 行にエラーなし）。
+  フロントは静的配信なのでブラウザリロードで反映。**atom2 は `1323f68` で 5 コミット未同期** —
+  `git merge --ff-only origin/main` で取り込み可。`api/thermal_guard.sh` の対象リストは clock モード
+  専用（power モードのループは `CONTAINERS` を読まない）なので atom2 のガード動作に変更要、
+  `api/vllm.py` 側は **API 再起動が必要**。
+  2026-10-27 に `4700cc8` まで同期済み（本機。`git pull --ff-only origin main`
   で `861d946` → `4700cc8` の 8 コミットを fast-forward、作業ツリーはクリーン・コンフリクトなし）。
   取り込み内容は strata（Strata / atom2）の Cline 設定値対応（API key 表示と `/health` 動的取得、`ef845fa`）、
   strata の prefill/decode スループット対応（`/metrics` JSON・Bearer 必須からマッピング、`24c36bd`）、
