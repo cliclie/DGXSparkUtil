@@ -615,6 +615,15 @@ let PLAT = {
 // GPU サーマルガード (root unit の thermal-guard.service) の状態。/api/thermal で取得。
 // 未取得・unit 停止時は {enabled:false} = インジケータなし・枠線は灰色のまま。
 let THERMAL = { enabled: false };
+
+// サーマルガードがロック中の段 (MHz)。未発動・power モード (atom2 は電力上限側) は null。
+// GPU クロック ゲージの目盛りをロック値に寄せるために使う (2026-10-28 運用者要望:
+// 上限が HW の 3003MHz 固定で、1651MHz に落とされても目盛りが変らず判断しづらい)。
+function thermalClockLockMhz() {
+  const t = THERMAL || {};
+  if (!t.enabled || t.mode === "power") return null;
+  return t.locked_mhz > 0 ? t.locked_mhz : null;
+}
 const RANGE_SECS = { "30m": 1800, "3h": 10800, all: Infinity };
 
 Chart.defaults.color = "#8b949e";
@@ -879,7 +888,15 @@ function gaugeDefs() {
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
-      sub: (m) => `最大 ${m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003)} MHz` },
+      // 実値を常に表示する。上限は HW の clocks.max.sm だが、サーマルガード発動中は
+      // ロック段を目盛りにする (tuneGauge 参照) ので「実 1651 / ロック 1665 MHz」が読める
+      sub: (m) => {
+        const real = m.gpu_clock_mhz != null ? m.gpu_clock_mhz.toFixed(0) : "-";
+        const lock = thermalClockLockMhz();
+        if (lock) return `実 ${real} / ロック ${lock.toFixed(0)} MHz`;
+        const mx = m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003);
+        return `実 ${real} / 最大 ${mx} MHz`;
+      } },
     { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
       // サブ行は必ず 1 行に収める (カード幅 118px で 2 行折り返しになると行高さが 14px 増えるため、
       // 単位は総量に合わせて末尾に 1 回だけ付ける)
@@ -938,7 +955,13 @@ function tuneGauge(g, m) {
   const d = g.def;
   let max = null;
   if (d.id === "g-gpu-power" && m.gpu_power_cap_w) max = m.gpu_power_cap_w;
-  if (d.id === "g-gpu-clock" && m.gpu_clock_max_mhz) max = m.gpu_clock_max_mhz;
+  if (d.id === "g-gpu-clock") {
+    // 上限は HW の clocks.max.sm (GB10 3003MHz / R9700 2350MHz)。サーマルガード発動中は
+    // ロック段が実効上限なので目盛りをそこに寄せる (解除時は clocks.max.sm へ戻る)
+    const lock = thermalClockLockMhz();
+    if (lock) max = lock;
+    else if (m.gpu_clock_max_mhz) max = m.gpu_clock_max_mhz;
+  }
   if (d.id === "g-gpu-temp" && m.gpu_temp_crit_c) max = m.gpu_temp_crit_c;
   if (d.id === "g-net" && m.net_max_mbps) max = m.net_max_mbps;
   if (max !== null && max !== d.max) {
@@ -1170,7 +1193,10 @@ function renderVllm(st) {
     // 稼働中 → 停止中…(赤) → 完了後は active が null になり「停止中」(灰)
     setV("v-status", "停止中…", "hot");
   } else {
-    setV("v-status", a.health ? "稼働中" : "API応答なし", a.health ? "up" : "warn");
+    // 長文推論中は /health が応答しなくても listener は生きている (busy)。
+    // 「API応答なし」は本当に応答が無いときだけ示す (2026-10-28 運用者要望)
+    setV("v-status", a.health ? "稼働中" : (a.busy ? "稼働中（推論中）" : "API応答なし"),
+      a.health ? "up" : (a.busy ? "hot" : "warn"));
   }
   setV("v-uptime", a.uptime_str || "-");
   // モデル切替(稼働 profile 変化)で保持値・白/灰状態をリセット(エンジン別で値が非連続)
@@ -1207,50 +1233,57 @@ function renderVllm(st) {
 }
 
 // ------------------------------------------------------------- ポーリング
-async function fetchJson(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(url + " -> " + r.status);
-  return r.json();
+async function fetchJson(url, timeoutMs = 6000) {
+  // fetch に期限を付ける。長文推論中は /api/vllm/status が数秒かかるため、期限がないと
+  // 直列のポーリングが詰めて全カードが止まる (2026-10-28 実測: status 20.5 秒)
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ac.signal });
+    if (!r.ok) throw new Error(url + " -> " + r.status);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function poll() {
-  try {
-    const m = await fetchJson(API + "/api/metrics");
-    lastMetrics = m;
-    pushPoint(m.timestamp, m);
-    renderGauges(m);
+  // 4 エンドポイントを並列に引き、それぞれに期限を付ける。長文推論中は
+  // /api/vllm/status が数秒かかるので、直列 + 期限なしだとゲージもサーマル表示も
+  // 一緒に止まっていた (2026-10-28)。失敗したカードは前回の値を残す。
+  const [pm, pst, rst, tth] = await Promise.allSettled([
+    fetchJson(API + "/api/metrics", 5000),
+    fetchJson(API + "/api/vllm/status", 9000),
+    PLAT.rag_enabled === false ? Promise.resolve(null) : fetchJson(API + "/api/rag/status", 5000),
+    fetchJson(API + "/api/thermal", 3000),
+  ]);
+  if (pm.status === "fulfilled") {
+    lastMetrics = pm.value;
+    pushPoint(pm.value.timestamp, pm.value);
+    renderGauges(pm.value);
     refreshMainChart();
-    renderPstate(m);
-  } catch (e) {
-    console.error("metrics poll failed", e);
+    renderPstate(pm.value);
+  } else {
+    console.error("metrics poll failed", pm.reason);
   }
-  try {
-    const st = await fetchJson(API + "/api/vllm/status");
-    renderVllm(st);
-    currentStatus = st;
+  if (pst.status === "fulfilled") {
+    renderVllm(pst.value);
+    currentStatus = pst.value;
     // モデル一覧はパネル常設のため毎ポーリングで状態更新する (モーダルが開いていれば同じ描画が反映される)
     renderModelList();
-  } catch (e) {
-    console.error("vllm poll failed", e);
+  } else {
+    console.error("vllm poll failed", pst.reason);
   }
   // RAG 環境が無いプラットフォーム (WSL) は docker を叩かないので poll も省略する
-  if (PLAT.rag_enabled !== false) {
-    try {
-      const rst = await fetchJson(API + "/api/rag/status");
-      ragStatus = rst;
-      renderRag(rst);
-      // ヘッダのプルダウンは RAG を含むので、RAG の稼働状態もここで反映する
-      renderHdrModel();
-    } catch (e) {
-      console.error("rag poll failed", e);
-    }
+  if (rst.status === "fulfilled" && rst.value) {
+    ragStatus = rst.value;
+    renderRag(rst.value);
+    // ヘッダのプルダウンは RAG を含むので、RAG の稼働状態もここで反映する
+    renderHdrModel();
+  } else if (rst.status === "rejected") {
+    console.error("rag poll failed", rst.reason);
   }
-  try {
-    THERMAL = await fetchJson(API + "/api/thermal");
-  } catch (e) {
-    THERMAL = { enabled: false };
-    console.error("thermal poll failed", e);
-  }
+  THERMAL = tth.status === "fulfilled" ? tth.value : { enabled: false };
   renderThermal();
   pollJob();
 }

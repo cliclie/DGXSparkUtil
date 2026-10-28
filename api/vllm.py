@@ -222,6 +222,115 @@ def _http_ok(url: str, timeout: float = 5) -> bool:
         return False
 
 
+def _tcp_open(port: int, timeout: float = 0.4) -> bool:
+    """TCP 接続だけを試みる (HTTP は叩かない)。
+
+    ExLlamaV3 / TabbyAPI は長い prefill 中に HTTP ワーカーが塞がるため、/health が
+    数秒で返らない = 落ちた、ではない。listener が受け付けるなら「プロセスは生きていて
+    混雑中」と区別できる (2026-10-28: 259K prefill 中に /health が 3 秒で応答せず
+    フロントが「API応答なし」になった)。
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------- status 用キャッシュ
+# /api/vllm/status は 2 秒間隔でポーリングされる。長文推論中はモデルの HTTP が塞がれて
+# 各 curl が max-time まで待ち、直列で 20.5 秒かかった (2026-10-28 実測)。
+# 変わらないもの (エンジン種別・モデル名・ログ末尾) をキャッシュし、取得失敗時は前値を
+# 返して表示を維持する。
+_ENGINE_TTL = 120.0      # 判定成功時のキャッシュ有効期間
+_ENGINE_FAIL_TTL = 10.0  # 混雑で判定できなかったときの再試行間隔
+_MODEL_NAME_TTL = 30.0
+_MODEL_NAME_FAIL_TTL = 10.0  # /v1/models が混雑で返らないときの再試行間隔
+_LOGS_TTL = 5.0
+_engine_cache: dict = {"base": None, "kind": None, "last": None, "ts": 0.0, "ttl": _ENGINE_TTL}
+_model_name_cache: dict = {"base": None, "name": None, "ts": 0.0}
+_logs_cache: dict = {"key": None, "lines": [], "ts": 0.0}
+
+
+def _engine_kind(base: str) -> tuple[str, str]:
+    """(エンジン種別, /metrics 本文) を返す。
+
+    種別判定は /metrics 以外に /.well-known/serviceinfo (TabbyAPI) と /v1/models
+    (llama.cpp) を叩くので、推論中は 1 回で 8 秒以上失格する。判定結果はコンテナの
+    寿命中で変わらないため、成功時だけ 120 秒キャッシュする。
+
+    **判定失敗 (混雑) を 120 秒キャッシュしない**。種別が既知なら /metrics が空でも
+    追加プロブ (計 6 秒) を払わず前回種別を返し、10 秒だけ短キャッシュする
+    (stale-while-revalidate)。未知のときは "unknown" を返し、get_status 側で
+    プロブを払わず metrics={} にする。
+    """
+    now = time.time()
+    c = _engine_cache
+    if c["base"] == base and now - c["ts"] < c["ttl"]:
+        # tabby / unknown は /metrics 本文を使わない (ログ解析で取る) ので取りに行かない。
+        # 混雑時に毎回 2 秒払わないため (2026-10-28)
+        text = "" if c["kind"] in ("tabby", "unknown") else _http_get(f"{base}/metrics", timeout=2)
+        return c["kind"], text
+    text = _http_get(f"{base}/metrics", timeout=2)
+    pm = _parse_vllm_metrics(text) if text else {}
+    kind = None
+    if any(k.startswith("vllm:") for k in pm):
+        kind = "vllm"
+    elif any(k.startswith("sglang:") for k in pm):
+        kind = "sglang"
+    elif any(k.startswith("llamacpp:") for k in pm):
+        kind = "llamacpp"
+    elif c["last"]:
+        # 混雑で /metrics が空 (TabbyAPI は平常時も 404 で空)。種別が既知なら
+        # serviceinfo / /v1/models を叩かずに前回種別を返す (10 秒後に再試行)
+        c.update({"base": base, "kind": c["last"], "ts": time.time(), "ttl": _ENGINE_FAIL_TTL})
+        return c["last"], text
+    elif _is_tabbyapi(base):
+        kind = "tabby"
+    elif _is_llamacpp(base):
+        kind = "llamacpp"
+    if kind:
+        # ts は「書き込み時刻」にする。判定自体に 8 秒かかるので、開始時刻を
+        # 入れると TTL が実質 2 秒になり毎コール再判定になった (2026-10-28 プロファイル)
+        c.update({"base": base, "kind": kind, "last": kind, "ts": time.time(), "ttl": _ENGINE_TTL})
+        return kind, text
+    c.update({"base": base, "kind": "unknown", "last": c["last"], "ts": time.time(), "ttl": _ENGINE_FAIL_TTL})
+    return "unknown", text
+
+
+def _model_name(base: str, headers: list[str] | None = None) -> str | None:
+    """/v1/models からサーブ中モデル名を取る。
+
+    成功時は 30 秒、失敗 (混雑) 時は 10 秒キャッシュする。失敗時にキャッシュしないと
+    毎ポーリング 1.5 秒払い続けることになる。返すのは常に「最後に取れた値」。
+    """
+    c = _model_name_cache
+    now = time.time()
+    ttl = _MODEL_NAME_TTL if c["name"] else _MODEL_NAME_FAIL_TTL
+    if c["base"] == base and now - c["ts"] < ttl:
+        return c["name"]
+    txt = _http_get(f"{base}/v1/models", timeout=1.5, headers=headers)
+    name = None
+    if txt:
+        mm = re.search(r'"id"\s*:\s*"([^"]+)"', txt)
+        if mm:
+            name = mm.group(1)
+    c.update({"base": base, "name": name or c["name"], "ts": time.time()})
+    return c["name"]
+
+
+def _logs_tail(container: str, n: int = 30) -> list[str]:
+    """docker logs の末尾 n 行を 5 秒キャッシュで返す (2 秒ポーリングの重複を省く)。"""
+    now = time.time()
+    key = f"{container}:{n}"
+    if _logs_cache["key"] == key and now - _logs_cache["ts"] < _LOGS_TTL:
+        return _logs_cache["lines"]
+    out = _run(["docker", "logs", "--tail", str(n), container], timeout=10)
+    lines = out.splitlines()[-n:]
+    _logs_cache.update({"key": key, "lines": lines, "ts": now})
+    return lines
+
+
 def _fmt_elapsed(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
@@ -785,6 +894,29 @@ def _tabbyapi_parse_logs(
     return events
 
 
+_TABBY_MODEL_CFG_TTL = 120.0
+_tabby_model_cfg_cache: dict = {"base": None, "txt": "", "ts": 0.0}
+
+
+def _tabby_model_txt(base: str, headers: list[str] | None = None) -> str:
+    """/v1/model の本文を 120 秒キャッシュで返す。
+
+    使われるのは cache_size / max_batch_size の静的な値だけで、推論中は 3 秒ブロックする
+    (2026-10-28: /api/vllm/status が 20.5 秒かかった内 3 秒がここ)。失敗時は前値を返す。
+    """
+    now = time.time()
+    c = _tabby_model_cfg_cache
+    if c["base"] == base and now - c["ts"] < _TABBY_MODEL_CFG_TTL:
+        return c["txt"]
+    txt = _http_get(f"{base}/v1/model", timeout=1.5, headers=headers)
+    if txt:
+        c.update({"base": base, "txt": txt, "ts": now})
+        return txt
+    if c["base"] == base:
+        return c["txt"]  # 混雑で応答しなくても前値 (静的値なので表示は変わらない)
+    return ""
+
+
 def _tabbyapi_metrics(
     base: str,
     container: str,
@@ -825,9 +957,9 @@ def _tabbyapi_metrics(
     for rid in [r for r, ts in _tabby_in_flight.items() if now - ts > _TABBY_INFLIGHT_MAX_AGE_S]:
         _tabby_in_flight.pop(rid, None)
 
-    # cache_size / max_batch_size は /v1/model から
+    # cache_size / max_batch_size は /v1/model から (120 秒キャッシュ・静的値)
     cache_size = max_batch_size = None
-    model_txt = _http_get(f"{base}/v1/model", timeout=3, headers=headers)
+    model_txt = _tabby_model_txt(base, headers)
     if model_txt:
         cm = re.search(r'"cache_size"\s*:\s*(\d+)', model_txt)
         bm = re.search(r'"max_batch_size"\s*:\s*(\d+)', model_txt)
@@ -1103,15 +1235,15 @@ def _get_status_modelctl() -> dict:
     }
     if base:
         hdrs = _modelctl_headers(running_profile)
-        # TabbyAPI は /health が無く /v1/models が応答 (model-ctl.sh の待機判定と同じ)
-        active["health"] = _http_ok(f"{base}/health", timeout=3) or bool(
-            _http_get(f"{base}/v1/models", timeout=3, headers=hdrs)
+        # TabbyAPI は /health が無く /v1/models が応答 (model-ctl.sh の待機判定と同じ)。
+        # 長文推論中は両方が塞がるので TCP 接続だけで「混雑中 (busy)」を区別する
+        active["health"] = _http_ok(f"{base}/health", timeout=1.2) or bool(
+            _model_name(base, hdrs)
         )
-        models = _http_get(f"{base}/v1/models", timeout=3, headers=hdrs)
-        if models:
-            mm = re.search(r'"id"\s*:\s*"([^"]+)"', models)
-            if mm:
-                active["model_name"] = mm.group(1)
+        active["api_listening"] = True if active["health"] else _tcp_open(port)
+        active["busy"] = bool(active["api_listening"] and not active["health"])
+        # モデル名は 30 秒キャッシュ (混雑時は前値を維持して表示を止めない)
+        active["model_name"] = _model_name(base, hdrs)
         try:
             active["metrics"] = _modelctl_metrics(running_profile, info, base)
         except Exception:
@@ -1244,18 +1376,18 @@ def get_status() -> dict:
         return out
 
     # API 健全性 (vLLM の /health は本文空・HTTP 200 が正常)
-    active["health"] = _http_ok(f"{base}/health", timeout=3)
+    # 長文推論中は ExLlamaV3 の HTTP ワーカーが塞がり /health が 3 秒で返らない。
+    # TCP 接続だけを見て「プロセスは生きている＝混雑中 (busy)」を区別する。
+    active["health"] = _http_ok(f"{base}/health", timeout=1.2)
+    active["api_listening"] = True if active["health"] else _tcp_open(port)
+    active["busy"] = bool(active["api_listening"] and not active["health"])
 
-    # サーブ中モデル名（Strata は /v1/* に Bearer key 必須）
+    # サーブ中モデル名（Strata は /v1/* に Bearer key 必須）。30 秒キャッシュで
+    # 混雑時は前値を維持する
     models_headers = None
     if running_profile == "strata" and config.STRATA_API_KEY:
         models_headers = ["-H", f"Authorization: Bearer {config.STRATA_API_KEY}"]
-    models = _http_get(f"{base}/v1/models", timeout=3, headers=models_headers)
-    active["model_name"] = None
-    if models:
-        mm = re.search(r'"id"\s*:\s*"([^"]+)"', models)
-        if mm:
-            active["model_name"] = mm.group(1)
+    active["model_name"] = _model_name(base, models_headers)
 
     # Strata: /metrics は JSON（Bearer 必須・Prometheus 形式ではない）→
     # live + requests からマッピングする（_strata_server_metrics 参照）
@@ -1263,17 +1395,17 @@ def get_status() -> dict:
         _reset_token_state()
         _reset_tabby_state()
         active["metrics"] = _strata_server_metrics(port)
-        logs = _run(["docker", "logs", "--tail", "30", info["container"]], timeout=10)
-        active["logs"] = logs.splitlines()[-30:]
+        active["logs"] = _logs_tail(info["container"])
         out["active"] = active
         return out
 
     # 組み込みメトリクス (/metrics): vLLM は常時公開、SGLang は --enable-metrics 指定時のみ
     # vLLM 26.x の系列名: e2e 相当は request_inference_time_seconds、
-    # KV キャッシュは kv_cache_usage_perc
-    mt = _http_get(f"{base}/metrics", timeout=5)
+    # KV キャッシュは kv_cache_usage_perc。エンジン種別は 120 秒キャッシュなので
+    # 混雑時に種別判定のプロブ (serviceinfo / /slots / /v1/models) を払わない
+    kind, mt = _engine_kind(base)
     pm = _parse_vllm_metrics(mt) if mt else {}
-    if any(k.startswith("vllm:") for k in pm):
+    if kind == "vllm":
         _reset_tabby_state()
         def g(name: str) -> float | None:
             return pm.get(name)
@@ -1312,24 +1444,26 @@ def get_status() -> dict:
             _prev_metrics["ts"] = now
             _prev_metrics["prompt"] = pm.get("vllm:prompt_tokens_total", _prev_metrics["prompt"])
             _prev_metrics["generation"] = pm.get("vllm:generation_tokens_total", _prev_metrics["generation"])
-    elif any(k.startswith("sglang:") for k in pm):
+    elif kind == "sglang":
         # SGLang (--enable-metrics 有効)。系列名マッピングは _sglang_metrics 参照
         _reset_tabby_state()
         active["metrics"] = _sglang_metrics(pm)
-    elif any(k.startswith("llamacpp:") for k in pm):
-        # llama.cpp (--metrics 有効)。系列名マッピングは _llamacpp_metrics 参照
+    elif kind == "llamacpp":
+        # llama.cpp。--metrics 有効なら pm、無効なら pm={} で /slots のみから取得
         _reset_token_state()
         _reset_tabby_state()
         active["metrics"] = _llamacpp_metrics(pm, base)
-    elif _is_llamacpp(base):
-        # llama.cpp (--metrics 未有効): /slots のみで基本状態を取得
-        _reset_token_state()
-        _reset_tabby_state()
-        active["metrics"] = _llamacpp_metrics({}, base)
-    elif _is_tabbyapi(base):
-        # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析
+    elif kind == "tabby":
+        # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析。
+        # ログ解析なのでモデルの HTTP が塞がっているときも値が取れる (混雑時に強い)
         _reset_token_state()
         active["metrics"] = _tabbyapi_metrics(base, info["container"])
+    elif kind == "unknown":
+        # 混雑でエンジン種別が判定不能 (プロブを払っても返らない)。これ以上叩かず
+        # 表示を止める (種別が既知のときは stale で前の種別が使われる)
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = {}
     else:
         # /metrics が無い(SGLang の --enable-metrics 未導入時) →
         # SGLang の /get_load で実行中・待機リクエスト数を取得。これもない場合は None
@@ -1337,9 +1471,13 @@ def get_status() -> dict:
         _reset_tabby_state()
         active["metrics"] = _sglang_get_load(base)
 
-    # 直近ログ
-    logs = _run(["docker", "logs", "--tail", "30", info["container"]], timeout=10)
-    active["logs"] = logs.splitlines()[-30:]
+    # /get_load 等のフォールバックは None を返す (llama.cpp など)。front は null でも
+    # 落ちないが、キー参照を揃えるため dict に正規化する
+    if not isinstance(active.get("metrics"), dict):
+        active["metrics"] = {}
+
+    # 直近ログ (5 秒キャッシュ)
+    active["logs"] = _logs_tail(info["container"])
 
     out["active"] = active
     return out
