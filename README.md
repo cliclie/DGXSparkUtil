@@ -405,7 +405,9 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
     `__API_DIR__` / `__USER__` / `__PORT__` / `__KILL_MODE__` / `__LIMIT_NOFILE__` の
     プレースホルダを置換してレンダリングする
   - `install_service.env` — **git 管理外のホスト固有設定**(`PORT` / `KILL_MODE` /
-    `LIMIT_NOFILE` / `DGXUTIL_THERMAL`)。WSL2 以外には置かない (無い = 従来動作)
+    `LIMIT_NOFILE` / `DGXUTIL_THERMAL`)。WSL2 以外には置かない (無い = 従来動作)。
+    `DGXUTIL_THERMAL` は WSL2 でのみ意味があり、`0` / 未指定 = サーマルガードを載せない (既定)、
+    `1` = **監視専ら** (発動対象 `THERMAL_CONTAINERS=` を空にした unit を render) で載せる
 
 ### vLLM関連機能の設計
 
@@ -587,7 +589,7 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   PORT=8090            # Strata 系が 8080 を使うため API は 8090
   KILL_MODE=process    # API 再起動で稼働中モデルサーバーを巻き込まない (下記)
   LIMIT_NOFILE=1048576 # WSL2 の CUDA に必要 (下記)
-  DGXUTIL_THERMAL=0    # 省略可 (WSL は /proc/version 判定で自動 0)
+  DGXUTIL_THERMAL=0    # WSL のみ有効。0/未指定 = 載せない (既定)、1 = 監視専らで載せる
   ```
   → 以後は素の `sudo bash .../install_service.sh` で 8090 が入る。
   ファイルが存在しない環境 (atom1 / atom2) は `PORT=8080` / `KILL_MODE=control-group`
@@ -605,17 +607,22 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   ログインセッション (`ulimit -n` = 1048576) では同じ手順で成功するため、
   **切り分けは「同一セッションで `ulimit -n 1024` を下げて再現」**で行った
   (cgroup / 環境変数 / setsid は無関係であることを実測で否定)
-- **WSL2 では `thermal-guard.service` を自動でインストールしない**
-  (`/proc/version` に microsoft が含まれるか `DGXUTIL_THERMAL=0` でスキップ。
-  WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため)。
-  dgx-spark / atom2 は従来どおり thermal-guard も有効化する
+- **WSL2 の `thermal-guard.service` はオプトイン**（既定はインストールしない）。
+  WSL の GPU はホスト側ドライバ管理で `nvidia-smi -lgc` / `power1_cap` が効かないため、
+  `/proc/version` が microsoft を含むときは `DGXUTIL_THERMAL=1` を明示したときだけ導入する。
+  その際 unit に `Environment=THERMAL_CONTAINERS=`（空）と `Environment=THERMAL_MODE=clock` を
+  注入して **発動させない**（`nvidia-smi --query` / sysfs / `docker ps` の読み取りと
+  `/run/thermal/state` の更新のみ）。手順は「WSL2 でサーマルガードを監視専らで導入する」
+  （2026-10-30 節）参照。dgx-spark / atom2 は従来どおり（未指定で有効、`=0` で無効）
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
 - ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード。JST 0 時に 0 バイトへ
   truncate → 下記「server.log の日次 truncate」）
 - **`install_service.sh` は `thermal-guard.service`（root 特権）も同時にインストールする**。
   `api/thermal_guard.sh` に `chmod 755` して unit をレンダリングし、`enable` + 毎回 `restart`
-  （`enable --now` は稼働中 unit を再起動しないため、Environment のしきい値変更が反映されない）
+  （`enable --now` は稼働中 unit を再起動しないため、Environment のしきい値変更が反映されない）。
+  WSL2 で `DGXUTIL_THERMAL=1` を指定したときは、このレンダリング時に `Environment=THERMAL_CONTAINERS=`
+  （空）を挿入して監視専らにする（`sed` の `^ExecStart=` 置換。`ExecStartPre=` にはマッチしない）
   - `dgx-spark-api.service` は `User=cliclie` のままで、GPU 制限を書けるのは
     thermal-guard の root unit だけ
   - AMD 機（R9700）では、旧 `llm-gpu-powercap.service`（210W 常時固定の oneshot）を
@@ -3396,3 +3403,81 @@ ExLlamaV3 は推論中に uvicorn ワーカーが塞がるので、**プロセ�
   サブ行が **「最大 1665 MHz」**（1665 = `gpu_clock_mhz` の実測値。発動は非表示の通常フォーマット）。
   他ゲージ（NW 上限 10 Gbps など）に変化なし
 - フロントは静的配信のためブラウザリロードで反映（`dgx-spark-api` 起動中 8080、再起動不要）
+---
+
+## WSL2 でサーマルガードを監視専らで導入する（2026-10-30）
+
+**目的**: Whitebear2026-WSL2（RTX 5090 / 水冷）は温度が安定しており制限発動が不要なので、
+従来 `thermal-guard` を載せていなかった（`/api/thermal` は `{"enabled":false}`）。atom1 / atom2 と
+状態を揃え、**監視だけ**（温度・クロックの実測を `/run/thermal/state` → `/api/thermal` に流す）
+載せられるようにする。
+
+**変更**（`api/install_service.sh` のみ。atom1 / atom2 は挙動不変）:
+
+- 従来は `/proc/version` が microsoft を含むと `TG_ENABLED=0` に**無条件で**落としていた
+  （`DGXUTIL_THERMAL=1` を書いても上書きできず、WSL では導入手段がなかった）
+- → WSL2 はオプトイン化: `DGXUTIL_THERMAL=1` のときだけ `TG_ENABLED=1` とし、同時に
+  `TG_MONITOR_ONLY=1` を立てる（未指定 / `=0` は従来どおりスキップ）
+- unit レンダリング時に `TG_SED` 配列へ `-e "s|^ExecStart=.*|&\nEnvironment=THERMAL_CONTAINERS=\nEnvironment=THERMAL_MODE=clock|"`
+  を追加し、`[Service]` 内（`ExecStart` の直後）に 2 つの `Environment=` を挿入する。
+  `^ExecStart=` は `ExecStartPre=` にマッチしないので先頭の待ち受け行はそのまま
+- 冒頭コメントと `==>` 進捗表示にも監視専らの意味を明記（`thermal-guard=1 (monitor-only: THERMAL_CONTAINERS=)`）
+
+**なぜこれで発動しないか**（`api/thermal_guard.sh` の clock ループ）:
+
+- 発動条件は `running=1`（`docker ps --format '{{.Names}}'` の出力に `THERMAL_CONTAINERS` の
+  名前が完全一致で並ぶ）**かつ** `max(acpitz, GPU温度) >= HIGH(90)℃`
+- `THERMAL_CONTAINERS` が空なら `for c in $CONTAINERS` が回らず `running=0` 固定 →
+  `want=0` となり `nvidia-smi -lgc` は一度も叩かれない（読み取りと状態ファイル更新のみ）
+- 本機実測: acpitz zone は存在せず（`/sys/class/thermal/thermal_zone*` が空 = `a=0`）、
+  `nvidia-smi --query-gpu=temperature.gpu` = **34℃**、`docker ps` は 0 件（modelctl 運用で
+  対象コンテナ名自体が存在しない）
+- フロントは `thermalState()` が `if (!t.locked_mhz) return null`、`thermalClockLockMhz()` も
+  `locked_mhz > 0` のみ有効なので、`enabled:true` でも `locked_mhz=0` の間はヘッダのサーマル
+  表示もカード枠線も従来どおり灰色（GPU クロックゲージの目盛りは HW 上限 3090 MHz のまま）
+
+**副作用**: clock モードは起動時（`thermal_guard.sh` 174 行）と終了時（`on_exit`、161 行）に
+`nvidia-smi -rgc`（クロック制限の**解除**）を 1 回ずつ叩く。WSL/GeForce では unsupported で
+失敗する想定（stderr は破棄）だが、Windows 側で手動クロック制限を掛けている場合は解除されうる。
+**導入手順**（WSL2 の各機で。`sudo` が必要）:
+
+```bash
+# 1) git 管理外のホスト固有設定を監視専らに切り替える
+sed -i 's/^DGXUTIL_THERMAL=.*/DGXUTIL_THERMAL=1/' /home/cliclie/DGXSparkUtil/api/install_service.env
+grep -n DGXUTIL_THERMAL /home/cliclie/DGXSparkUtil/api/install_service.env
+
+# 2) unit を再 render + 起動。dgx-spark-api も再起動されるが、WSL は KILL_MODE=process なので
+#    modelctl で起動した稼働中モデルサーバーは巻き込まれない
+sudo bash /home/cliclie/DGXSparkUtil/api/install_service.sh
+
+# 3) 確認 (sudo 不要)
+systemctl --no-pager status thermal-guard | head -12
+cat /run/thermal/state
+curl -s localhost:8090/api/thermal
+journalctl -u thermal-guard --no-pager | tail -5
+```
+
+期待する状態: `ActiveState=active`、`/run/thermal/state` が
+`{"ts":...,"enabled":true,"temp_c":34,"acpitz_c":0,"gpu_c":34,"clock_mhz":...,"locked_mhz":0,"model_running":false,...}`、
+`/api/thermal` が `{"enabled":false}` → `enabled:true` に変わる、
+`journalctl` の先頭が `thermal-guard start: mode=clock ... containers=`（末尾が空 = 発動対象なし）。
+
+**検証**（Whitebear2026-WSL、2026-10-30。コード変更時点の実測）:
+
+- `bash -n api/install_service.sh` 通過
+- 分岐の模擬実行（`IS_WSL` × `DGXUTIL_THERMAL` の 6 通り）:
+  `IS_WSL=0` は未指定→`enabled=1 monitor=0` / `=0`→`0/0` / `=1`→`1/0`（**atom1 / atom2 は従来どおり**）、
+  `IS_WSL=1` は未指定→`0/0` / `=0`→`0/0` / **`=1`→`1/1`**（監視専ら）
+- 生成 unit の検証: `Environment=THERMAL_CONTAINERS=` / `Environment=THERMAL_MODE=clock` が
+  `[Service]`（12 行 `ExecStart` の直後、48 行 `[Install]` より前）に入り、
+  `systemd-analyze verify` は警告 0（exit 0）。`sh -n api/thermal_guard.sh` も通過
+
+**無効化（戻す）**:
+
+```bash
+sudo systemctl disable --now thermal-guard
+sudo rm -f /etc/systemd/system/thermal-guard.service
+sudo systemctl daemon-reload
+sed -i 's/^DGXUTIL_THERMAL=.*/DGXUTIL_THERMAL=0/' /home/cliclie/DGXSparkUtil/api/install_service.env
+curl -s localhost:8090/api/thermal    # {"enabled":false} に戻る
+```

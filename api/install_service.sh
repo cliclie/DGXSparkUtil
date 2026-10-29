@@ -10,14 +10,20 @@
 #       PORT=8090
 #       KILL_MODE=process
 #       LIMIT_NOFILE=1048576
-#       DGXUTIL_THERMAL=0
+#       DGXUTIL_THERMAL=0   # WSL2: 0/未指定 = 載せない (既定)、1 = 監視専らで載せる
 #   → sudo は環境変数を引き継がない (WSL の sudo は -E 非対応) ため、ファイル側で持つ。
 #   呼び出し側で明示した値はファイルより優先される:
 #       sudo PORT=8091 bash <repo>/api/install_service.sh
 #
 # GPU サーマルガード (thermal-guard.service) は nvidia-smi -lgc / power1_cap を
 # 直接叩く root unit。WSL2 は GPU がホスト (Windows) 側ドライバ管理でこれらの
-# コマンドが効かないため自動でスキップする (atom1 / atom2 は従来どおり有効化)。
+# コマンドが効かないため、既定 (DGXUTIL_THERMAL 未指定 / =0) はスキップする
+# (atom1 / atom2 は従来どおり有効化)。
+# WSL2 で他機と状態を揃えたい運用向けに、DGXUTIL_THERMAL=1 なら「監視専ら」で導入する:
+# unit に Environment=THERMAL_CONTAINERS= (空) を注入して clock モードの発動対象
+# (docker コンテナ名) を構造的に無くすので、nvidia-smi -lgc は叩かない。読み取り
+# (nvidia-smi --query / sysfs / docker ps) と /run/thermal/state の更新だけが行われ、
+# API の /api/thermal が enabled:true を返す (= フロントのサーマル表示が他機と揃う)。
 set -euo pipefail
 
 API_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,8 +60,17 @@ if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
   IS_WSL=1
 fi
 TG_ENABLED="${DGXUTIL_THERMAL:-1}"
+# WSL2 は監視専らのオプトイン: DGXUTIL_THERMAL=1 のときだけ導入する。
+# TG_MONITOR_ONLY=1 なら unit に Environment=THERMAL_CONTAINERS= (空) を注入し、
+# クロック書き換え (nvidia-smi -lgc) が起こらないようにする
+TG_MONITOR_ONLY=0
 if [ "${IS_WSL}" = "1" ]; then
-  TG_ENABLED=0
+  if [ "${DGXUTIL_THERMAL:-}" = "1" ]; then
+    TG_ENABLED=1
+    TG_MONITOR_ONLY=1
+  else
+    TG_ENABLED=0
+  fi
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -63,7 +78,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} LIMIT_NOFILE=${LIMIT_NOFILE:-既定(1024)} thermal-guard=${TG_ENABLED}"
+TG_TAG=""
+if [ "${TG_MONITOR_ONLY}" = "1" ]; then TG_TAG=" (monitor-only: THERMAL_CONTAINERS=)"; fi
+echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} LIMIT_NOFILE=${LIMIT_NOFILE:-既定(1024)} thermal-guard=${TG_ENABLED}${TG_TAG}"
 
 echo "==> Stopping any manually started instance (frees port ${PORT})"
 systemctl stop "${SERVICE}" 2>/dev/null || true
@@ -85,8 +102,13 @@ if [ "${TG_ENABLED}" = "1" ]; then
   TG_SERVICE="thermal-guard.service"
   TG_UNIT_PATH="/etc/systemd/system/${TG_SERVICE}"
   chmod 755 "${API_DIR}/thermal_guard.sh"
-  sed -e "s|__API_DIR__|${API_DIR}|g" \
-    "${API_DIR}/${TG_SERVICE}" > "${TG_UNIT_PATH}"
+  TG_SED=(-e "s|__API_DIR__|${API_DIR}|g")
+  if [ "${TG_MONITOR_ONLY}" = "1" ]; then
+    # 発動対象 (docker コンテナ名) を空にして「読み取り + 状態ファイル更新」だけさせる。
+    # Environment= は [Service] セクション内でなければならないので ExecStart の直後に挿入する
+    TG_SED+=(-e "s|^ExecStart=.*|&\nEnvironment=THERMAL_CONTAINERS=\nEnvironment=THERMAL_MODE=clock|")
+  fi
+  sed "${TG_SED[@]}" "${API_DIR}/${TG_SERVICE}" > "${TG_UNIT_PATH}"
   chmod 644 "${TG_UNIT_PATH}"
 fi
 # server.log の日次 truncate (rotate_log.sh + JST 0 時タイマー)。アーカイブは作らない。
@@ -116,7 +138,7 @@ if [ "${TG_ENABLED}" = "1" ]; then
   systemctl enable "${TG_SERVICE}" >/dev/null 2>&1
   systemctl restart "${TG_SERVICE}"
 else
-  echo "==> Skipping thermal-guard (WSL2 or DGXUTIL_THERMAL=0)"
+  echo "==> Skipping thermal-guard (DGXUTIL_THERMAL=0 / 未指定。WSL2 は =1 のとき監視専らで入る)"
 fi
 
 # server.log 日次 truncate。タイマーを有効化し、導入時に一度 truncate して溜まった
