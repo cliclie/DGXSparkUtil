@@ -97,7 +97,7 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 | GPU負荷 | `GPU 負荷` | 使用率 % | — |
 | GPU温度 | `GPU 温度` | 現在温度(例: `40°C`) | 上限(例: `上限 95°C`) |
 | GPU電力 | `GPU 電力` | 現在消費電力(例: `51.5W`) | 上限(例: `上限 600 W`) |
-| GPUクロック | `GPU クロック` | 現在クロック(例: `772 MHz`) | 最大(例: `最大 3090 MHz`) |
+| GPUクロック | `GPU クロック` | 現在クロック(例: `772 MHz`) | 最大(実測クロック。例: `最大 1665 MHz`。実装メモ 2026-10-30。サーマルガード発動中のみ `実 X / ロック Y MHz`) |
 | ストレージの使用率 | `ストレージ使用率` | 使用率 % | 使用/総量(例: `232 / 1007 GiB`) |
 | ストレージの負荷 | **`DISK(B/s)`** | 読込/書込を 2 行(1 行目 `R 120.0M` / 2 行目 `W 45.2M`。数値 13px 白、接頭語 M/G 11px グレー、ラベルは対応リング色) | 上限(DGX Spark / atom2 = `上限 5 GB/s`、WSL2 = `上限 7 GB/s`。実装メモ 2026-10-30) |
 | ネットワークの負荷 | **`NW(bps)`** | 上り/下りを 2 行(1 行目 `UP 300.5M` / 2 行目 `DL 1.2G`) | 上限=**実測リンク速度**(例: `上限 10 Gbps`、実装メモ 2026-10-06 参照) |
@@ -2656,6 +2656,19 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status` が 200・thermal-guard active を確認）。
   unit ファイルの再レンダリングは未実施（root 権限が必要。atom1 では新旧の機能差がゼロのため
   運用に無影響）。
+  **2026-10-30: 本機で GPU クロックゲージのサブ行を「最大 <実測値> MHz」に変更して push した**
+  （`front/index.html` と README のみ。従来の `実 <現在値> / 最大 <HW上限> MHz` を運用者依頼で
+  `最大 <実測クロック> MHz` に簡略化。サーマルガード発動中の `実 X / ロック Y MHz` 表示、
+  ゲージ目盛り（`tuneGauge()`）と統合時系列の 100% 基準（`CHART_NORM.gpuClock`）は変更なし。
+  フロントは静的配信なのでブラウザリロードで反映、`dgx-spark-api` は active のまま再起動不要。
+  実測: headless Chrome の構文解析で SyntaxError なし、`http://localhost:8080/` のスクリーンショットで
+  GPU クロックカードのサブ行が「最大 1665 MHz」（1665 = `gpu_clock_mhz` の実測値）を確認。
+  詳細は実装メモ 2026-10-30）
+  - push 前に `git pull --rebase origin main` で Whitebear2026-WSL2 が 2026-10-30 に push した
+    2 コミット（DISK ゲージと統合時系列の 100% 基準 7 GB/s 化 `860c938`、同期状況記録 `1ccdc64`）を
+    取り込んだ。衝突なし — 本機の変更は `gaugeDefs()` の GPU クロック節、リモート変更は DISK 節
+    （`diskMax`）と `CHART_NORM` 行で領域が非重複。実測: 統合後の `front/index.html` に
+    `最大 ${real} MHz` と `diskMax` が共存していることを確認
 - **atom2 (WhitebearATOM2)**: 2026-10-28 に `1323f68` まで同期済み（本機。HEAD の
   `1323f68` を含む。本機は strata 系 3 コミット（`ef845fa` / `24c36bd` / `04930ca`）の
   **実装元**で、2026-10-28 の Strata 0.2.7（engine 0.1.52）更新後も `/metrics` JSON・`/health` の
@@ -3338,3 +3351,27 @@ ExLlamaV3 は推論中に uvicorn ワーカーが塞がるので、**プロセ�
 
 - `/api/platform` が `platform: "wsl"` を返し、DOM 上の DISK ゲージ サブ行が **「上限 7 GB/s」**
 - `g-disk-io` は従来どおり描画され、他ゲージ（NW 上限 10 Gbps など）への影響なし
+
+---
+
+## GPU クロックゲージのサブ行を「最大 <実測値> MHz」に（2026-10-30）
+
+**背景**: 2026-10-28 に `実 <現在値> / 最大 <clocks.max.sm> MHz` としたサブ行（2026-10-28 節）を、
+運用者依頼で「最大 aaaa MHz」1 行に簡略化。**aaaa は HW 上限ではなく実測値**を入れる。
+
+**変更内容**（`front/index.html` のみ。API 再起動不要）:
+
+- `gaugeDefs()` の `g-gpu-clock` の `sub()`: 通常時の返却を
+  `` `実 ${real} / 最大 ${mx} MHz` `` → `` `最大 ${real} MHz` `` に変更（`real` = `gpu_clock_mhz` の実測値）。
+  不要になった `mx`（`gpu_clock_max_mhz`、無ければ discrete 2350 / GB10 3003 のフォールバック）を削除
+- **据え置き**: サーマルガード発動中の `実 ${real} / ロック ${lock} MHz` 表示（`thermalClockLockMhz()`）、
+  ゲージ目盛りの実測上限補正（`tuneGauge()` の `gpu_clock_max_mhz`）、統合時系列の 100% 基準
+  （`CHART_NORM.gpuClock`）はそのまま。`gpu_clock_max_mhz` はゲージ・グラフの基準として引き続き使用
+
+**検証**（本機 atom1 / DGX Spark、2026-10-30）:
+
+- headless Chrome で全 script をパース → SyntaxError なし
+- 稼働中の `http://localhost:8080/` を headless Chrome でスクリーンショット → GPU クロックカードの
+  サブ行が **「最大 1665 MHz」**（1665 = `gpu_clock_mhz` の実測値。発動は非表示の通常フォーマット）。
+  他ゲージ（NW 上限 10 Gbps など）に変化なし
+- フロントは静的配信のためブラウザリロードで反映（`dgx-spark-api` 起動中 8080、再起動不要）
