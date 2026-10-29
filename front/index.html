@@ -891,13 +891,18 @@ function gaugeDefs() {
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
-      // 実値を常に表示する。上限は HW の clocks.max.sm だが、サーマルガード発動中は
-      // ロック段を目盛りにする (tuneGauge 参照) ので「実 1651 / ロック 1665 MHz」が読める
+      // 通常時は HW 上限を表示する (nvidia-smi -q -d CLOCK の Max Clocks = clocks.max.sm)。
+      // 半円内の中央値は実測クロックのまま (get: gpu_clock_mhz)。
+      // サーマルガード発動中は目盛りをロック段に寄せる (tuneGauge 参照) ので
+      // 実値が読み取れるよう「実 1651 / ロック 1665 MHz」を出す
       sub: (m) => {
-        const real = m.gpu_clock_mhz != null ? m.gpu_clock_mhz.toFixed(0) : "-";
         const lock = thermalClockLockMhz();
-        if (lock) return `実 ${real} / ロック ${lock.toFixed(0)} MHz`;
-        return `最大 ${real} MHz`;
+        if (lock) {
+          const real = m.gpu_clock_mhz != null ? m.gpu_clock_mhz.toFixed(0) : "-";
+          return `実 ${real} / ロック ${lock.toFixed(0)} MHz`;
+        }
+        const mx = m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003);
+        return `最大 ${mx} MHz`;
       } },
     { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
       // サブ行は必ず 1 行に収める (カード幅 118px で 2 行折り返しになると行高さが 14px 増えるため、

@@ -97,7 +97,7 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 | GPU負荷 | `GPU 負荷` | 使用率 % | — |
 | GPU温度 | `GPU 温度` | 現在温度(例: `40°C`) | 上限(例: `上限 95°C`) |
 | GPU電力 | `GPU 電力` | 現在消費電力(例: `51.5W`) | 上限(例: `上限 600 W`) |
-| GPUクロック | `GPU クロック` | 現在クロック(例: `772 MHz`) | 最大(実測クロック。例: `最大 1665 MHz`。実装メモ 2026-10-30。サーマルガード発動中のみ `実 X / ロック Y MHz`) |
+| GPUクロック | `GPU クロック` | 現在クロック(例: `1245 MHz`) | 最大=**HW 上限**(`clocks.max.sm`。例: `最大 3090 MHz`。実装メモ 2026-10-30。サーマルガード発動中のみ `実 X / ロック Y MHz`) |
 | ストレージの使用率 | `ストレージ使用率` | 使用率 % | 使用/総量(例: `232 / 1007 GiB`) |
 | ストレージの負荷 | **`DISK(B/s)`** | 読込/書込を 2 行(1 行目 `R 120.0M` / 2 行目 `W 45.2M`。数値 13px 白、接頭語 M/G 11px グレー、ラベルは対応リング色) | 上限(DGX Spark / atom2 = `上限 5 GB/s`、WSL2 = `上限 7 GB/s`。実装メモ 2026-10-30) |
 | ネットワークの負荷 | **`NW(bps)`** | 上り/下りを 2 行(1 行目 `UP 300.5M` / 2 行目 `DL 1.2G`) | 上限=**実測リンク速度**(例: `上限 10 Gbps`、実装メモ 2026-10-06 参照) |
@@ -2808,6 +2808,21 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   「最大 1065 MHz」（= `gpu_clock_mhz` の実測値）と NW「上限 10 Gbps」が同一ページに共存することを確認。
   **atom2 は今回の 2 コミット分が未同期の可能性あり**（atom2 側で `git fetch --all --prune` +
   `git status -sb` を確認し `git merge --ff-only origin/main` で取り込み）
+  **2026-10-30: 同じく本機で GPU クロック ゲージのサブ行を「最大 <HW 上限> MHz」に戻した**
+  （`front/index.html` のみ・静的配信なのでブラウザリロードで反映、API 再起動不要。atom1 が同日に
+  変更した「`最大 <実測値> MHz`」を運用者依頼で `gpu_clock_max_mhz`（= `nvidia-smi -q -d CLOCK` の
+  `Max Clocks → SM`、本機 3090 MHz）へ戻す。**表示は全機共通**なので atom1 / atom2 も
+  `git pull --ff-only origin main` 後は HW 上限表示になる（半円中央値は実測のまま、発動中は
+  `実 X / ロック Y MHz` で実値が見える）。実測: `/api/metrics` の `gpu_clock_max_mhz=3090.0` は
+  `Max Clocks SM 3090 MHz` と一致、headless Chrome のサブ行は `最大 3090 MHz` / 中央値は
+  `1245 MHz`（実測）。詳細は 2026-10-30 節「GPU クロック ゲージのサブ行を…」）
+  - 併せて本機は **サーマルガードを監視専らで導入済み**（`api/install_service.env` を
+    `DGXUTIL_THERMAL=1` にして 07:14 に `sudo bash api/install_service.sh` を実行。
+    `/api/thermal` は `{"enabled":true,...,"locked_mhz":0,"model_running":0}` を返し、
+    フロントのサーマル表示は灰色のまま = 他機と状態が揃った。`${THERMAL_CONTAINERS-既定}` への
+    修正（`7fd9da8`）は **まだ `sudo systemctl restart thermal-guard` を実施していない**
+    （現行プロセスは 07:14 起動で `containers=vllm-nemotron120b tabbyapi-ornith122b` のまま。
+    `docker ps` 0 件なので発動はせず実害なし）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
@@ -3504,3 +3519,34 @@ sudo systemctl daemon-reload
 sed -i 's/^DGXUTIL_THERMAL=.*/DGXUTIL_THERMAL=0/' /home/cliclie/DGXSparkUtil/api/install_service.env
 curl -s localhost:8090/api/thermal    # {"enabled":false} に戻る
 ```
+---
+
+## GPU クロック ゲージのサブ行を「最大 <HW 上限> MHz」にする（2026-10-30 / 本機依頼）
+
+**背景**: 同日に atom1 が「`実 <現在値> / 最大 <HW上限> MHz`」を「`最大 <実測値> MHz`」へ簡略化
+した（2026-10-30 節）。Whitebear2026-WSL2 で運用中にサブ行が `最大 882 MHz` と表示されたが、
+これは `nvidia-smi -q -d CLOCK` の **Clocks（実測 SM）** の値で、「最大」の語と合わない。
+運用者依頼で **Max Clocks（= `clocks.max.sm`）** を表示するよう戻した。
+
+**変更内容**（`front/index.html` のみ。API 再起動不要。**全機共通の表示**）:
+
+- `gaugeDefs()` の `g-gpu-clock` の `sub()`: 通常時の返却を
+  `` `最大 ${real} MHz` ``（`real` = `gpu_clock_mhz`）→ `` `最大 ${mx} MHz` ``
+  （`mx` = `gpu_clock_max_mhz`、無ければ `discrete ? 2350 : 3003` のフォールバック）に戻す
+- **据え置き**:
+  - 半円内の中央値は実測クロックのまま（`get: (m) => m.gpu_clock_mhz`）
+  - サーマルガード発動中の `実 <現在値> / ロック <Y> MHz`（`thermalClockLockMhz()`）。
+    発動中は実値が読めるので、2026-10-28 節の「発動判断がつきにくい」問題の解消は維持
+  - ゲージ目盛りの実測上限補正（`tuneGauge()` の `gpu_clock_max_mhz`）と
+    統合時系列グラフの 100% 基準（`CHART_NORM.gpuClock`）
+
+**検証**（Whitebear2026-WSL2、2026-10-30）:
+
+- `/api/metrics` の `gpu_clock_max_mhz=3090.0` は `nvidia-smi -q -d CLOCK` の
+  `Max Clocks → SM : 3090 MHz` と一致（`gpu_clock_mhz` は `Clocks → SM` の実測。この時 1440.0）
+- headless Chrome の `--dump-dom`（ポート 8090）: GPU クロックカードのサブ行が **`最大 3090 MHz`**、
+  半円中央値は `<div class="gval">1245<span class="unit">MHz</span>` と実測値のまま
+- 回帰なし: DISK ゲージは `上限 7 GB/s`（WSL 分岐）を維持、NW は `上限 10 Gbps`
+
+**留意**: 実測値の常時表示は無くなる（実値は半円中央値とツールチップで見る）。atom1 の
+2026-10-30 実装メモ（「最大 = 実測値」）は履歴として残るが、このコミット以降の表示は HW 上限。
