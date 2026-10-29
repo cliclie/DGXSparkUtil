@@ -2692,7 +2692,29 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     `git rebase origin/main` を実施したが新規コミットなし（`origin/main` は `a95a7b0` のまま）。
     **atom2 / Whitebear2026 は本コミット未同期** — `git pull --rebase origin main` +
     ブラウザリロードで反映可（API 再起動不要）。詳細は実装メモ 2026-10-30 末尾節）
-- **atom2 (WhitebearATOM2)**: 2026-10-28 に `1323f68` まで同期済み（本機。HEAD の
+- **atom2 (WhitebearATOM2)**: 2026-10-30 に `4a27fa1` まで同期済み（本機。`git fetch --all --prune` +
+  `git pull --ff-only` で `8205571` → `4a27fa1` の **19 コミット**を fast-forward、作業ツリーはクリーン・
+  コンフリクトなし）。取り込み内容は ornith122b（TabbyAPI・ポート 8018）の Cline 設定値対応（`a92c5d5`）、
+  サーマルガード対象のコンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中の API
+  応答なし緩和（status 短縮 + busy 判定）と GPU クロック実値表示（`8d7ad6c`）およびその README 反映
+  （`2df7683` / `30a9cfb`）、DISK ゲージと統合時系列の 100% 基準を WSL2 のみ 7 GB/s 化（`860c938` /
+  `1ccdc64`）、GPU クロックサブ行を「最大 <実測値> MHz」へ（`3e1debc` / `996cc1d`）、WSL2 で
+  `DGXUTIL_THERMAL=1` の監視専ら導入（`392ec41`）と `THERMAL_CONTAINERS` 空文字が既定リストへ化ける fix
+  （`7fd9da8`）、GPU クロックゲージのサブ行が HW 上限表示（`2b5909c`）、thermal-guard 監視専ら restart の
+  記録（`a95a7b0`）、vLLM 状態表示の busy を「稼働中（推論中）」(赤) →「推論中」(緑 ok) 化（`2ebcc14`）と
+  その README 反映（`00a0a0d` / `4a27fa1`）。
+  **`api/vllm.py` の変更があるため `dgx-spark-api` を 08:47:31 に再起動済み**（pull は 08:46、起動中の
+  プロセスが 08:40:04 起動で旧コードだったため。LLM コンテナはすべて exited のアイドル時に実施）。
+  実測: `/`・`/api/platform`・`/api/metrics`・`/api/vllm/status`・`/api/thermal` がすべて 200（status は
+  0.22 秒）、`server.log` 直近にエラーなし、配信中の `/` はリポジトリの `front/index.html` とバイト一致で
+  「推論中」の緑化コード（`renderVllm()` の `a.busy ? "推論中"`）を含む。
+  **thermal-guard は再起動不要** — 本機の unit は `mode=power`（R9700 / amdgpu `power1_cap`）で、今回の
+  `THERMAL_CONTAINERS` 化は `loop_clock()` 内（`CONTAINERS` 参照は 180 / 191 / 197 行のみ）だけの変更、
+  power ループは `CONTAINERS` を読まないため挙動不変（`bash -n` 構文 OK、`/api/thermal` は
+  `enabled:true` / `mode:power` / `temp_c:29.0` / `power_cap_w:300` を維持）。`install_service.sh` の WSL2
+  監視専ら分岐も本機（`IS_WSL=0`）では既定動作が従来どおりで、unit ファイルの再レンダリングは未実施
+  （root 権限が必要、新旧の機能差なし）。
+  2026-10-28 に `1323f68` まで同期済み（本機。HEAD の
   `1323f68` を含む。本機は strata 系 3 コミット（`ef845fa` / `24c36bd` / `04930ca`）の
   **実装元**で、2026-10-28 の Strata 0.2.7（engine 0.1.52）更新後も `/metrics` JSON・`/health` の
   フィールド互換を維持していることを実 HTTP で再確認（**コード変更不要**）。`dgx-spark-api` は
