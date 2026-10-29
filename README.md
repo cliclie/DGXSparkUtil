@@ -2778,6 +2778,17 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     `api_listening` が無く、`health` / `metrics` / `model_name` のみ = `8d7ad6c` 以前）。
     **監視緩和（`api/vllm.py`）をランタイムに反映するには `sudo systemctl restart dgx-spark-api`
     が必要**（未実施。フロントは静的配信なので disk 上限 7 GB/s はリロードだけで反映される）
+  **2026-10-30: 同じく本機で atom1 の GPU クロックサブ行変更（2 コミット）を反映した**
+  （`git pull --ff-only origin main` で `1ccdc64` → `996cc1d` の 2 件を fast-forward、コンフリクトなし。
+  内容は `3e1debc` の `gaugeDefs()` GPU クロック節（サブ行を `実 X / 最大 Y MHz` → `最大 <実測値> MHz`
+  に簡略化、`front/index.html` 1 行）と `996cc1d` の README 更新（機能表・実装メモ・atom1 側の同期記録。
+  本機の DISK 7 GB/s 化 2 コミットを atom1 側が rebase で取り込んだ旨を含む）。変更領域が GPU クロック節
+  で本機の DISK 節（`diskMax`）とは非重複のため統合に問題なし。フロントは静的配信なのでブラウザ
+  リロードで反映（`dgx-spark-api` は active のまま再起動不要。上記の `api/vllm.py` 未反映の注意は
+  今回も有効）。実測: headless Chrome の `--dump-dom` で DISK「上限 7 GB/s」と GPU クロック
+  「最大 1065 MHz」（= `gpu_clock_mhz` の実測値）と NW「上限 10 Gbps」が同一ページに共存することを確認。
+  **atom2 は今回の 2 コミット分が未同期の可能性あり**（atom2 側で `git fetch --all --prune` +
+  `git status -sb` を確認し `git merge --ff-only origin/main` で取り込み）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
