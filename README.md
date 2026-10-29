@@ -151,7 +151,9 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
   ゲージ描画(canvas)は持たず、**文字のみ**で次を表示する:
   `モデル名(値のみ・ラベルなし)` / `ポート` / `状態` / `prefill` / `decode`
   - 値は三段目の `#v-*` と同じ `setV()` 経由で `#vi-*` へミラーする(`V_MIRROR` 対応表)。
-    稼働モデルなしの `"-"` クリア、スループットの白/灰(held)、`up`/`down` の色分けも両側で同期される
+    稼働モデルなしの `"-"` クリア、スループットの白/灰(held)、状態の色分けも両側で同期される
+    (状態は `up` 白=「稼働中」/ `ok` 緑=「推論中」/ `warn` 黄=「API応答なし」/
+    `hot` 赤=「切替中…」「停止中…」/ `down` 灰=「停止中」。2026-10-30 末尾節)
   - カード内にタイトルは置かない。モデル名はラベルを省略して値だけを表示し、140px のカード幅に
     収めるため 1 行省略(`white-space:nowrap` + `overflow:hidden` + `text-overflow:ellipsis`)、
     フル名は `title` に入れる(`setV()` が設定)。5 行でも既存ゲージカードと高さが揃う
@@ -551,8 +553,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - 調査フェーズでは、本 README 以外のファイル変更・docker の起動停止・切替スクリプトの実行は行っていない
 - **長文推論中の `/health` 未応答は落下ではない**: ExLlamaV3 / TabbyAPI は推論中に uvicorn
   ワーカーが塞がる。`/api/vllm/status` は TCP 接続だけで `busy`(混雑中) を返し、フロントは
-  「稼働中（推論中）」を表示する。status はエンジン種別・モデル名・ログ末尾をキャッシュして
-  混雑時も 1.6 秒で返す(2026-10-28 節)
+  **「推論中」(緑・`ok`)** を表示する(2026-10-30 末尾節。導入時は「稼働中（推論中）」赤)。
+  status はエンジン種別・モデル名・ログ末尾をキャッシュして混雑時も 1.6 秒で返す(2026-10-28 節)
 
 ## 実行
 
@@ -2678,6 +2680,18 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     取り込んだ。衝突なし — 本機の変更は `gaugeDefs()` の GPU クロック節、リモート変更は DISK 節
     （`diskMax`）と `CHART_NORM` 行で領域が非重複。実測: 統合後の `front/index.html` に
     `最大 ${real} MHz` と `diskMax` が共存していることを確認
+  - **2026-10-30: 本機で vLLM の状態表示「稼働中（推論中）」(赤) を「推論中」(緑) に変更して push した**
+    （`2ebcc14`。`front/index.html` の `renderVllm()` 1 行と README のみ。`busy` 分岐の文言を
+    「推論中」へ、色クラスを `hot`（`--red`）→ `ok`（`--green`）へ変更。`health` の「稼働中」
+    (`up` 白)、どちらも false の「API応答なし」(`warn` 黄)、「切替中…」「停止中…」(`hot` 赤) は
+    変更なし。`setV()` の `V_MIRROR` で情報カード `#vi-status` とモデルタブ `#v-status` の両側に
+    同期される。フロントは静的配信なのでブラウザリロードで反映、`dgx-spark-api` は active のまま
+    再起動不要（`api/` 変更なし）。実測: headless Chrome + CDP で 3 パターンを `renderVllm()` に
+    注入 — `busy=true` は両側が「推論中」`v ok` `rgb(63,185,80)`、`health=true` は「稼働中」白、
+    両方 false は「API応答なし」黄（判定 7 項目 ALL PASS）。push 前に `git fetch --prune` +
+    `git rebase origin/main` を実施したが新規コミットなし（`origin/main` は `a95a7b0` のまま）。
+    **atom2 / Whitebear2026 は本コミット未同期** — `git pull --rebase origin main` +
+    ブラウザリロードで反映可（API 再起動不要）。詳細は実装メモ 2026-10-30 末尾節）
 - **atom2 (WhitebearATOM2)**: 2026-10-28 に `1323f68` まで同期済み（本機。HEAD の
   `1323f68` を含む。本機は strata 系 3 コミット（`ef845fa` / `24c36bd` / `04930ca`）の
   **実装元**で、2026-10-28 の Strata 0.2.7（engine 0.1.52）更新後も `/metrics` JSON・`/health` の
@@ -3358,6 +3372,7 @@ ExLlamaV3 は推論中に uvicorn ワーカーが塞がるので、**プロセ�
   付ける (metrics 5 s / status 9 s / rag 5 s / thermal 3 s)。失敗したカードは前回の値を残す
 - 状態表示: `health` → 「稼働中」/ `busy` → **「稼働中（推論中）」(hot)** /
   どちらも false → 「API応答なし」(warn)
+  (2026-10-30 に `busy` は **「推論中」(`ok` 緑)** へ変更。現行表記は末尾節)
 
 ### GPU クロックゲージは実値とロック段を表示
 
@@ -3557,3 +3572,27 @@ curl -s localhost:8090/api/thermal    # {"enabled":false} に戻る
 
 **留意**: 実測値の常時表示は無くなる（実値は半円中央値とツールチップで見る）。atom1 の
 2026-10-30 実装メモ（「最大 = 実測値」）は履歴として残るが、このコミット以降の表示は HW 上限。
+
+## vLLM 状態表示「稼働中（推論中）」を「推論中」(緑) に（2026-10-30 / 本機依頼）
+
+**要望**: 一段目の半円グラフ末尾の vLLM 情報カードにある稼働状況テキストで、
+「稼働中（推論中）」(赤字) を「推論中」(緑字) にする。
+
+**変更内容**
+
+- `front/index.html` `renderVllm()`: `busy` 分岐の文言を「稼働中（推論中）」→「推論中」、
+  色クラスを `hot`（`--red`）→ `ok`（`--green`）へ変更。`health` の「稼働中」(`up`) と
+  どちらも false の「API応答なし」(`warn` 黄) は不変
+- `setV()` は `V_MIRROR` で `#v-status`（モデルタブ vLLM 行の「コンテナ状態」）と
+  `#vi-status`（情報カード）の両方へ textContent / className を流し込むため、
+  **両側の表示が「推論中」(緑) になる**（追加の分岐は不要）
+- 「切替中…」「停止中…」の `hot`（赤）は据え置き。2026-10-28 節（busy 導入時）の
+  「稼働中（推論中）」表記は履歴として残る
+
+**検証**（本機 atom1、2026-10-30 / headless Chrome + CDP `/tmp/cdp_status_check.py`）:
+
+- `renderVllm()` に 3 パターンを注入した実測 — `health=true` →「稼働中」`v up`
+  `rgb(230,237,243)` / `busy=true` →「推論中」`v ok` `rgb(63,185,80)`（=`--green`）/
+  両方 false →「API応答なし」`v warn` `rgb(210,153,34)`。判定 7 項目 ALL PASS
+- 情報カード `#vi-status` とモデルタブ `#v-status` で textContent / className /
+  `getComputedStyle().color` が一致（ミラー回帰なし）
