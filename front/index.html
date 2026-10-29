@@ -1203,8 +1203,9 @@ function renderVllm(st) {
   } else {
     // 長文推論中は /health が応答しなくても listener は生きている (busy)。
     // 「API応答なし」は本当に応答が無いときだけ示す (2026-10-28 運用者要望)
-    setV("v-status", a.health ? "稼働中" : (a.busy ? "稼働中（推論中）" : "API応答なし"),
-      a.health ? "up" : (a.busy ? "hot" : "warn"));
+    // busy は「稼働中（推論中）」(赤) ではなく「推論中」(緑) にする (2026-10-30 運用者要望)
+    setV("v-status", a.health ? "稼働中" : (a.busy ? "推論中" : "API応答なし"),
+      a.health ? "up" : (a.busy ? "ok" : "warn"));
   }
   setV("v-uptime", a.uptime_str || "-");
   // モデル切替(稼働 profile 変化)で保持値・白/灰状態をリセット(エンジン別で値が非連続)
