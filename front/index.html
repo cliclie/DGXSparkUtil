@@ -846,6 +846,9 @@ class Gauge {
 function gaugeDefs() {
   const discrete = PLAT.memory_mode === "discrete";
   const netMax = PLAT.net_max_mbps || 10000;
+  // ストレージ I/O の 100% 基準: WSL2 (NVMe 直通) は実測で 7 GB/s 弱出るため 7 GB/s、
+  // それ以外 (DGX Spark / atom2) は従来どおり 5 GB/s
+  const diskMax = PLAT.platform === "wsl" ? 7000 : 5000;
   const defs = [
     { id: "g-cpu-load", title: "CPU 負荷", max: 100, unit: "%", color: "#58a6ff",
       dotBg: "rgba(88,166,255,.10)", // ■=2段目グラフの凡例ボックスと同一スタイル(塗り+枠)
@@ -905,10 +908,10 @@ function gaugeDefs() {
         ? `${(m.disk_used_gib / 1024).toFixed(2)} / ${(m.disk_total_gib / 1024).toFixed(2)} TiB`
         : `${Math.round(m.disk_used_gib)} / ${Math.round(m.disk_total_gib)} GiB`) },
     // タイトルに単位、値は接頭語のみ (R 0.0M / W 1.2G)。A = 外側リング = 1 行目
-    { id: "g-disk-io", title: "DISK(B/s)", dual: true, max: 5000,
+    { id: "g-disk-io", title: "DISK(B/s)", dual: true, max: diskMax,
       colorA: "#56d364", colorB: "#e3b341", labelA: "R", labelB: "W",
       getA: (m) => m.disk_read_mbps, getB: (m) => m.disk_write_mbps,
-      pfx: (v) => pfxParts(v, 1024), sub: () => "上限 5 GB/s" },
+      pfx: (v) => pfxParts(v, 1024), sub: () => `上限 ${diskMax / 1000} GB/s` },
     // 上り (UP) を A (=外側リング・1 行目) にした (従来は下りが A)。単位は bps でタイトルに明記
     { id: "g-net", title: "NW(bps)", dual: true, max: netMax,
       colorA: "#58a6ff", colorB: "#bc8cff", labelA: "UP", labelB: "DL",
@@ -987,7 +990,7 @@ function renderGauges(m) {
 }
 
 // ------------------------------------------------------------- 統合時系列グラフ
-// 100% 換算: CPU温度=100°C / ストレージI/O=5GB/s / GPU電力=GB10 140W (TDP)・R9700 300W (PPT) /
+// 100% 換算: CPU温度=100°C / ストレージI/O=WSL 7GB/s・その他 5GB/s / GPU電力=GB10 140W (TDP)・R9700 300W (PPT) /
 // GPUクロック=GB10 3003MHz・R9700 2350MHz (HW上限)
 const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
 
@@ -1004,7 +1007,8 @@ let CHART_NORM = null;  // 100% 換算基準
 
 function buildMainChart() {
   const discrete = PLAT.memory_mode === "discrete";
-  CHART_NORM = { cpuTemp: 100, gpuPower: discrete ? 300 : 140, gpuClock: discrete ? 2350 : 3003, diskIO: 5000 };
+  CHART_NORM = { cpuTemp: 100, gpuPower: discrete ? 300 : 140, gpuClock: discrete ? 2350 : 3003,
+    diskIO: PLAT.platform === "wsl" ? 7000 : 5000 };
   const N = CHART_NORM;
   chartDs = {
     cpuLoad: lineDS("CPU %", series.cpuLoad, "#58a6ff", "rgba(88,166,255,.10)"),
