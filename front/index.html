@@ -897,8 +897,7 @@ function gaugeDefs() {
         const real = m.gpu_clock_mhz != null ? m.gpu_clock_mhz.toFixed(0) : "-";
         const lock = thermalClockLockMhz();
         if (lock) return `実 ${real} / ロック ${lock.toFixed(0)} MHz`;
-        const mx = m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003);
-        return `実 ${real} / 最大 ${mx} MHz`;
+        return `最大 ${real} MHz`;
       } },
     { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
       // サブ行は必ず 1 行に収める (カード幅 118px で 2 行折り返しになると行高さが 14px 増えるため、
