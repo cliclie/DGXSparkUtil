@@ -2747,6 +2747,24 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     `/api/vllm/cline?profile=strataq3` は未稼働のため 409「稼働中のモデルがありません」で
     従来どおりの業務エラー。headless Chrome + CDP でも JS エラー 0 件、プルダウンの灰色表示
     （未導入 `--muted` / 導入済み・RAG `--text`）とボタン 66×24px・header 40px を再確認
+  **2026-10-30: 本機で DISK ゲージと統合時系列グラフの 100% 基準を 7 GB/s に引き上げて push した**
+  （`front/index.html` と README のみ。`PLAT.platform === "wsl"` の分岐で `7000`、DGX Spark / atom2 は
+  `5000` のままなので他機は無影響。NVMe 直通の実運用で読込 7 GB/s 弱を観測し、5 GB/s 基準では
+  ゲージとグラフが振り切れていたため。フロントは静的配信なのでブラウザリロードで反映、
+  `dgx-spark-api` は active のまま再起動不要。実測: `/api/platform` が `platform: "wsl"` を返し、
+  headless Chrome の `--dump-dom` で DISK ゲージのサブ行が「上限 7 GB/s」になることを確認、
+  他ゲージ（NW 上限 10 Gbps など）に変化なし。詳細は実装メモ 2026-10-30）
+  - push 前に `git fetch` + `git rebase origin/main` で atom1 が 2026-10-28 に push した 9 コミット
+    （ornith122b の Cline 設定値対応 `a92c5d5`、サーマルガード対象のコンテナ名リスト化 `89af358` と
+    実戦検証記録 `33b4a3c`、長文推論中のポーリング緩和と GPU クロック実値表示 `8d7ad6c`、
+    実装メモ `2df7683` / 同期状況反映 `30a9cfb`、各機の同期記録 `77a5dd2` / `1323f68` / `8205571`）を
+    取り込んだ。衝突は README の機能表と「ゲージの 100% 基準」行のみ → atom1 側の GPU クロック
+    記述（`thermalClockLockMhz()`）を保ったまま disk 上限の注記を統合して解決
+  - 注意: 稼働中の `dgx-spark-api`（systemd system unit、起動 2026-10-30 06:13）は pull 前の
+    `4700cc8` のコードで動いている（実測: `/api/vllm/status` の `active` キーに `busy` /
+    `api_listening` が無く、`health` / `metrics` / `model_name` のみ = `8d7ad6c` 以前）。
+    **監視緩和（`api/vllm.py`）をランタイムに反映するには `sudo systemctl restart dgx-spark-api`
+    が必要**（未実施。フロントは静的配信なので disk 上限 7 GB/s はリロードだけで反映される）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
