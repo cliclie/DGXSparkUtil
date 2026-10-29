@@ -61,7 +61,12 @@ LOCK_HIGH="${THERMAL_LOCK_HIGH_MHZ:-1500}"
 LOCK_CRIT="${THERMAL_LOCK_CRIT_MHZ:-1000}"
 # 対象コンテナは空白区切りのリスト (docker ps の名前と完全一致)。
 # THERMAL_CONTAINER (単一指定) は後方互換として残し、指定があればそれを優先する。
-CONTAINERS="${THERMAL_CONTAINERS:-vllm-nemotron120b tabbyapi-ornith122b}"
+# 展開は ${VAR-default} (コロン無し) にする。WSL2 の「監視専ら」導入は
+# install_service.sh が unit へ Environment=THERMAL_CONTAINERS= (空文字) を注入して
+# 発動対象を無くすが、${VAR:-default} だと空文字も既定リストへフォールバックして
+# 対象が残ってしまう (2026-10-30 に実測: containers=vllm-nemotron120b ... と起動ログ)。
+# 未設定 (atom1 / atom2 の既定) は従来どおり既定リストを使う。
+CONTAINERS="${THERMAL_CONTAINERS-vllm-nemotron120b tabbyapi-ornith122b}"
 [ -z "${THERMAL_CONTAINER:-}" ] || CONTAINERS="$THERMAL_CONTAINER"
 # 監視間隔: GB10 の温度上昇は 0.4℃/秒なので 2 秒で十分。R9700 は電力切替の応答が
 # 速いので 1 秒 (解放の 2 秒判定を 2 サンプルで見る)。

@@ -612,8 +612,10 @@ curl -s localhost:8080/api/thermal    # ガードの状態 JSON
   `/proc/version` が microsoft を含むときは `DGXUTIL_THERMAL=1` を明示したときだけ導入する。
   その際 unit に `Environment=THERMAL_CONTAINERS=`（空）と `Environment=THERMAL_MODE=clock` を
   注入して **発動させない**（`nvidia-smi --query` / sysfs / `docker ps` の読み取りと
-  `/run/thermal/state` の更新のみ）。手順は「WSL2 でサーマルガードを監視専らで導入する」
-  （2026-10-30 節）参照。dgx-spark / atom2 は従来どおり（未指定で有効、`=0` で無効）
+  `/run/thermal/state` の更新のみ）。`thermal_guard.sh` 側は空文字を受け取るため
+  `${THERMAL_CONTAINERS-既定}`（コロン無し）で展開する。手順は「WSL2 でサーマルガードを
+  監視専らで導入する」（2026-10-30 節）参照。dgx-spark / atom2 は従来どおり（未指定で有効、
+  `=0` で無効）
 - 電源投入時に自動起動（`WantedBy=multi-user.target`）、クラッシュ時は自動再起動（`Restart=always`）
 - venv が存在しない場合は `ExecStartPre` で自動作成する
 - ログ: `/home/cliclie/DGXSparkUtil/api/server.log`（追記モード。JST 0 時に 0 バイトへ
@@ -3429,6 +3431,13 @@ ExLlamaV3 は推論中に uvicorn ワーカーが塞がるので、**プロセ�
   名前が完全一致で並ぶ）**かつ** `max(acpitz, GPU温度) >= HIGH(90)℃`
 - `THERMAL_CONTAINERS` が空なら `for c in $CONTAINERS` が回らず `running=0` 固定 →
   `want=0` となり `nvidia-smi -lgc` は一度も叩かれない（読み取りと状態ファイル更新のみ）
+- **展開は `${VAR-default}`（コロン無し）が必須**。初版は `${VAR:-default}` のままだったため
+  `Environment=THERMAL_CONTAINERS=` の**空文字が既定リストへフォールバック**し、導入時の起動ログが
+  `containers=vllm-nemotron120b tabbyapi-ornith122b` になった（2026-10-30 07:14 実測）。当機は
+  `docker ps` 0 件で `model_running=0` のため発動自体はしていないが、構造保証が壊れていた。
+  → `api/thermal_guard.sh` を `${THERMAL_CONTAINERS-vllm-nemotron120b tabbyapi-ornith122b}` に修正。
+  修正実測: `THERMAL_CONTAINERS= timeout 3 sh api/thermal_guard.sh` → `containers=`（空）、
+  未設定 → `containers=vllm-nemotron120b tabbyapi-ornith122b`（**atom1 / atom2 は従来どおり**）
 - 本機実測: acpitz zone は存在せず（`/sys/class/thermal/thermal_zone*` が空 = `a=0`）、
   `nvidia-smi --query-gpu=temperature.gpu` = **34℃**、`docker ps` は 0 件（modelctl 運用で
   対象コンテナ名自体が存在しない）
@@ -3471,6 +3480,20 @@ journalctl -u thermal-guard --no-pager | tail -5
 - 生成 unit の検証: `Environment=THERMAL_CONTAINERS=` / `Environment=THERMAL_MODE=clock` が
   `[Service]`（12 行 `ExecStart` の直後、48 行 `[Install]` より前）に入り、
   `systemd-analyze verify` は警告 0（exit 0）。`sh -n api/thermal_guard.sh` も通過
+
+**本機の導入結果**（2026-10-30 07:14、`sudo bash api/install_service.sh`）:
+
+- 進捗表示は `thermal-guard=1 (monitor-only: THERMAL_CONTAINERS=)`。`thermal-guard.service` は
+  `active (running)`（MainPID = `/bin/sh .../thermal_guard.sh` + `sleep 2` = 2 秒周期）
+- `/run/thermal/state` = `{"enabled":true,"temp_c":36,"acpitz_c":0,"gpu_c":36,"clock_mhz":615,`
+  `"locked_mhz":0,"model_running":0,"low_c":85,"lock_high_mhz":1665,...}`、`/api/thermal` も同一
+  （従来は `{"enabled":false}`）。`locked_mhz=0` なのでフロントのサーマル表示は灰色のまま
+- `dgx-spark-api` も同時に 07:14:06 へ再起動され `HTTP check: 200`。`KILL_MODE=process` のため
+  稼働中の strataq3 は生存。`server.log` は初回 truncate で 23M → 12K
+  （退避: `/tmp/server.log.20261030-071358.bak`）
+- 初回の起動ログが `containers=vllm-nemotron120b tabbyapi-ornith122b` だった（上記の落とし穴）
+  → 修正後の再適用は `sudo systemctl restart thermal-guard` のみ（unit は変更不要）。
+  修正スクリプトでの模擬起動では `containers=`（空）をすでに確認済み
 
 **無効化（戻す）**:
 
