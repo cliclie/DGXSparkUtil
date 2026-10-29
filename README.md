@@ -2842,6 +2842,22 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     - 注意: restart 直後の 2 秒未満は `RuntimeDirectory=thermal` が削除された後で初回ループも
       まだなので `/api/thermal` は `{"enabled":false}` を返す（運用者が 07:25:22 に観測した値は
       これ。数秒後に `enabled:true` へ復帰することを実測で確認）
+  **2026-10-30: 同じく本機で atom1 が push した vLLM 状態表示「推論中」(緑) 化の 2 コミットを反映した**
+  （`git fetch --all --prune` + `git pull --ff-only` で `a95a7b0` → `00a0a0d` の 2 件を fast-forward、
+  作業ツリーはクリーン・コンフリクトなし。取り込み内容は `2ebcc14` の `front/index.html`
+  `renderVllm()` 1 行（`busy` 分岐を「稼働中（推論中）」`hot` 赤 →「推論中」`ok` 緑）と `00a0a0d` の
+  README 更新（実装メモ末尾節・vLLM 情報カードの機能表・注意点・2026-10-28 節の履歴注記・atom1 側の
+  同期記録）。**`api/` 配下の変更はゼロ**なので `dgx-spark-api` は active のまま再起動不要、フロントは
+  静的配信のためブラウザリロードで反映（atom1 側の「Whitebear2026 は本コミット未同期」注記は
+  これで解消。atom2 は依然未同期の可能性あり → `git pull --ff-only origin main`）。
+  実測: 配信中の `/`（ポート **8090**）はリポジトリの `front/index.html` とバイト一致、
+  `front/index.html` のコピー（`chart.umd.js` を `/static/` に用意）を localhost で配信して
+  headless Chrome の `--dump-dom` で `renderVllm()` に 3 パターンを注入した実測 —
+  `busy=true` は `#v-status` / `#vi-status` の**両側**が「推論中」`v ok` `rgb(63, 185, 80)`
+  （=`--green`）、`health=true` は「稼働中」`v up` `rgb(230, 237, 243)`、両方 false は
+  「API応答なし」`v warn` `rgb(210, 153, 34)`（ミラー回帰なし・atom1 の CDP 実測値と一致）。
+  `/api/platform` は `platform:"wsl"`、`/`・`/api/metrics`・`/api/thermal` は 200、
+  `dgx-spark-api` / `thermal-guard` は active のまま。詳細は 2026-10-30 末尾節）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
