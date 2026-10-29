@@ -2773,11 +2773,21 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     実装メモ `2df7683` / 同期状況反映 `30a9cfb`、各機の同期記録 `77a5dd2` / `1323f68` / `8205571`）を
     取り込んだ。衝突は README の機能表と「ゲージの 100% 基準」行のみ → atom1 側の GPU クロック
     記述（`thermalClockLockMhz()`）を保ったまま disk 上限の注記を統合して解決
-  - 注意: 稼働中の `dgx-spark-api`（systemd system unit、起動 2026-10-30 06:13）は pull 前の
-    `4700cc8` のコードで動いている（実測: `/api/vllm/status` の `active` キーに `busy` /
-    `api_listening` が無く、`health` / `metrics` / `model_name` のみ = `8d7ad6c` 以前）。
-    **監視緩和（`api/vllm.py`）をランタイムに反映するには `sudo systemctl restart dgx-spark-api`
-    が必要**（未実施。フロントは静的配信なので disk 上限 7 GB/s はリロードだけで反映される）
+  - 注意（**解消済み**）: 稼働中の `dgx-spark-api` は 2026-10-30 06:13 起動時点では pull 前の
+    `4700cc8` コードだった（`/api/vllm/status` の `active` に `busy` / `api_listening` が無く
+    `health` / `metrics` / `model_name` のみ = `8d7ad6c` 以前）→ **運用者が 2026-10-30 06:58:28 に
+    `sudo systemctl restart dgx-spark-api` を実施**。実測: `ActiveState=active` / `SubState=running` /
+    `Result=success` / `NRestarts=0`、MainPID の cwd は `/home/cliclie/DGXSparkUtil/api`
+    （起動 06:58:28 > `api/vllm.py` の mtime 06:35:29 = rebase 後のコードを import）。
+    `/api/vllm/status` の `active` に `busy:false` / `api_listening:true` が現れ（= `8d7ad6c` 反映）、
+    strata 系の metrics キー（`generation_tokens_per_s` / `prompt_tokens_per_s` / `e2e_latency_s` /
+    `ttft_s` / `kv_cache_usage_pct` / `requests_running` / `requests_waiting` /
+    `expert_cache_hit_pct`）も返る（= `24c36bd` / `04930ca` 反映）。status 応答は初回 2.88 s →
+    2 回目以降 0.017 s（キャッシュ有効）。`/`・`/api/platform`・`/api/metrics`・`/api/vllm/status`・
+    `/api/vllm/cline`・`/api/thermal`・`/api/rag/status`・`/api/history` すべて 200、
+    `journalctl -u dgx-spark-api --since 06:58 -p warning` 0 件。稼働モデル strataq3 は
+    `health=true` / uptime 00:42:23 で継続（再起動の影響なし）。headless Chrome でも DISK
+    「上限 7 GB/s」/ GPU クロック「最大 1117 MHz」/ vLLM 状態「稼働中」を確認
   **2026-10-30: 同じく本機で atom1 の GPU クロックサブ行変更（2 コミット）を反映した**
   （`git pull --ff-only origin main` で `1ccdc64` → `996cc1d` の 2 件を fast-forward、コンフリクトなし。
   内容は `3e1debc` の `gaugeDefs()` GPU クロック節（サブ行を `実 X / 最大 Y MHz` → `最大 <実測値> MHz`
