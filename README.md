@@ -2820,9 +2820,14 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     `DGXUTIL_THERMAL=1` にして 07:14 に `sudo bash api/install_service.sh` を実行。
     `/api/thermal` は `{"enabled":true,...,"locked_mhz":0,"model_running":0}` を返し、
     フロントのサーマル表示は灰色のまま = 他機と状態が揃った。`${THERMAL_CONTAINERS-既定}` への
-    修正（`7fd9da8`）は **まだ `sudo systemctl restart thermal-guard` を実施していない**
-    （現行プロセスは 07:14 起動で `containers=vllm-nemotron120b tabbyapi-ornith122b` のまま。
-    `docker ps` 0 件なので発動はせず実害なし）
+    修正（`7fd9da8`）は **2026-10-30 07:25:22 に `sudo systemctl restart thermal-guard` を実施**。
+    起動ログが `... interval=2s containers=`（**末尾が空**）になり、発動対象が無いことを確認。
+    `/api/thermal` は `{"enabled":true,...,"locked_mhz":0,"model_running":0}` を返し、
+    `journalctl` の発動ログ（`thermal-guard: <温度>C -> <MHz>MHz`）は 0 件のまま =
+    `nvidia-smi -lgc` を一度も叩いていない
+    - 注意: restart 直後の 2 秒未満は `RuntimeDirectory=thermal` が削除された後で初回ループも
+      まだなので `/api/thermal` は `{"enabled":false}` を返す（運用者が 07:25:22 に観測した値は
+      これ。数秒後に `enabled:true` へ復帰することを実測で確認）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
@@ -3485,6 +3490,8 @@ journalctl -u thermal-guard --no-pager | tail -5
 `{"ts":...,"enabled":true,"temp_c":34,"acpitz_c":0,"gpu_c":34,"clock_mhz":...,"locked_mhz":0,"model_running":false,...}`、
 `/api/thermal` が `{"enabled":false}` → `enabled:true` に変わる、
 `journalctl` の先頭が `thermal-guard start: mode=clock ... containers=`（末尾が空 = 発動対象なし）。
+※ `restart` 直後の 2 秒未満は `RuntimeDirectory=thermal` が削除された後で初回ループもまだ
+ため、`/api/thermal` は `{"enabled":false}` を返す（誤検出に注意。数秒で `enabled:true` に復帰）。
 
 **検証**（Whitebear2026-WSL、2026-10-30。コード変更時点の実測）:
 
