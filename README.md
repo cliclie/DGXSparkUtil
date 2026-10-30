@@ -221,13 +221,15 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
 
 ### 四段目: RAG (sociax-rag) 起動/停止
 
-RAG 環境(embedding vLLM + Qdrant)の状態を常時表示し、起動/停止を操作できるセクション。
+RAG 環境(embedding vLLM)の状態を常時表示し、起動/停止を操作できるセクション。
 対象ディレクトリはプラットフォーム別(dgx-spark `/home/cliclie/llm/compose/sociax-rag/`、
 atom2 `/home/cliclie/RAG/compose/`、`api/config.py` 参照)。atom2 では VRAM のため
 LLM と RAG embedding が排他(実装メモ 2026-10-03 参照)。
+2026-10-31 の構成変更で Qdrant は SociaX 側(sociax.local)のコンテナへ移行済みであり、
+本セクションは embedding のみを監視・操作する。
 
 - 表示内容:
-  - Embedding (8010) / Qdrant (6333/6334) それぞれの状態
+  - Embedding (8010) の状態
     (稼働中 (API応答) / 起動中… (API応答なし) / 停止中)
   - 稼働時間
 - セクションヘッダーに「起動」「停止」ボタンを配置
@@ -339,7 +341,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │     POST /api/vllm/switch    → モデル切替             │
 │     POST /api/vllm/stop      → モデル停止             │
 │     POST /api/vllm/params    → パラメータ編集+再作成  │
-│     GET  /api/rag/status     → RAG状態(embedding/Qdrant) │
+│     GET  /api/rag/status     → RAG状態(Embedding)        │
 │     POST /api/rag/start|stop → RAG 起動/停止(ジョブ)  │
 │     GET  /api/rag/job        → RAG ジョブ進捗         │
 │     GET  /api/thermal        → GPU サーマルガード状態   │
@@ -398,7 +400,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   - `main.py` — FastAPI エントリポイント(エンドポイント一覧は上記アーキテクチャ図)
   - `metrics.py` — ホストメトリクス(nvidia / amdgpu sysfs / /proc 系)
   - `vllm.py` — モデル状態・切替・パラメータ表示。`backend` で compose / modelctl を分岐
-  - `rag.py` — RAG (embedding + Qdrant) の状態と起動/停止(compose 環境のみ)
+  - `rag.py` — RAG (embedding のみ。Qdrant は SociaX 側へ移行済み) の状態と起動/停止(compose 環境のみ)
   - `modelctl.py` / `wsl_modelctl_bridge.sh` — **modelctl バックエンド (WSL2)**。
     ブリッジが `model-ctl.sh` を source して非対話化し、モード一覧・切替・停止・
     表示用パラメータをタブ区切りで返す。`modelctl.py` がそれを compose 版と同一の
@@ -500,8 +502,12 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 
 - UI 配置: 四段目(RAG (sociax-rag) 起動/停止)に状態を常時表示。「起動」「停止」は
   確認モーダル表示(詳細は「表示レイアウト(4段構成)」参照)
-- 対象: `/home/cliclie/llm/compose/sociax-rag/` の Docker Compose プロジェクト
-  (embedding vLLM: Qwen3-Embedding-0.6B / ポート 8010、Qdrant v1.18.2 / ポート 6333・6334)
+- 対象: RAG compose プロジェクトの **embedding サービスのみ**
+  (embedding vLLM: Qwen3-Embedding-0.6B / ポート 8010)
+  - Qdrant は 2026-10-31 に SociaX 側(スタンドアロン Ubuntu / sociax.local)へ移行済み。
+    Atom 機は Embedding のみを提供し、Qdrant の接続先として参照されない
+    (本機の qdrant は停止。compose.yaml の定義と `QDRANT_STORAGE_DIR` は
+    ロールバック用バックアップとして当面保持し、`down -v` や削除は行わない)
 - 目的: WhitebearATOM2 の RAG 環境との共存。本機の RAG を停止して
   GPU メモリ(embedding は `--gpu-memory-utilization 0.10`)等を解放する
 
@@ -511,21 +517,20 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 |---|---|
 | コンテナ稼働/停止・稼働時間・再起動回数 | `docker compose ps` / `docker inspect` |
 | Embedding API健全性 | `GET http://localhost:8010/v1/models` |
-| Qdrant API健全性 | `GET http://localhost:6333/` |
 
-- ポートは `.env` (EMBEDDING_PORT / QDRANT_REST_PORT) から動的取得
+- ポートは `.env` (EMBEDDING_PORT) から動的取得
 - 起動直後はコンテナ稼働中だが embedding のモデルロード完了まで API 未応答
   (healthcheck `start_period: 180s`) → 「起動中… (API応答なし)」で表示
 
 **起動/停止**
 
-- 起動: `docker compose --env-file .env -f compose.yaml up -d` (バックグラウンドジョブ)
+- 起動: `docker compose --env-file .env -f compose.yaml up -d embedding` (バックグラウンドジョブ)
   - コマンド自体は数秒で完了。モデルロードはコンテナ内でバックグラウンド実行
   - 既に稼働中の場合は何もしない(冪等)
   - 排他環境 (atom2 / VRAM 32GB) では `switch_models.sh rag` を経由し、稼働中 LLM を停止してから
-    embedding を起動する(スクリプトが API 応答まで待機)→ 完了後 `up -d` で Qdrant を補完起動
-- 停止: `docker compose --env-file .env -f compose.yaml stop` (バックグラウンドジョブ)
-  - Qdrant のデータは volume (`QDRANT_STORAGE_DIR`) に永続化済みなので安全
+    embedding を起動する(スクリプトが API 応答まで待機)
+  - サービス指定なしの `up -d` は退役済みの qdrant を起動するため使わない
+- 停止: `docker compose --env-file .env -f compose.yaml stop embedding` (バックグラウンドジョブ)
   - `docker stop` は `restart: unless-stopped` を無効化するため、停止後自動再起動しない
   - `down` (コンテナ削除) は使わない
 - ジョブ状態は `api/vllm.py` のジョブと独立(`api/rag.py` 独自) →
@@ -1070,6 +1075,9 @@ cd /home/cliclie/DGXSparkUtil/api
   再停止は 409)→ 起動ジョブ実行 → 両コンテナ再起動 → `check-services.sh` 4 項目
   (embedding モデル一覧 / 1024 次元ベクトル / Qdrant REST / gRPC)全て通過 →
   status API で running=true, healthy=true を確認済み。
+  - **※ 2026-10-31 の Qdrant 退役で上記は旧構成**。Qdrant は sociax 側へ移行済みで
+    本機の監視・起動対象ではない(embedding のみ)。現行仕様は「RAG関連機能の設計」節と
+    `api/rag.py` / `front/index.html` を正とする。
 - **下部余白の縮小(縦スクロールバー出現の緩和)**:
   ブラウザの表示領域を狭めたとき、下部に余白があるのに縦スクロールバーが出る現象を緩和するため、
   最下部の余白を縮小した。`main` の `padding-bottom` を 32px→12px、
@@ -1117,6 +1125,8 @@ cd /home/cliclie/DGXSparkUtil/api
   - `rag.py` の起動は `switch_models.sh rag`(稼働中 LLM を停止して embedding 起動、
     API 応答まで待機) → 続けて `docker compose up -d`(Qdrant 補完起動) を 1 ジョブとして実行。
     dgx-spark は従来どおり `compose up -d` のみ。停止は両環境とも `compose stop`(embedding+Qdrant 全体)。
+    - **※ 2026-10-31 以降は Qdrant を起動/停止しない**(`up -d embedding` / `stop embedding`)。
+      退役済み Qdrant をサービス指定なしの `up -d` が起こすため、dgx-spark も embedding 指定に統一。
   - `/api/rag/status` に `llm_running` / `blocked_by_llm`(LLM 稼働中による embedding 停止) を追加。
     UI は「停止中 (LLM 排他)」表示 + セクションヘッダーに「※ LLM ⇔ RAG は VRAM 排他」注記。
     起動ボタンは atom2 では embedding 基準(Qdrant 常時稼働でも押せる)。

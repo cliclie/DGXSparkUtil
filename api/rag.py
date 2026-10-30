@@ -1,13 +1,13 @@
 """RAG環境 (sociax-rag) の状態モニタリング / 起動 / 停止。
 
-本機の RAG(embedding vLLM)を Web UI から起動/停止できるようにする。
+本機の RAG は embedding vLLM のみを提供する(Web UI から起動/停止)。
 
-2026-10-31: Qdrant は sociax 側へ移行して本機退役(ロールバック用保持)。
-起動/停止は embedding のみを行う。サービス指定なしの `up -d` は
-Exited 状態の Qdrant を再起動するため使わない。
+2026-10-31: Qdrant(ベクトルデータ本体)は sociax 側(sociax.local)へ移行し、本機では
+**恒久停止(退役)**。サービス指定なしの `up -d` は Exited 状態の Qdrant を再起動するため
+使わない。compose.yaml の定義と QDRANT_STORAGE_DIR はロールバック用として当面保持する。
 
-- 状態: docker compose ps / inspect + embedding /v1/models, qdrant REST の健全性
-  (Qdrant は「停止中」表示が想定状態)
+- 状態: docker compose ps / inspect + embedding /v1/models の健全性
+  (Qdrant は退役のため監視対象外)
 - 起動: docker compose up -d embedding (バックグラウンドジョブ)
   ※ 排他環境 (atom2 / VRAM 32GB) では switch_models.sh rag を経由し、
     稼働中 LLM を停止してから embedding を起動する
@@ -32,9 +32,9 @@ COMPOSE_FILE = RAG_DIR / "compose.yaml"
 ENV_FILE = RAG_DIR / ".env"
 
 # サービスと健全性チェック用 URL (ポートは .env から取得、既定値は compose.yaml と一致)
+# qdrant は SociaX 側へ移行済み(2026-10-31)のため本機では管理しない
 SERVICES = {
     "embedding": {"port_key": "EMBEDDING_PORT", "port_default": 8010, "health_path": "/v1/models"},
-    "qdrant": {"port_key": "QDRANT_REST_PORT", "port_default": 6333, "health_path": "/"},
 }
 
 
@@ -166,7 +166,7 @@ def _switching_info() -> dict | None:
     """実行中ジョブがある場合、kind と起動準備完了フラグを返す。
 
     フロントの状態表示で「起動中…/停止中…」を区別する。
-    ready は起動ジョブのみ両サービスの API が応答するかで判定する。
+    ready は起動ジョブのみ embedding の API が応答するかで判定する。
     """
     if _job is None or _job["proc"].poll() is not None:
         return None
@@ -279,7 +279,7 @@ def job_status() -> dict:
 
 
 def start_rag() -> dict:
-    """RAG環境を起動する(バックグラウンド)。既に稼働中の場合は compose が何もしない。
+    """RAG環境(embedding)を起動する(バックグラウンド)。既に稼働中の場合は compose が何もしない。
 
     embedding のみを起動する(Qdrant は 2026-10-31 に退役・ロールバック用保持)。
     排他環境 (atom2) では switch_models.sh rag を実行し、稼働中 LLM を停止してから

@@ -507,7 +507,6 @@ table.params td input[readonly] { color: var(--muted); }
     <div id="rag-panel">
       <div id="rag-headline">
         <div class="item"><span class="k">Embedding (8010)</span><span class="v" id="r-emb">-</span></div>
-        <div class="item"><span class="k">Qdrant (6333/6334)</span><span class="v" id="r-qdr">-</span></div>
         <div class="item"><span class="k">稼働時間</span><span class="v" id="r-uptime">-</span></div>
       </div>
       <div class="btns">
@@ -1592,7 +1591,6 @@ let ragJobStarted = false; // ユーザーが実際にジョブを開始した�
 function renderRag(st) {
   const job = st.switching;
   const emb = st.services.embedding;
-  const qdr = st.services.qdrant;
   const setR = (id, text, cls) => {
     const el = document.getElementById(id);
     el.textContent = text;
@@ -1607,14 +1605,10 @@ function renderRag(st) {
   // 排他環境: LLM 稼働中による embedding 停止は「LLM 排他で停止」と表示
   const eText = st.blocked_by_llm && !emb.running ? "停止中 (LLM 排他)" : eText0;
   const eCls = st.blocked_by_llm && !emb.running ? "down" : eCls0;
-  const [qText, qCls] = stateOf(qdr);
   setR("r-emb", eText, eCls);
-  setR("r-qdr", qText, qCls);
-  setR("r-uptime", emb.uptime_str || qdr.uptime_str || "-");
-  // 起動: 排他環境 (atom2) は Qdrant 常時稼働のため embedding 基準 / それ以外は従来どおりいずれか稼働で不可
-  const startBlocked = PLAT.exclusive_llm_rag
-    ? emb.running && qdr.running
-    : st.running;
+  setR("r-uptime", emb.uptime_str || "-");
+  // Qdrant は SociaX 側へ移行済み (2026-10-31)。embedding のみで起動可否を判定する
+  const startBlocked = emb.running;
   document.getElementById("btn-rag-start").disabled = !!job || startBlocked;
   document.getElementById("btn-rag-stop").disabled = !!job || !st.running;
 }
@@ -1630,9 +1624,9 @@ function openRagModal(action) {
   document.getElementById("rag-msg").textContent =
     action === "start"
       ? (PLAT.exclusive_llm_rag
-          ? "RAG環境 (embedding) を起動しますか?\n稼働中の LLM は自動停止されます (VRAM 排他)。"
-          : "RAG環境 (embedding) を起動しますか?")
-      : "RAG環境 (embedding) を停止しますか?";
+          ? "RAG環境 (Embedding) を起動しますか?\n稼働中の LLM は自動停止されます (VRAM 排他)。\nQdrant は SociaX 側で稼働中のため本機では起動しません。"
+          : "RAG環境 (Embedding) を起動しますか?")
+      : "RAG環境 (Embedding) を停止しますか?";
   document.getElementById("rag-cancel").style.display = "";
   document.getElementById("rag-go").textContent = action === "start" ? "起動する" : "停止する";
   document.getElementById("rag-go").disabled = false;
