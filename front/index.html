@@ -1630,9 +1630,9 @@ function openRagModal(action) {
   document.getElementById("rag-msg").textContent =
     action === "start"
       ? (PLAT.exclusive_llm_rag
-          ? "RAG環境 (embedding + qdrant) を起動しますか?\n稼働中の LLM は自動停止されます (VRAM 排他)。"
-          : "RAG環境 (embedding + qdrant) を起動しますか?")
-      : "RAG環境 (embedding + qdrant) を停止しますか?";
+          ? "RAG環境 (embedding) を起動しますか?\n稼働中の LLM は自動停止されます (VRAM 排他)。"
+          : "RAG環境 (embedding) を起動しますか?")
+      : "RAG環境 (embedding) を停止しますか?";
   document.getElementById("rag-cancel").style.display = "";
   document.getElementById("rag-go").textContent = action === "start" ? "起動する" : "停止する";
   document.getElementById("rag-go").disabled = false;

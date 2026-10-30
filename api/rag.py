@@ -1,12 +1,17 @@
 """RAG環境 (sociax-rag) の状態モニタリング / 起動 / 停止。
 
-本機の RAG(embedding vLLM + Qdrant)を Web UI から起動/停止できるようにする。
+本機の RAG(embedding vLLM)を Web UI から起動/停止できるようにする。
+
+2026-10-31: Qdrant は sociax 側へ移行して本機退役(ロールバック用保持)。
+起動/停止は embedding のみを行う。サービス指定なしの `up -d` は
+Exited 状態の Qdrant を再起動するため使わない。
 
 - 状態: docker compose ps / inspect + embedding /v1/models, qdrant REST の健全性
-- 起動: docker compose up -d (バックグラウンドジョブ)
+  (Qdrant は「停止中」表示が想定状態)
+- 起動: docker compose up -d embedding (バックグラウンドジョブ)
   ※ 排他環境 (atom2 / VRAM 32GB) では switch_models.sh rag を経由し、
-    稼働中 LLM を停止してから embedding を起動する(Qdrant は up -d で補完)
-- 停止: docker compose stop (バックグラウンドジョブ。Qdrant は volume に永続化済み)
+    稼働中 LLM を停止してから embedding を起動する
+- 停止: docker compose stop embedding (バックグラウンドジョブ)
 - ジョブ状態は vllm.py の _job と独立(モデル切替と RAG 操作の並行実行を許可)
 """
 
@@ -276,8 +281,9 @@ def job_status() -> dict:
 def start_rag() -> dict:
     """RAG環境を起動する(バックグラウンド)。既に稼働中の場合は compose が何もしない。
 
+    embedding のみを起動する(Qdrant は 2026-10-31 に退役・ロールバック用保持)。
     排他環境 (atom2) では switch_models.sh rag を実行し、稼働中 LLM を停止してから
-    embedding を起動する(スクリプトが API 応答まで待機)。完了後に qdrant も補完起動。
+    embedding を起動する(スクリプトが API 応答まで待機)。
     """
     if not COMPOSE_FILE.is_file():
         raise ValueError(f"{COMPOSE_FILE} が見つかりません")
@@ -286,14 +292,14 @@ def start_rag() -> dict:
         cmd = [
             "bash", "-c",
             "bash " + str(switch) + " rag && "
-            + " ".join(_compose_cmd("up", "-d")),
+            + " ".join(_compose_cmd("up", "-d", "embedding")),
         ]
         return _start_job("start", cmd)
-    return _start_job("start", _compose_cmd("up", "-d"))
+    return _start_job("start", _compose_cmd("up", "-d", "embedding"))
 
 
 def stop_rag() -> dict:
-    """RAG環境を停止する(バックグラウンド)。Qdrant データは volume に永続化済み。"""
+    """RAG環境を停止する(バックグラウンド)。embedding のみを停止する(Qdrant は退役済み)。"""
     if not COMPOSE_FILE.is_file():
         raise ValueError(f"{COMPOSE_FILE} が見つかりません")
     names = _container_names()
@@ -304,4 +310,4 @@ def stop_rag() -> dict:
     ]
     if not running:
         raise ValueError("RAG環境は稼働していません")
-    return _start_job("stop", _compose_cmd("stop"))
+    return _start_job("stop", _compose_cmd("stop", "embedding"))
