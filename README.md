@@ -2660,9 +2660,11 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   の 5 キー全 null になっていた）。**プロセス内キャッシュなので `sudo systemctl restart
   dgx-spark-api` での復旧が必要**（atom1 は `KILL_MODE=control-group` でモデルは docker
   コンテナ側 = dockerd の cgroup のため、稼働中 TabbyAPI は停止しない）。
-  **2026-11-01 08:35 時点で API 再起動は未実施**（`systemctl restart --no-ask-password` は
-  `Interactive authentication required`。運用者の `sudo` で実施）。未実施の間は prefill/decode は
-  `-` のまま。詳細は実装メモ 2026-11-01 末尾節。以下は 2026-10-28 時点の記録 —
+  **2026-11-01 08:19:38 に `sudo systemctl restart dgx-spark-api` を実施し復旧**（実測: unit は
+  `active`、`tabbyapi-flashnext-4p05` は `Up` のまま = **稼働中 LLM は停止していない**、
+  `/api/vllm/status` の metrics が `prompt_tokens_per_s 46691.9 / generation_tokens_per_s 50.9 /
+  kv_cache 7.53% / e2e 76.4 s / ttft 1.62 s`、`server.log` 直近は 200 OK のみ）。詳細は実装メモ
+  2026-11-01 末尾節。以下は 2026-10-28 時点の記録 —
   2026-10-28 に `2df7683` まで反映・push 済み（**本機が実装元**）。
   取り込み内容は 5 コミット — ornith122b の Cline 設定値対応（`a92c5d5`）、サーマルガード対象の
   コンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中のポーリング緩和と
@@ -3728,3 +3730,12 @@ sudo systemctl restart dgx-spark-api
 curl -s localhost:8080/api/vllm/status | python3 -c "import json,sys; print(json.load(sys.stdin)['active']['metrics'])"
 # → prompt_tokens_per_s / generation_tokens_per_s が数値で返れば復旧
 ```
+
+**実施記録（2026-11-01 08:19:38、運用者実行）** — 上記コマンドで復旧を確認した。
+
+- `systemctl show dgx-spark-api` → `ActiveState=active` / `ExecMainStartTimestamp=08:19:38`
+- `docker ps` → `tabbyapi-flashnext-4p05  Up 17 minutes`（**API 再起動で LLM は停止していない**）
+- `active.metrics` → `requests_running 0 / requests_waiting 0 / kv_cache_usage_pct 7.53 /
+  e2e_latency_s 76.4 / ttft_s 1.62 / prompt_tokens_per_s 46691.9 / generation_tokens_per_s 50.9`
+  （TabbyAPI は直近**完了**リクエストの値なので、新しいリクエストがなければ同値が継続する）
+- `server.log` 直近は `/api/metrics`・`/api/vllm/status`・`/api/thermal` の 200 OK のみ
