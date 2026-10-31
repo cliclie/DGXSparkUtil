@@ -2655,7 +2655,7 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 ### 5. 各機の同期状況
 
 - **atom1 (WhitebearATOM1)**: 2026-11-01 に **SGLang → TabbyAPI 切替で prefill/decode が
-  消えた不具合を修正**（`b21ffbd`。`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの
+  消えた不具合を修正**（`8cacbde`。`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの
   `last` が base=ポートをまたいで残り、TabbyAPI を SGLang と誤判定して `_sglang_metrics(pm={})`
   の 5 キー全 null になっていた）。**プロセス内キャッシュなので `sudo systemctl restart
   dgx-spark-api` での復旧が必要**（atom1 は `KILL_MODE=control-group` でモデルは docker
@@ -3739,3 +3739,9 @@ curl -s localhost:8080/api/vllm/status | python3 -c "import json,sys; print(json
   e2e_latency_s 76.4 / ttft_s 1.62 / prompt_tokens_per_s 46691.9 / generation_tokens_per_s 50.9`
   （TabbyAPI は直近**完了**リクエストの値なので、新しいリクエストがなければ同値が継続する）
 - `server.log` 直近は `/api/metrics`・`/api/vllm/status`・`/api/thermal` の 200 OK のみ
+
+**push**: 2026-11-01 に `git pull --rebase origin main`（Whitebear2026-WSL2 の `709fa47`
+RAG embedding 化を取り込み。**衝突なし** — 本機変更は `api/vllm.py:_engine_kind()` と README）
+ののち `git push origin main`。atom1 / atom2 への反映は各環境で実施する（`git pull --ff-only
+origin main` → Docker 系は `sudo systemctl restart dgx-spark-api`。WSL2 の modelctl 経路は
+`profile` の `engine` で種別を決めるため本バグ無関係で、反映は任意）
