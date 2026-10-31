@@ -263,9 +263,16 @@ def _engine_kind(base: str) -> tuple[str, str]:
     追加プロブ (計 6 秒) を払わず前回種別を返し、10 秒だけ短キャッシュする
     (stale-while-revalidate)。未知のときは "unknown" を返し、get_status 側で
     プロブを払わず metrics={} にする。
+
+    **base (モデルのポート) が変わったら last を破棄する**。/metrics が常に空のエンジン
+    (TabbyAPI は /metrics が 404) では last 採用が serviceinfo 判定を永久にスキップし、
+    前機種の種別に固定される (2026-11-01: SGLang → TabbyAPI 切替で prefill/decode 消失)。
     """
     now = time.time()
     c = _engine_cache
+    if c["base"] != base:
+        # 前機種の種別 (last) を新しい base に継承しない
+        c.update({"base": None, "kind": None, "last": None, "ts": 0.0, "ttl": _ENGINE_TTL})
     if c["base"] == base and now - c["ts"] < c["ttl"]:
         # tabby / unknown は /metrics 本文を使わない (ログ解析で取る) ので取りに行かない。
         # 混雑時に毎回 2 秒払わないため (2026-10-28)

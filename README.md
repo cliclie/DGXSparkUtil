@@ -560,6 +560,11 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   ワーカーが塞がる。`/api/vllm/status` は TCP 接続だけで `busy`(混雑中) を返し、フロントは
   **「推論中」(緑・`ok`)** を表示する(2026-10-30 末尾節。導入時は「稼働中（推論中）」赤)。
   status はエンジン種別・モデル名・ログ末尾をキャッシュして混雑時も 1.6 秒で返す(2026-10-28 節)
+- **エンジン種別キャッシュは base (モデルのポート) をまたがない**: `_engine_kind()` は
+  `/metrics` が空のとき前回種別 (`last`) を採用する。TabbyAPI は `/metrics` が常に 404 なので、
+  `last` が base をまたいで残ると前機種 (SGLang / llama.cpp) に固定されて
+  `/.well-known/serviceinfo` を再検証せず、**prefill/decode が消える**(2026-11-01 実測)。
+  base が変わったら `last` を破棄する。復旧は API 再起動が必要(プロセス内キャッシュのため)
 
 ## 実行
 
@@ -2649,7 +2654,14 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
-- **atom1 (WhitebearATOM1)**: 2026-10-28 に `2df7683` まで反映・push 済み（**本機が実装元**）。
+- **atom1 (WhitebearATOM1)**: 2026-11-01 に **SGLang → TabbyAPI 切替で prefill/decode が
+  消えた不具合を修正**（`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの `last` が
+  base=ポートをまたいで残り、TabbyAPI を SGLang と誤判定して `_sglang_metrics(pm={})` の
+  5 キー全 null になっていた）。**プロセス内キャッシュなので `sudo systemctl restart
+  dgx-spark-api` での復旧が必要**（atom1 は `KILL_MODE=control-group` でモデルは docker
+  コンテナ側 = dockerd の cgroup のため、稼働中 TabbyAPI は停止しない）。詳細は実装メモ
+  2026-11-01 末尾節。以下は 2026-10-28 時点の記録 —
+  2026-10-28 に `2df7683` まで反映・push 済み（**本機が実装元**）。
   取り込み内容は 5 コミット — ornith122b の Cline 設定値対応（`a92c5d5`）、サーマルガード対象の
   コンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中のポーリング緩和と
   GPU クロック実値表示（`8d7ad6c`）、同期状況の記録（`2df7683`）。`sudo systemctl restart
@@ -3644,3 +3656,73 @@ curl -s localhost:8090/api/thermal    # {"enabled":false} に戻る
   両方 false →「API応答なし」`v warn` `rgb(210,153,34)`。判定 7 項目 ALL PASS
 - 情報カード `#vi-status` とモデルタブ `#v-status` で textContent / className /
   `getComputedStyle().color` が一致（ミラー回帰なし）
+
+## SGLang → TabbyAPI 切替で prefill/decode が消えた（エンジン種別キャッシュの last 残留）（2026-11-01 / 本機調査）
+
+**症状**（本機 atom1、2026-11-01 08:03 頃）: 稼働モデルを SGLang 系 (`nanbeige43-33b-fp8`) から
+TabbyAPI (`qwen38flashnextexl3_4p05` / `tabbyapi-flashnext-4p05` :8016) へ切り替えたところ、
+モデルタブの vLLM 行と情報カードの **`prefill` / `decode` が `-` のまま更新されない**
+（`実行/待機` `KVCache` `E2E` `TTFT` もすべて `-`）。
+
+**切り分け**
+
+- `GET /api/vllm/status` の `active.metrics` が
+  `{"requests_running": null, "requests_waiting": null, "kv_cache_usage_pct": null,
+  "e2e_latency_s": null, "ttft_s": null}` で、**`prompt_tokens_per_s` /
+  `generation_tokens_per_s` はキー自体が存在しない**。フロントは `mt.prompt_tokens_per_s` を
+  参照するのでキー欠落は `pickMetric()` 経由で `null` → `-` 表示（`front/index.html` は正常）
+- 同じコードを**別プロセス**で呼ぶと `_engine_kind()` は `tabby`、`_tabbyapi_metrics()` は
+  `prompt_tokens_per_s 22049.3 / generation_tokens_per_s 48.1` を正しく返す
+  → **稼働中プロセスのエンジン種別キャッシュが汚染されている**と特定
+- `_engine_cache["last"]` を `"sglang"` にして :8016 を判定すると `kind="sglang"` になり、
+  `_sglang_metrics(pm={})` の返り値が API の実レスポンスと**キー順まで一致**（完全再現）
+
+**原因**（`api/vllm.py:_engine_kind()`、2026-10-28 `8d7ad6c` で導入）
+
+```python
+elif c["last"]:                      # /metrics が空なら前回種別を無条件採用
+    c.update({"base": base, "kind": c["last"], "ts": now, "ttl": _ENGINE_FAIL_TTL})
+    return c["last"], text          # /.well-known/serviceinfo を二度と叩かない
+```
+
+- `_engine_cache` の `last` は **`base`(ポート) をまたいでリセットされない**
+- TabbyAPI は `/metrics` が **常に 404**（実測 `metrics_code=404`）なので `pm` が常に空
+  → 必ず `last` 節に落ちる
+- 前機種が SGLang だと `last="sglang"` が残り、TabbyAPI を SGLang と誤判定したまま
+  10 秒ごとに `last` を自己更新して**永久に固定**される
+- 誤判定先の `_sglang_metrics(pm={})` は 5 キー全 `null` を返し、
+  `prompt_tokens_per_s` / `generation_tokens_per_s` を生成しない → prefill/decode 消失
+- 影響は `/metrics` を持たないエンジン (**TabbyAPI**) 限定。vLLM / SGLang / llama.cpp /
+  Strata は Prometheus 系列を返すので `last` 節に落ちない。WSL の modelctl 経路
+  (`_modelctl_metrics()`) は `profile` の `engine` で種別を決めるため無関係（atom2 / WSL はセーフ）
+- 発症タイムライン（`docker ps -a` の CreatedAt / Status 実測）:
+  `sglang-nanbeige43-33b-fp8` 07:32:46 作成→07:53 exit、
+  `sglang-nanbeige43-33b-fp8-dflash` 07:52:59 作成→08:01 exit、
+  `tabbyapi-flashnext-4p05` 08:02:59 作成（Up）
+
+**修正**（`api/vllm.py`）— `_engine_kind()` 冒頭で base の変化を検知し判定キャッシュを破棄
+
+```python
+if c["base"] != base:
+    # 前機種の種別 (last) を新しい base に継承しない
+    c.update({"base": None, "kind": None, "last": None, "ts": 0.0, "ttl": _ENGINE_TTL})
+```
+
+同一 base（同一コンテナ）の混雑時 stale-while-revalidate は従来どおり維持される
+（2026-10-28 の「混雑時にプロブを払わない」緩和は失わない）。
+
+**検証**（本機 atom1、2026-11-01。稼働中の LLM には触れず HTTP 読み取りのみ）
+
+- 修正後: `last="sglang"` + `base=:8005` の状態から :8016 を判定 → `kind=tabby`、2 回目も
+  `tabby`（成功 120 秒キャッシュ）。`_tabbyapi_metrics()` は
+  `prompt_tokens_per_s 46691.9 / generation_tokens_per_s 50.9 / kv 7.53% / e2e 76.4 s / ttft 1.62 s`
+- 同一 base で `last="tabby"`・`ttl=0`（混雑を再現）→ `kind=tabby`（緩和の趣旨を維持）
+
+**復旧には API 再起動が必要**（キャッシュはプロセス内状態）。`dgx-spark-api` は監視 API のみで、
+モデルは docker コンテナ（dockerd の cgroup）なので**稼働中 LLM は停止しない**:
+
+```bash
+sudo systemctl restart dgx-spark-api
+curl -s localhost:8080/api/vllm/status | python3 -c "import json,sys; print(json.load(sys.stdin)['active']['metrics'])"
+# → prompt_tokens_per_s / generation_tokens_per_s が数値で返れば復旧
+```
