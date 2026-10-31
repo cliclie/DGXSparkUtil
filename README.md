@@ -2718,7 +2718,25 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
     `git rebase origin/main` を実施したが新規コミットなし（`origin/main` は `a95a7b0` のまま）。
     **atom2 / Whitebear2026 は本コミット未同期** — `git pull --rebase origin main` +
     ブラウザリロードで反映可（API 再起動不要）。詳細は実装メモ 2026-10-30 末尾節）
-- **atom2 (WhitebearATOM2)**: 2026-10-30 に `4a27fa1` まで同期済み（本機。`git fetch --all --prune` +
+- **atom2 (WhitebearATOM2)**: 2026-11-01 に **エンジン種別キャッシュの fix（`8cacbde`）を反映**（本機。
+  `git fetch --all --prune` + `git merge --ff-only origin/main` で `709fa47` → `e8c294e` の **4 コミット**を
+  fast-forward、作業ツリーはクリーン・コンフリクトなし）。取り込み内容は SGLang → TabbyAPI 切替で
+  prefill/decode が消える修正（`api/vllm.py:_engine_kind()` 冒頭で base の変化を検知し `last` を含む判定
+  キャッシュを破棄、`8cacbde`）と README の記録 3 件（`74642c3` / `b364920` / `e8c294e`）。
+  **本バグの発症は atom1 限定**（`/metrics` が常に 404 の TabbyAPI を compose 経路で稼働させたときだけ
+  `last` 採用が `serviceinfo` 再検証を永久にスキップする。atom2 の LLM は Prometheus 系列を返す
+  strata / vLLM / SGLang / llama.cpp で、WSL2 の modelctl 経路のように `profile.engine` で種別を決めない）。
+  ただし修正は**プロセス内キャッシュ**なので README の各機反映手順どおり
+  `sudo systemctl restart dgx-spark-api` を **08:27:26 に実施**（予防的反映。`KILL_MODE=control-group`
+  だが本機のモデルは docker コンテナ = dockerd の cgroup なので巻き込まない。実測: 実施時点で
+  LLM コンテナはすべて `exited`（`strata` / `vllm-qwen38-27b-radiance` / `vllm-gptoss-20b-radiance` /
+  `llama-qwen38-27b-gguf` / `sglang-qwen38-27b-rocm`）、`Up` は `sociax-rag-embedding-1` (healthy) のみ）。
+  実測: unit `active`（MainPID 2952743 / `ExecMainStartTimestamp=Sun 2026-11-01 08:27:26 JST`）、
+  `/` 200（0.005 秒）、`/api/metrics`・`/api/vllm/status` 200、
+  `journalctl -u dgx-spark-api --since 08:27:20` は Stopped → Started のみでエラーなし、
+  稼働ツリーの `api/vllm.py:273` に `if c["base"] != base:` が入っていることを確認。
+  `origin/atom2対応` ブランチは今回の fetch で更新なし。以下は 2026-10-30 時点の記録 —
+  2026-10-30 に `4a27fa1` まで同期済み（本機。`git fetch --all --prune` +
   `git pull --ff-only` で `8205571` → `4a27fa1` の **19 コミット**を fast-forward、作業ツリーはクリーン・
   コンフリクトなし）。取り込み内容は ornith122b（TabbyAPI・ポート 8018）の Cline 設定値対応（`a92c5d5`）、
   サーマルガード対象のコンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中の API
@@ -3745,3 +3763,20 @@ RAG embedding 化を取り込み。**衝突なし** — 本機変更は `api/vll
 ののち `git push origin main`。atom1 / atom2 への反映は各環境で実施する（`git pull --ff-only
 origin main` → Docker 系は `sudo systemctl restart dgx-spark-api`。WSL2 の modelctl 経路は
 `profile` の `engine` で種別を決めるため本バグ無関係で、反映は任意）
+
+**atom2 (whitebearatom2) への反映（2026-11-01 08:27:26 実施）**: `git fetch --all --prune` +
+`git merge --ff-only origin/main` で `709fa47` → `e8c294e` の 4 コミットを fast-forward ののち、
+`sudo systemctl restart dgx-spark-api` でプロセス内キャッシュごと新コードを反映した。
+
+- `systemctl show dgx-spark-api` → `ActiveState=active` / `MainPID=2952743` /
+  `ExecMainStartTimestamp=Sun 2026-11-01 08:27:26 JST`
+- `journalctl -u dgx-spark-api --since 08:27:20` → `Stopping` → `Deactivated successfully` →
+  `Stopped` → `Starting` → `Started` のみ（**エラー・トレースバックなし**）
+- `curl` → `/` 200（0.005 秒）、`/api/metrics` 200、`/api/vllm/status` 200
+- 稼働ツリー `api/vllm.py:273` の `if c["base"] != base:`（キャッシュ破棄）が新プロセスに読み込まれていることを確認
+- **LLM は停止していない**: 実施時点で `docker ps -a` の LLM コンテナはすべて `exited`
+  （`strata` / `vllm-qwen38-27b-radiance` / `vllm-gptoss-20b-radiance` / `llama-qwen38-27b-gguf` /
+  `sglang-qwen38-27b-rocm`）、`Up` は `sociax-rag-embedding-1` (healthy) のみで dockerd の cgroup 側。
+  本機は `KILL_MODE=control-group`（既定）だが README のとおり docker コンテナは巻き込まれない
+- atom2 は本バグの発症条件（`/metrics` が常に 404 の TabbyAPI を compose 経路で稼働）を満たさないため
+  **予防的反映**。Whitebear2026-WSL2 は modelctl 経路（`profile.engine` 判定）なので引き続き反映任意
