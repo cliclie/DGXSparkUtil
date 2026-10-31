@@ -2655,12 +2655,14 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 ### 5. 各機の同期状況
 
 - **atom1 (WhitebearATOM1)**: 2026-11-01 に **SGLang → TabbyAPI 切替で prefill/decode が
-  消えた不具合を修正**（`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの `last` が
-  base=ポートをまたいで残り、TabbyAPI を SGLang と誤判定して `_sglang_metrics(pm={})` の
-  5 キー全 null になっていた）。**プロセス内キャッシュなので `sudo systemctl restart
+  消えた不具合を修正**（`b21ffbd`。`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの
+  `last` が base=ポートをまたいで残り、TabbyAPI を SGLang と誤判定して `_sglang_metrics(pm={})`
+  の 5 キー全 null になっていた）。**プロセス内キャッシュなので `sudo systemctl restart
   dgx-spark-api` での復旧が必要**（atom1 は `KILL_MODE=control-group` でモデルは docker
-  コンテナ側 = dockerd の cgroup のため、稼働中 TabbyAPI は停止しない）。詳細は実装メモ
-  2026-11-01 末尾節。以下は 2026-10-28 時点の記録 —
+  コンテナ側 = dockerd の cgroup のため、稼働中 TabbyAPI は停止しない）。
+  **2026-11-01 08:35 時点で API 再起動は未実施**（`systemctl restart --no-ask-password` は
+  `Interactive authentication required`。運用者の `sudo` で実施）。未実施の間は prefill/decode は
+  `-` のまま。詳細は実装メモ 2026-11-01 末尾節。以下は 2026-10-28 時点の記録 —
   2026-10-28 に `2df7683` まで反映・push 済み（**本機が実装元**）。
   取り込み内容は 5 コミット — ornith122b の Cline 設定値対応（`a92c5d5`）、サーマルガード対象の
   コンテナ名リスト化（`89af358`）とその実戦検証記録（`33b4a3c`）、長文推論中のポーリング緩和と
