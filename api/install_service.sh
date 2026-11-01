@@ -64,6 +64,12 @@ TG_ENABLED="${DGXUTIL_THERMAL:-1}"
 # TG_MONITOR_ONLY=1 なら unit に Environment=THERMAL_CONTAINERS= (空) を注入し、
 # クロック書き換え (nvidia-smi -lgc) が起こらないようにする
 TG_MONITOR_ONLY=0
+# 2026-11-01 案A: CPU 温度と GPU 温度を別センサー・別閾値で監視し、それぞれが GPU
+# クロック (-lgc) と CPU クロック (scaling_max_freq) を絞る groups モード。
+# 既定 0 = 従来の単一ヒステリシス (max(acpitz, GPU温度) + コンテナ名ゲート) を維持。
+# WhitebearATOM1 だけが install_service.env に TG_GROUPS=1 を書く。atom2 は power
+# モードで元々常時監視のため無影響、WSL2 は監視専らなので有効化しない。
+TG_GROUPS="${TG_GROUPS:-0}"
 if [ "${IS_WSL}" = "1" ]; then
   if [ "${DGXUTIL_THERMAL:-}" = "1" ]; then
     TG_ENABLED=1
@@ -80,6 +86,7 @@ fi
 
 TG_TAG=""
 if [ "${TG_MONITOR_ONLY}" = "1" ]; then TG_TAG=" (monitor-only: THERMAL_CONTAINERS=)"; fi
+if [ "${TG_GROUPS}" = "1" ]; then TG_TAG="${TG_TAG} (groups: THERMAL_GROUPS=1)"; fi
 echo "==> API_DIR=${API_DIR} RUN_USER=${RUN_USER} PORT=${PORT} KILL_MODE=${KILL_MODE} LIMIT_NOFILE=${LIMIT_NOFILE:-既定(1024)} thermal-guard=${TG_ENABLED}${TG_TAG}"
 
 echo "==> Stopping any manually started instance (frees port ${PORT})"
@@ -107,6 +114,11 @@ if [ "${TG_ENABLED}" = "1" ]; then
     # 発動対象 (docker コンテナ名) を空にして「読み取り + 状態ファイル更新」だけさせる。
     # Environment= は [Service] セクション内でなければならないので ExecStart の直後に挿入する
     TG_SED+=(-e "s|^ExecStart=.*|&\nEnvironment=THERMAL_CONTAINERS=\nEnvironment=THERMAL_MODE=clock|")
+  fi
+  if [ "${TG_GROUPS}" = "1" ]; then
+    # groups モードを有効化。段の値 (案A) は thermal_guard.sh の既定を使うので、unit に
+    # 必要なのは THERMAL_GROUPS=1 だけ。個別に上書きしたい場合は同じ行追記で増やせる。
+    TG_SED+=(-e "s|^ExecStart=.*|&\nEnvironment=THERMAL_GROUPS=1|")
   fi
   sed "${TG_SED[@]}" "${API_DIR}/${TG_SERVICE}" > "${TG_UNIT_PATH}"
   chmod 644 "${TG_UNIT_PATH}"

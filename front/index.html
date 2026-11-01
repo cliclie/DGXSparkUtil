@@ -2094,16 +2094,35 @@ function thermalState() {
       text: `電力制限 ${t.power_cap_w}W (GPU ${Math.round(t.temp_c ?? 0)}℃)`,
     };
   }
-  if (!t.locked_mhz) return null; // 0 = nvidia-smi -rgc 解除
-  // 監視対象が 2 つ (CPU/GPU 温度) なので、制限値に引っかかった = temp_c (=max) を生んだ方
+  // groups モード (2026-11-01 案A) は CPU 温度と GPU 温度を別センサー・別閾値で見る。
+  // 制限は GPU クロック (-lgc) と CPU クロック (scaling_max_freq) の 2 系統になる。
   const a = Math.round(t.acpitz_c ?? 0);
   const g = Math.round(t.gpu_c ?? 0);
-  const cpuSide = a >= g;
+  const mhz = t.locked_mhz > 0 ? Math.round(t.locked_mhz) : 0;
+  const cpuKhz = t.cpu_locked_khz > 0 ? Math.round(t.cpu_locked_khz) : 0;
+  if (!mhz && !cpuKhz) return null; // 両方解除 = -rgc + scaling_max_freq 復帰
+  // 監視対象が 2 つ (CPU/GPU 温度) なので、制限値に引っかかった = 自セグメントの閾値を
+  // 超えた側を犯人として着色する。groups モードはセグメント閾値と比較し、両方超えて
+  // いるなら温度が高い方 (実測で acpitz > gpu が 253/254)。従来モードは max 側。
+  let cpuSide;
+  if (t.groups) {
+    const ch = a >= (t.cpu_high_c ?? 999);
+    const gh = g >= (t.gpu_high_c ?? 999);
+    cpuSide = ch && gh ? a >= g : ch;
+  } else {
+    cpuSide = a >= g;
+  }
+  const parts = [];
+  if (mhz) parts.push(t.groups ? `GPU ${mhz}MHz` : `${mhz}MHz`);
+  if (cpuKhz) parts.push(`CPU ${Math.round(cpuKhz / 1000)}MHz`);
+  const crit =
+    (t.lock_crit_mhz != null && mhz > 0 && mhz <= t.lock_crit_mhz) ||
+    (t.cpu_lock_crit_khz != null && cpuKhz > 0 && cpuKhz <= t.cpu_lock_crit_khz);
   return {
-    crit: t.lock_crit_mhz != null && t.locked_mhz <= t.lock_crit_mhz,
+    crit,
     watchId: cpuSide ? "g-cpu-temp" : "g-gpu-temp",
     limitId: "g-gpu-clock",
-    text: `クロック制限 ${t.locked_mhz}MHz (${cpuSide ? "CPU" : "GPU"} ${cpuSide ? a : g}℃)`,
+    text: `クロック制限 ${parts.join(" / ")} (${cpuSide ? "CPU" : "GPU"} ${cpuSide ? a : g}℃)`,
   };
 }
 

@@ -14,6 +14,9 @@ ExecStart=__API_DIR__/thermal_guard.sh
 # 解除しきい値を 85℃ にする (80℃ まで冷やすのを待たない)。
 # 実測: 10〜29 秒周期で -lgc を叩いても vLLM は壊れなかった (Xid 0 件 / prefill PASS)。
 # 90℃ までフルクロックで走る分、速度は固定ロックより出る。
+# 注: THERMAL_GROUPS=1 (2026-11-01 案A) のときこの LOW_C は使わない。CPU 群 / GPU 群
+#     それぞれの LOW (既定 82℃ / 78℃) に両方が下回って LOW_SECS (既定 10 秒) 続いて
+#     初めて解除する。
 Environment=THERMAL_LOW_C=85
 # 発動時のロック値。-lgc は指定値を下位の段に丸める (1665 -> 実測 1644MHz)。
 # 1500 -> 1475MHz は base 1665MHz の「以下」で、prefill を 2285→1110 T/s (49%) まで

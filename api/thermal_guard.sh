@@ -24,6 +24,25 @@
 # 259,040 tok prefill で acpitz 97℃ を実測したため ExLlama 系も対象に含めた。
 # 終了時は必ず -rgc する。低クロックに固定されたまま性能を失い続ける方が害が大きい。
 #
+# --- clock groups (2026-11-01 案A / THERMAL_GROUPS=1) ---------------------------
+# モデル (コンテナ名) を問わず常時監視し、CPU 温度と GPU 温度を別々のセンサー・別々の
+# 閾値で見て、それぞれが GPU クロックと CPU クロックを絞る。発動は OR、解除は AND。
+# 実測根拠:
+#   2026-10-16 hw_watch 240,273 サンプル: acpitz が nvidia-smi GPU 温度を平均 4.9℃・
+#   最大 30℃ 上回る (253/254 で CPU 側が高い)。nvidia-smi の最大は 85℃ なので、
+#   GPU 側に 90℃ を置くと永久に発動しない。
+#   ガード非動作時に acpitz 97℃ を実測 (2026-10-28 Ornith 122B 259K prefill)。
+#   本体は acpitz 104℃ で落ちる。上昇 0.4℃/秒。
+# 段:
+#   CPU 群 = max(TSOC,TS0E,TS0P,TS1E,TS1P,TUNC)   ※TGPU を除く
+#     >= CPU_CRIT(93)  -> 大核 2400 / 小核 1800 MHz   (104℃ まで 11℃ の余裕)
+#     >= CPU_HIGH(88)  -> 大核 3200 / 小核 2400 MHz
+#   GPU 群 = max(TGPU, nvidia-smi temperature.gpu)
+#     >= GPU_CRIT(90)  -> -lgc 1000MHz   (NVML GPUShutdownTempThreshold=90 と一致)
+#     >= GPU_HIGH(84)  -> -lgc 1665MHz   (実効 1644MHz。10/16 に acpitz 90℃ 頭打ちを実測)
+#   解除は CPU_LOW(82) と GPU_LOW(78) の両方へ LOW_SECS(10) 秒継続して初めて。
+# CPU 群 / GPU 群の区別は device/path の末尾名 (\_TZ_.TSOC 等) で行う。
+#
 # --- power (R9700) --------------------------------------------------------------
 # 背景: 従来は llm-gpu-powercap.service (oneshot) が power1_cap を 210W に常時固定して
 # いた。80℃ 未満でも性能を捨ててしまうので、GPU 温度に応じて 3 段で動かす。
@@ -83,6 +102,33 @@ if [ "$MODE" = power ]; then
   INTERVAL="${THERMAL_INTERVAL_S:-1}"
 fi
 
+# --- clock groups (2026-11-01 案A: CPU 温度と GPU 温度を別々に監視) -------------
+# THERMAL_GROUPS=1 で有効。既定 0 = 従来の単一ヒステリシス (max(acpitz, GPU温度)) を
+# そのまま維持するので atom2 ほか既存機は無影響。WhitebearATOM1 の unit だけで有効化し、
+# 監視はモデル (コンテナ名) を問わない常時監視にする。
+GROUPS="${THERMAL_GROUPS:-0}"
+# --- CPU 側: acpitz のうち TGPU を除く zone の最大 ------------------------------
+CPU_HIGH="${THERMAL_CPU_HIGH_C:-88}"
+CPU_CRIT="${THERMAL_CPU_CRIT_C:-93}"
+CPU_LOW="${THERMAL_CPU_LOW_C:-82}"
+# 大核 (policy5-9,15-19 / cpuinfo_max_freq 3900000) と小核 (policy0-4,10-14 / 2808000)
+# で段を分ける。cpuinfo_max_freq >= CPU_FAST_MIN_KHZ を大核とみなす。
+CPU_LOCK_HIGH="${THERMAL_CPU_LOCK_HIGH_KHZ:-3200000}"
+CPU_LOCK_CRIT="${THERMAL_CPU_LOCK_CRIT_KHZ:-2400000}"
+CPU_SMALL_LOCK_HIGH="${THERMAL_CPU_SMALL_LOCK_HIGH_KHZ:-2400000}"
+CPU_SMALL_LOCK_CRIT="${THERMAL_CPU_SMALL_LOCK_CRIT_KHZ:-1800000}"
+CPU_FAST_MIN="${THERMAL_CPU_FAST_MIN_KHZ:-3500000}"
+# --- GPU 側: acpitz の TGPU と nvidia-smi temperature.gpu の最大 ---------------
+GPU_HIGH="${THERMAL_GPU_HIGH_C:-84}"
+GPU_CRIT="${THERMAL_GPU_CRIT_C:-90}"
+GPU_LOW="${THERMAL_GPU_LOW_C:-78}"
+GPU_LOCK_HIGH="${THERMAL_GPU_LOCK_HIGH_MHZ:-1665}"
+GPU_LOCK_CRIT="${THERMAL_GPU_LOCK_CRIT_MHZ:-1000}"
+# acpitz の zone は type が 7 つ全部 "acpitz" なので区別できない。device/path
+# (\_TZ_.TSOC 等) の末尾名で判別する。index 依存は ACPI 列挙順に依存して壊れるため使わない。
+CPU_ZONES="${THERMAL_CPU_ACPITZ_ZONES:-TSOC TS0E TS0P TS1E TS1P TUNC}"
+GPU_ZONES="${THERMAL_GPU_ACPITZ_ZONES:-TGPU}"
+
 STATE="${THERMAL_STATE_FILE:-/run/thermal/state}"
 
 acpitz_max_c() {
@@ -113,6 +159,80 @@ apply() {  # $1 = 狙い MHz。0 は解除
   else
     nvidia-smi -lgc "$1,$1" >/dev/null 2>&1
   fi
+}
+
+# ---------------------------------------------------------------- groups 用センサー
+zone_name() {  # $1 = zone dir。device/path (\_TZ_.TSOC) の末尾名を返す
+  p="$(cat "$1/device/path" 2>/dev/null)"
+  echo "${p##*.}"
+}
+
+acpitz_group_max_c() {  # $1 = zone 名リスト。1 つも一致しなければ全 acpitz の最大に退避
+  max=0
+  found=0
+  for z in /sys/class/thermal/thermal_zone*; do
+    [ "$(cat "$z/type" 2>/dev/null)" = "acpitz" ] || continue
+    n="$(zone_name "$z")"
+    hit=0
+    for w in $1; do
+      [ "$n" = "$w" ] && { hit=1; break; }
+    done
+    [ "$hit" -eq 1 ] || continue
+    t="$(cat "$z/temp" 2>/dev/null)"
+    [ -n "$t" ] || continue
+    found=1
+    c=$((t / 1000))
+    [ "$c" -gt "$max" ] && max=$c
+  done
+  [ "$found" -eq 1 ] || { acpitz_max_c; return; }
+  echo "$max"
+}
+
+gpu_group_max_c() {  # max(acpitz の TGPU, nvidia-smi temperature.gpu)
+  a="$(acpitz_group_max_c "$GPU_ZONES")"
+  g="$(gpu_query temperature.gpu)"
+  [ -n "$g" ] || g=0
+  [ "$g" -gt "$a" ] && echo "$g" || echo "$a"
+}
+
+gpu_want_mhz() {  # $1 = GPU 温度。0 は解除
+  [ "$1" -ge "$GPU_CRIT" ] && { echo "$GPU_LOCK_CRIT"; return; }
+  [ "$1" -ge "$GPU_HIGH" ] && { echo "$GPU_LOCK_HIGH"; return; }
+  echo 0
+}
+
+cpu_want_khz() {  # $1 = CPU 温度。出力は "<大核 kHz> <小核 kHz>"。0 は解除
+  [ "$1" -ge "$CPU_CRIT" ] && { echo "$CPU_LOCK_CRIT $CPU_SMALL_LOCK_CRIT"; return; }
+  [ "$1" -ge "$CPU_HIGH" ] && { echo "$CPU_LOCK_HIGH $CPU_SMALL_LOCK_HIGH"; return; }
+  echo "0 0"
+}
+
+# ---------------------------------------------------------------- groups 用 CPU クロック
+cpu_policies() { ls -d /sys/devices/system/cpu/cpufreq/policy* 2>/dev/null; }
+
+apply_cpu() {  # $1 = 大核 kHz, $2 = 小核 kHz。cpuinfo_max_freq で上限クランプする
+  for p in $(cpu_policies); do
+    mx="$(cat "$p/cpuinfo_max_freq" 2>/dev/null)"
+    [ -n "$mx" ] || continue
+    if [ "$mx" -ge "$CPU_FAST_MIN" ]; then v="$1"; else v="$2"; fi
+    [ "$v" -gt "$mx" ] && v="$mx"
+    [ "$v" -gt 0 ] || continue
+    f="$p/scaling_max_freq"
+    # 書き込み不可の policy を素通しすると dash がリダイレクト失敗を自前で行に吐き、
+    # journal が 20 行 x 2 秒で埋まる。unit は root なので通常は常に書き込み可。
+    [ -w "$f" ] || continue
+    echo "$v" > "$f" 2>/dev/null
+  done
+}
+
+reset_cpu() {  # 全 policy を cpuinfo_max_freq に戻す (低クロック固定を残さない)
+  for p in $(cpu_policies); do
+    mx="$(cat "$p/cpuinfo_max_freq" 2>/dev/null)"
+    [ -n "$mx" ] || continue
+    f="$p/scaling_max_freq"
+    [ -w "$f" ] || continue
+    echo "$mx" > "$f" 2>/dev/null
+  done
 }
 
 # ---------------------------------------------------------------- power 用 (R9700)
@@ -164,10 +284,79 @@ on_exit() {
     [ -n "$CAPF" ] && echo "$((CAP_MAX * 1000000))" > "$CAPF" 2>/dev/null
   else
     nvidia-smi -rgc >/dev/null 2>&1
+    [ "$GROUPS" = 1 ] && reset_cpu
   fi
   exit 0
 }
 trap on_exit EXIT TERM INT
+
+# ------------------------------------------------- clock (GB10) groups (案A 2026-11-01)
+# CPU 温度 (acpitz の TGPU 以外) と GPU 温度 (TGPU と nvidia-smi の max) を別々に監視し、
+# それぞれの段で GPU クロック (-lgc) と CPU クロック (scaling_max_freq) を絞る。
+# 発動は OR (どちらか一方でも HIGH 以上で即発動)、解除は AND (両方が LOW 以下を
+# LOW_SECS 秒継続)。コンテナ名による稼働判定は行わない = モデルを問わず常時監視。
+loop_clock_groups() {
+  cur_gpu=0
+  cur_cpu_f=0
+  cur_cpu_s=0
+  low_count=0
+  # 起動時は実状態を知らない (手動 -lgc / scaling_max_freq の残留)。必ず解除して始める。
+  nvidia-smi -rgc >/dev/null 2>&1
+  reset_cpu
+  echo "thermal-guard start: mode=clock groups=1 cpu=${CPU_HIGH}/${CPU_CRIT}/${CPU_LOW}C lock=${CPU_LOCK_HIGH}/${CPU_LOCK_CRIT}kHz small=${CPU_SMALL_LOCK_HIGH}/${CPU_SMALL_LOCK_CRIT}kHz gpu=${GPU_HIGH}/${GPU_CRIT}/${GPU_LOW}C lock=${GPU_LOCK_HIGH}/${GPU_LOCK_CRIT}MHz low_secs=${LOW_SECS} interval=${INTERVAL}s zones_cpu=${CPU_ZONES} zones_gpu=${GPU_ZONES}" >&2
+
+  while :; do
+    a="$(acpitz_group_max_c "$CPU_ZONES")"
+    g="$(gpu_group_max_c)"
+
+    set -- $(cpu_want_khz "$a")
+    wf="$1"
+    ws="$2"
+    wg="$(gpu_want_mhz "$g")"
+
+    if [ "$wg" -gt 0 ] || [ "$wf" -gt 0 ]; then
+      # 発動中。自セグメントが LOW を超えている間は解除要求を無視 (ヒステリシス)
+      low_count=0
+      if [ "$wg" -eq 0 ] && [ "$g" -gt "$GPU_LOW" ]; then wg="$cur_gpu"; fi
+      if [ "$wf" -eq 0 ] && [ "$a" -gt "$CPU_LOW" ]; then wf="$cur_cpu_f"; ws="$cur_cpu_s"; fi
+    elif [ "$a" -le "$CPU_LOW" ] && [ "$g" -le "$GPU_LOW" ]; then
+      # 両群が LOW 以下。LOW_SECS 秒続いて初めて解除
+      low_count=$((low_count + 1))
+      if [ "$low_count" -lt "$((LOW_SECS / INTERVAL))" ]; then
+        wg="$cur_gpu"; wf="$cur_cpu_f"; ws="$cur_cpu_s"
+      fi
+    else
+      # 片方が LOW を超えている = 解除条件 (AND) を満たさない。現状維持
+      low_count=0
+      wg="$cur_gpu"; wf="$cur_cpu_f"; ws="$cur_cpu_s"
+    fi
+
+    if [ "$wg" -ne "$cur_gpu" ]; then
+      apply "$wg"
+      echo "thermal-guard: GPU ${g}C -> ${wg}MHz (cpu=${a}C)" >&2
+      cur_gpu="$wg"
+    fi
+    if [ "$wf" -ne "$cur_cpu_f" ] || [ "$ws" -ne "$cur_cpu_s" ]; then
+      if [ "$wf" -eq 0 ]; then reset_cpu; else apply_cpu "$wf" "$ws"; fi
+      echo "thermal-guard: CPU ${a}C -> ${wf}/${ws}kHz (gpu=${g}C)" >&2
+      cur_cpu_f="$wf"
+      cur_cpu_s="$ws"
+    fi
+
+    t="$a"
+    [ "$g" -gt "$t" ] && t="$g"
+    hc="$CPU_HIGH"; [ "$GPU_HIGH" -lt "$hc" ] && hc="$GPU_HIGH"
+    cc="$CPU_CRIT"; [ "$GPU_CRIT" -lt "$cc" ] && cc="$GPU_CRIT"
+    lc="$CPU_LOW";  [ "$GPU_LOW" -lt "$lc" ] && lc="$GPU_LOW"
+    printf '{"ts":%s,"enabled":true,"mode":"clock","groups":true,"temp_c":%s,"acpitz_c":%s,"gpu_c":%s,"clock_mhz":%s,"locked_mhz":%s,"cpu_locked_khz":%s,"cpu_locked_small_khz":%s,"model_running":1,"low_count":%s,"high_c":%s,"crit_c":%s,"low_c":%s,"lock_high_mhz":%s,"lock_crit_mhz":%s,"cpu_high_c":%s,"cpu_crit_c":%s,"cpu_low_c":%s,"cpu_lock_high_khz":%s,"cpu_lock_crit_khz":%s,"gpu_high_c":%s,"gpu_crit_c":%s,"gpu_low_c":%s,"gpu_lock_high_mhz":%s,"gpu_lock_crit_mhz":%s}\n' \
+      "$(date +%s)" "$t" "$a" "$g" "$(gpu_query clocks.sm)" "$cur_gpu" "$cur_cpu_f" "$cur_cpu_s" \
+      "$low_count" "$hc" "$cc" "$lc" "$GPU_LOCK_HIGH" "$GPU_LOCK_CRIT" \
+      "$CPU_HIGH" "$CPU_CRIT" "$CPU_LOW" "$CPU_LOCK_HIGH" "$CPU_LOCK_CRIT" \
+      "$GPU_HIGH" "$GPU_CRIT" "$GPU_LOW" "$GPU_LOCK_HIGH" "$GPU_LOCK_CRIT" > "$STATE" 2>/dev/null
+
+    sleep "$INTERVAL"
+  done
+}
 
 # ---------------------------------------------------------------- clock (GB10)
 loop_clock() {
@@ -291,7 +480,10 @@ loop_power() {
   done
 }
 
-case "$MODE" in
-  power) loop_power ;;
-  *) loop_clock ;;
-esac
+if [ "$MODE" = power ]; then
+  loop_power
+elif [ "$GROUPS" = 1 ]; then
+  loop_clock_groups
+else
+  loop_clock
+fi
