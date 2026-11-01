@@ -1710,6 +1710,11 @@ thermal-guard.service (root)  ── 2 秒ループ ──> nvidia-smi -lgc / -r
 
 ### 3 段ヒステリシス
 
+> **2026-11-01 改訂**: 本機 (WhitebearATOM1) は `THERMAL_GROUPS=1` で **CPU 群と GPU 群を
+> 分けた 2 系統の 3 段ヒステリシス**に切り替えた（末尾「CPU 群と GPU 群を分けた段に改訂
+> （2026-11-01）」節）。以下は**既定（groups 無効）の従来仕様**で、atom2 (power モード)
+> と WSL2 はこのまま。
+
 制御変数は `max(acpitz 最高値, GPU温度)`。
 
 | 条件 | 動作 |
@@ -2653,6 +2658,18 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 `magn-headless` と `dgx-spark-api` を両方再起動すること。`config.py` は import 時に `.env` を読む）。
 
 ### 5. 各機の同期状況
+
+- **atom1 (WhitebearATOM1)**: 2026-11-01 に **サーマルガードを CPU 群 / GPU 群の分離段に改訂**
+  （`089af1b`）。`api/thermal_guard.sh` に `loop_clock_groups()` を追加し、CPU 温度（acpitz の
+  `TGPU` 以外）と GPU 温度（`TGPU` と `nvidia-smi` の max）を別々の閾値で見て、それぞれが GPU
+  クロック（`-lgc`）と CPU クロック（`scaling_max_freq`）を絞る。発動は OR、解除は AND、
+  コンテナ名ゲートを通さない常時監視。**既定は `THERMAL_GROUPS=0` = 従来動作**なので、atom2
+  （power モードで元々常時監視・`api/install_service.env` を持たない）と WSL2（監視専ら）は
+  **無影響**。本機固有の有効化は `api/install_service.env`（git 管理外）の `TG_GROUPS=1` で、
+  unit への `Environment=THERMAL_GROUPS=1` 注入と `systemctl restart thermal-guard` は
+  **root 作業で未実施**（2026-11-01 11:55 時点）。フロントは `cpu_locked_khz` を読むようにした
+  （静的配信なのでブラウザリロードで反映）。詳細は末尾「CPU 群と GPU 群を分けた段に改訂
+  （2026-11-01）」節
 
 - **atom1 (WhitebearATOM1)**: 2026-11-01 に **SGLang → TabbyAPI 切替で prefill/decode が
   消えた不具合を修正**（`8cacbde`。`api/vllm.py:_engine_kind()` のみ。エンジン種別キャッシュの
@@ -3801,3 +3818,122 @@ origin main` → Docker 系は `sudo systemctl restart dgx-spark-api`。WSL2 の
   本機は `KILL_MODE=control-group`（既定）だが README のとおり docker コンテナは巻き込まれない
 - atom2 は本バグの発症条件（`/metrics` が常に 404 の TabbyAPI を compose 経路で稼働）を満たさないため
   **予防的反映**。Whitebear2026-WSL2 は modelctl 経路（`profile.engine` 判定）なので引き続き反映任意
+
+## CPU 群と GPU 群を分けた段に改訂（2026-11-01 / 本機 = WhitebearATOM1 のみ）
+
+### きっかけ
+
+2026-11-01 10:40 に本機が**ログ皆無のままハードリセット**した。`journalctl -b -1` は最終行が
+10:40:36（`dgx-spark-api` の通常アクセス）で打ち切られ、`/sys/fs/pstore` は空、BMC/iDRAC は
+存在せず、`nvidia-bug-report.log.gz` にも thermal イベントは無い。OS が 1 行も書けないまま
+落ちた = **HW / FW 側のサーマルシャットダウン**の形跡。
+
+その時刻の `thermal-guard.service` は**対象コンテナが非稼働**だったため `model_running=0` で
+**完全に非動作**だった。既定の対象リスト `vllm-nemotron120b` / `tabbyapi-ornith122b` は
+2026-11-01 時点で**どちらも停止中**、実稼働の `tabbyapi-flashnext-4p05` は**リスト外**だった。
+
+### 実測（`logs/hw_watch.log` 240,273 サンプル / 2026-10-16 07:06〜22:58）
+
+`acpitz` の zone は 7 個すべて `type=acpitz` で区別できない。`device/path` の末尾名で分けた:
+
+| 群 | zone 名 | index |
+|---|---|---|
+| CPU | `TSOC` `TS0E` `TS0P` `TS1E` `TS1P` `TUNC` | 0,1,2,3,4,6 |
+| GPU | `TGPU` | 5 |
+
+- `nvidia-smi` の GPU 温度の最大は **85℃**（`TGPU` の最大も 85℃）
+- CPU 群の最大は **94℃**。**acpitz が nvidia-smi を平均 4.9℃・最大 30℃ 上回り**、
+  同時刻比較 254 サンプル中 **253 で CPU 側が高い**
+- NVML の `GPUShutdownTempThreshold` は **90℃**、本体の acpitz 停止線は **104℃**
+- 従来段（HIGH 90 / CRIT 98 / LOW 85）は **GPU 側に 90℃ が来ない**（実測最大 85℃）ため
+  GPU 単独では発動せず、**CRIT 98℃ は acpitz 停止線まで 6℃**しかなかった
+
+### 段（案A）
+
+`THERMAL_GROUPS=1`。発動は**OR**（片方でも HIGH 以上で即発動）、解除は**AND**（両群が LOW
+以下を 10 秒継続）。コンテナ名ゲートは使わない = **モデルを問わず常時監視**。
+
+| 群 | センサー | CRIT | HIGH | LOW（解除） |
+|---|---|---|---|---|
+| CPU | max(`TSOC,TS0E,TS0P,TS1E,TS1P,TUNC`) | **93℃** → 大核 2400 / 小核 1800 MHz | **88℃** → 大核 3200 / 小核 2400 MHz | **82℃**×10 秒 |
+| GPU | max(`TGPU`, `nvidia-smi temperature.gpu`) | **90℃** → `-lgc 1000,1000` | **84℃** → `-lgc 1665,1665` | **78℃**×10 秒 |
+
+- CPU の CRIT 93℃ は停止線 104℃ まで **11℃**（従来 CRIT 98℃ の 6℃ より広い）
+- GPU の CRIT 90℃ は NVML の `GPUShutdownTempThreshold=90` と一致
+- GPU の HIGH 84℃ は実測最大 85℃ に重なるので**実負荷で発動する**（従来 HIGH 90℃は発動不能）
+- CPU クロックは `scaling_max_freq` を policy ごとに書く。大核（`policy5-9,15-19` /
+  `cpuinfo_max_freq=3900000`）と小核（`policy0-4,10-14` / `2808000`）を
+  `cpuinfo_max_freq >= THERMAL_CPU_FAST_MIN_KHZ`（既定 3500000）で判別し、**指定値がその
+  policy の最大値を超えたら最大値にクランプ**する
+- 解除は `nvidia-smi -rgc` と `scaling_max_freq = cpuinfo_max_freq` への復帰。
+  `trap ... EXIT TERM INT` と起動時に必ず両方行う（低クロック固定を残さない）
+
+### 変更ファイル
+
+コミット `089af1b`（`api/` と `front/` の 4 ファイル。README は後続の docs コミット）。
+
+- `api/thermal_guard.sh` — `loop_clock_groups()` を追加（489 行）。zone 名分離は
+  `acpitz_group_max_c()` / `gpu_group_max_c()`。既定は `THERMAL_GROUPS=0` = **従来動作のまま**
+- `api/install_service.sh` — `TG_GROUPS=1` で unit に `Environment=THERMAL_GROUPS=1` を注入
+- `api/install_service.env`（git 管理外・本機固有）— `TG_GROUPS=1` を記載。
+  **atom2 はこのファイルを持たないので従来どおり**。WSL2 は監視専らなので有効化しない
+- `api/thermal-guard.service` — `THERMAL_LOW_C=85` は groups モードで使わない注記
+- `front/index.html` — `thermalState()` が `cpu_locked_khz` を読む。犯人パネルの判定は
+  groups モードで**セグメント閾値**と比較する（従来モードは `max` 側で不変）
+
+### 状態ファイル（`/run/thermal/state`）
+
+`groups: true` と段の値が増える。`temp_c` / `acpitz_c` / `gpu_c` / `locked_mhz` /
+`lock_crit_mhz` は従来キーのまま（`acpitz_c` = CPU 群、`gpu_c` = GPU 群）。新規は
+`cpu_locked_khz`（大核の実効 kHz。0 = 復帰）・`cpu_locked_small_khz`・
+`cpu_high_c` / `cpu_crit_c` / `cpu_low_c`・`gpu_high_c` / `gpu_crit_c` / `gpu_low_c`・
+`cpu_lock_high_khz` / `cpu_lock_crit_khz`・`gpu_lock_high_mhz` / `gpu_lock_crit_mhz`。
+`model_running` は常時監視なので **1 固定**。
+
+### 検証
+
+`sh -n` / `dash -n`（thermal_guard.sh）と `bash -n`（install_service.sh）通過。段の判定は
+ループ呼び出しを無効化して source し、実機センサーと擬似 policy で確認した:
+
+| 入力 | 実測出力 |
+|---|---|
+| zone 分離 | CPU 群 = zone 0,1,2,3,4,6 の max / GPU 群 = zone 5 (`TGPU`) と `nvidia-smi` の max |
+| CPU 87 / 88 / 92 / 93℃ | 解除 / `3200000 2400000` / `3200000 2400000` / `2400000 1800000` |
+| GPU 83 / 84 / 89 / 90℃ | 解除 / `1665` / `1665` / `1000` |
+| `apply_cpu 3200000 2400000` | 小核 policy = 2400000、大核 policy = 3200000 |
+| `apply_cpu 4000000 3000000` | 小核 = **2808000**、大核 = **3900000** にクランプ |
+| `reset_cpu` | 小核 2808000 / 大核 3900000 に復帰 |
+
+フロントは `thermalState()` を node で 9 ケース実行し、groups の CPU のみ HIGH / GPU のみ
+HIGH / 両方 CRIT / 解除、従来 clock の発動・解除、power の発動・最大（制限なし）、unit 停止を
+確認。**従来 clock と power の表示文字列は従来と同一**（`クロック制限 1665MHz (CPU 90℃)`）。
+groups の発動時は `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)`。
+
+### 反映（root 作業）
+
+```
+cd ~/DGXSparkUtil
+printf '[Service]\nEnvironment=THERMAL_GROUPS=1\n' \
+  | sudo tee /etc/systemd/system/thermal-guard.service.d/groups.conf
+sudo systemctl daemon-reload && sudo systemctl restart thermal-guard
+journalctl -u thermal-guard -n 3 --no-pager   # "groups=1 cpu=88/93/82C ... gpu=84/90/78C" が出る
+cat /run/thermal/state                         # "groups":true が入る
+```
+
+`install_service.sh` を再実行する運用（`sudo bash api/install_service.sh`）では
+`api/install_service.env` の `TG_GROUPS=1` から自動注入される（`==> ... thermal-guard=1
+(groups: THERMAL_GROUPS=1)` と表示される）。
+
+### 未検証・留意
+
+- **CPU クロック制限は GB10 の CPPC 系で実戦未検証**。`scaling_max_freq` に書いても
+  `scaling_cur_freq` / `cpuinfo_cur_freq` が CPPC 側で無視されることがある。反映は
+  `cat /sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq` で確認する
+- GPU HIGH 84℃ は実測最大 85℃ に重なるので**発動頻度が上がる**（prefill 中に 1665 MHz へ
+  落ちる時間が増える）。2026-10-16 実測で 1665 MHz 段の prefill は −10% 相当
+- 10〜29 秒周期で `-lgc` を叩く挙動は vLLM で非破壊を確認済み（2026-10-16）。
+  **TabbyAPI / ExLlama 系での連続発動は未確認**
+- 発動中に `scaling_max_freq` を書く側は本 unit だけ。`compose/switch_models.sh` には
+  `cpufreq` / `scaling_max_freq` が**存在しない**（2026-11-01 grep で確認）ので干渉源は無い。
+  上記 2026-10-16 節の「`switch_models.sh` 側の GPU 制御は削除した、cpufreq 側は残す」の
+  cpufreq 記述は現在あたらない
