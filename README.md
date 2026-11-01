@@ -2924,6 +2924,27 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   「API応答なし」`v warn` `rgb(210, 153, 34)`（ミラー回帰なし・atom1 の CDP 実測値と一致）。
   `/api/platform` は `platform:"wsl"`、`/`・`/api/metrics`・`/api/thermal` は 200、
   `dgx-spark-api` / `thermal-guard` は active のまま。詳細は 2026-10-30 末尾節）
+  **2026-11-01: 本機でリモートの更新 8 コミット（`4a27fa1` → `87eb456`）を反映した**
+  （`git fetch --all --prune` + `git reset --hard origin/main`、作業ツリーはクリーン・コンフリクトなし。
+  untracked の `api/install_service.env`（`PORT=8090` / `KILL_MODE=process` / `DGXUTIL_THERMAL=1`）は
+  消えていないことを `/tmp` のバックアップとの diff で確認。取り込み内容はエンジン種別キャッシュの
+  `last` 残留 fix（SGLang → TabbyAPI 切替で prefill/decode が消える、`api/vllm.py:_engine_kind()` 冒頭で
+  base の変化を検知して `last` を含むキャッシュを破棄、`8cacbde`）、RAG 監視・起動/停止を embedding のみ
+  にして退役した Qdrant を再起動しない変更（`c144117` / `709fa47`、`api/rag.py` の `SERVICES` から
+  `qdrant` を除去）、README の記録 5 件（`3396c9d` / `74642c3` / `b364920` / `e8c294e` / `87eb456`）。
+  **`api/` の変更があるため `sudo systemctl restart dgx-spark-api` を 09:40:09 に実施**。本機の unit は
+  `KillMode=process`（`install_service.env` の `KILL_MODE=process`）でモデルは WSL2 の modelctl 経路
+  （`api/wsl_modelctl_bridge.sh`）なので、稼働中の `strataq3` を停止せずに反映できた。実測: unit `active`
+  （MainPID 2134579 / `ExecMainStartTimestamp=Sun 2026-11-01 09:40:09 JST` / `NRestarts=0`）、
+  `/`・`/api/platform`・`/api/metrics`・`/api/vllm/status`・`/api/thermal`・`/api/rag/status` がすべて 200
+  （最大 0.054 秒）、`journalctl -u dgx-spark-api --since 09:40:05` は Stopped → Started のみでエラーなし、
+  `api/server.log` 直近も 200 OK のみ。稼働ツリーの `api/vllm.py:273` に `if c["base"] != base:` が入って
+  いることを確認し、`venv` で `import rag` して `SERVICES == ['embedding']`（qdrant 除去）を確認。
+  `/api/vllm/status` の `strataq3` は `running` / `ready=true` / `engine=strata` を維持（`prefill_tps` /
+  `decode_tps` はアイドル時のため null で、推論時に値が出ればよい）。フロントは静的配信のためブラウザ
+  リロードで反映、配信中の `/` はリポジトリの `front/index.html` とバイト一致。`requirements.txt` /
+  `requirements.lock` は差分ゼロなので venv の依存更新は不要、`thermal-guard` も `api/` 対象外で
+  active のまま再起動不要）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
