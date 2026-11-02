@@ -20,9 +20,11 @@ dgx-spark / atom2 は従来どおり (2 の WSL 判定は非 WSL では常に偽
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------- 検出
@@ -152,6 +154,42 @@ GPU_TEMP_CRIT_C: float | None = _cfg("gpu_temp_crit_c", None)
 THERMAL_STATE_FILE: Path = Path(
     os.environ.get("DGXUTIL_THERMAL_STATE", "/run/thermal/state")
 )
+
+# ---------------------------------------------------------------- 最終稼働プロファイル
+# ヘッダのモデル選択プルダウンが「モデルを選択」(プレースホルダ) になるのを避けるため、
+# 最後に稼働していた LLM プロファイル / RAG ("__rag__") を永続化する。
+# vllm.get_status() / rag.get_status() が稼働中に書き、どちらも停止中 (例: 再起動直後) は
+# フロントが /api/vllm/status の last_active をフォールバック選択に使う。
+# API は cliclie 権限で動くため home 配下 (git 管理外) に置く。
+LAST_ACTIVE_FILE: Path = Path(
+    os.environ.get(
+        "DGXUTIL_LAST_ACTIVE", str(Path.home() / ".dgxsparkutil" / "last_active.json")
+    )
+)
+
+
+_last_active_saved: str | None = None
+
+
+def save_last_active(profile: str) -> None:
+    """最終稼働プロファイルを書き込む (失敗は無視: 表示フォールバック専用)。
+    値が変わったときだけ書き、毎ポーリングの繰り返し書き込みを避ける。"""
+    global _last_active_saved
+    if _last_active_saved == profile:
+        return
+    try:
+        LAST_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_ACTIVE_FILE.write_text(json.dumps({"profile": profile, "ts": time.time()}))
+        _last_active_saved = profile
+    except OSError:
+        pass
+
+
+def load_last_active() -> str | None:
+    try:
+        return json.loads(LAST_ACTIVE_FILE.read_text()).get("profile")
+    except (OSError, ValueError):
+        return None
 
 
 def info() -> dict:

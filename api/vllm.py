@@ -1217,6 +1217,11 @@ def _get_status_modelctl() -> dict:
 
     out["switching"] = _switching_info()
 
+    # 最終稼働プロファイル (フロントのヘッダプルダウンのフォールバック選択用)
+    if running_profile is not None:
+        config.save_last_active(running_profile)
+    out["last_active"] = running_profile or config.load_last_active()
+
     if running_profile is None:
         return out
 
@@ -1349,6 +1354,11 @@ def get_status() -> dict:
     # Magnitude はホスト serve (コンテナは立たない)。稼働判定は API 応答 + モデルロード済み
     if running_profile is None and "magn" in profiles and _magn_active(profiles["magn"]["port"]):
         running_profile = "magn"
+
+    # 最終稼働プロファイル (フロントのヘッダプルダウンのフォールバック選択用。再起動を跨ぐ)
+    if running_profile is not None:
+        config.save_last_active(running_profile)
+    out["last_active"] = running_profile or config.load_last_active()
 
     if running_profile is None:
         return out

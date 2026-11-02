@@ -2659,6 +2659,19 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
+- **atom2 (WhitebearATOM2)**: 2026-11-03 に **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**を実装・反映（本機。運用者依頼）。
+  (1) 起動後（何も稼働していない）にヘッダのモデル選択プルダウンが「モデルを選択」になるのを回避するため、
+  最後に稼働していた LLM / RAG (`__rag__`) を `~/.dgxsparkutil/last_active.json` に永続化し、フロントが
+  何も稼働していないときにフォールバック選択（`api/config.py` / `api/vllm.py` / `api/rag.py` /
+  `front/index.html` の `syncHdrModelSelection()`）。副次効果で RAG 稼働中もドロップダウンが RAG を
+  自動選択し「停止」ボタンが出る。(2) ブラウザキャッシュの古いページ対策として `GET /` を
+  `Cache-Control: no-cache` で配信 + `GET /api/page-version`（index.html の ETag）新設 + HTML への ETag
+  注入 + フロント `checkPageVersion()` が 15 秒毎に比較して違えば自動 `location.reload()`
+  （`api/main.py` / `front/index.html`）。(3) `api/restart_service.sh`（API 再起動 + API 応答待ち +
+  検証）を追加。`api/` 変更のため `sudo systemctl restart dgx-spark-api` を実施（稼働中 RAG は停止せず）。
+  headless Chrome + CDP で RAG 稼働中→停止→起動の選択値・ボタン、LLM 最終稼働模擬、自動リロードを
+  検証（ALL PASS）。詳細は末尾「ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03）」節
+
 - **atom1 (WhitebearATOM1)**: 2026-11-01 に **サーマルガードを CPU 群 / GPU 群の分離段に改訂**
   （`089af1b`）。`api/thermal_guard.sh` に `loop_clock_groups()` を追加し、CPU 温度（acpitz の
   `TGPU` 以外）と GPU 温度（`TGPU` と `nvidia-smi` の max）を別々の閾値で見て、それぞれが GPU
@@ -3937,3 +3950,62 @@ cat /run/thermal/state                         # "groups":true が入る
   `cpufreq` / `scaling_max_freq` が**存在しない**（2026-11-01 grep で確認）ので干渉源は無い。
   上記 2026-10-16 節の「`switch_models.sh` 側の GPU 制御は削除した、cpufreq 側は残す」の
   cpufreq 記述は現在あたらない
+
+## ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03 / 本機 = WhitebearATOM2）
+
+**要件**（atom2 運用者依頼）:
+1. atom2 起動後（何も稼働していない状態）に dgxsparkutil を開くと、ヘッダのモデル選択
+   プルダウンが「モデルを選択」(プレースホルダ) になる。前回稼働していたモデル / RAG が
+   選択された状態にしたい（そのまま「切替」/「起動」で復旧操作できるように）。
+2. ブラウザのキャッシュで古いページが表示され、ユーザーに手動リロードを求められている。
+   ページを開いた直後にキャッシュをクリア（＝最新を取得）し、開いたままのタブも更新時に
+   自動で最新へ更新したい。
+
+### 1. 最終稼働プロファイルの永続化（「モデルを選択」回避）
+
+最後に稼働していた LLM プロファイル / RAG (`__rag__`) をサーバー側で永続化し、フロントが
+何も稼働していないときにフォールバック選択する。
+
+- `api/config.py`: `LAST_ACTIVE_FILE`（既定 `~/.dgxsparkutil/last_active.json`、環境変数
+  `DGXUTIL_LAST_ACTIVE` で上書き。API は cliclie 権限なので home 配下 = git 管理外）と
+  `save_last_active()` / `load_last_active()`。`save_last_active()` は**値が変わったときだけ**
+  書き込み（毎ポーリングの繰り返し書き込みを避ける）
+- `api/vllm.py`: `get_status()`（compose）と `_get_status_modelctl()`（WSL）の両方で、
+  稼働中プロファイルがあれば `save_last_active()` し、`out["last_active"]` に
+  `running_profile or load_last_active()` を付与
+- `api/rag.py`: `get_status()` で embedding 稼働中の間だけ `save_last_active("__rag__")`
+- `front/index.html`: `syncHdrModelSelection()` を **LLM 稼働中 → LLM / RAG 稼働中 → RAG /
+  それ以外 → `last_active`** の順にフォールバック。`last_active` が compose 一覧に無い
+  stale 値（削除済みプロファイル等）は選択しない
+
+副次効果: RAG 稼働中（atom2 排他環境で LLM 停止中）もドロップダウンが RAG を自動選択し
+「停止」ボタンが出る（従来は「モデルを選択」のまま RAG が選択されなかった）。
+
+### 2. キャッシュ自動更新（手動リロード不要）
+
+- **サーバー**（`api/main.py`）: `GET /` を `Cache-Control: no-cache` で配信。ブラウザは
+  毎回サーバーに再検証し、変更なければ 304（軽量）/ 変わっていれば最新を取得。
+  **ページを開くたびに最新 index.html が取得される**
+- **サーバー**: `GET /api/page-version` を新設。index.html の ETag（mtime+size の SHA-1、
+  starlette の `FileResponse` と同一方式）を返す
+- **サーバー**: `GET /` が HTML に `const PAGE_ETAG = "<ETag>"` を**先頭 1 箇所のみ**
+  注入（`str.replace(..., 1)`）。防御チェックの `PAGE_ETAG === "__PAGE_ETAG__"` リテラルは
+  そのまま残す（全置換するとチェックが実 ETag 比較になり常に早期 return するバグに）
+- **フロント**: `checkPageVersion()` が 15 秒に 1 回 `/api/page-version` を取得し、ページ自身
+  の `PAGE_ETAG` と違えば `location.reload()`。**長時間開いたタブも更新時に自動で最新へ**
+
+### 検証（atom2 実機 / headless Chrome + CDP）
+
+- RAG 稼働中: ドロップダウン選択値 `__rag__`・ボタン「停止」→ 停止 → 選択値 `__rag__`
+  （`last_active`）のまま「モデルを選択」にならずボタン「起動」→ 起動 → 「停止」に復帰（ALL PASS）
+- LLM 最終稼働模擬（RAG 停止 + `last_active=qwen38radiance`）: 選択値 `qwen38radiance`・
+  ボタン「切替」（「モデルを選択」にならない）（PASS）
+- 自動リロード: ページロード後 `index.html` を touch（ETag 変化）→ 開いたタブが自動リロード
+  し `PAGE_ETAG` が新 ETag へ更新（PASS）
+- 配信確認: `Cache-Control: no-cache` / `ETag` ヘッダ付き、注入 ETag と `/api/page-version`
+  が一致、`__PAGE_ETAG__` プレースホルダは const のみ置換でチェックリテラルは残存
+
+### 反映
+
+`api/` 変更（config / vllm / rag / main）のため `sudo systemctl restart dgx-spark-api` を実施。
+フロントは静的配信なので反映後のページは次回アクセスで最新（no-cache により自動）。

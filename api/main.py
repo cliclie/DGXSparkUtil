@@ -14,11 +14,13 @@
 - POST /api/rag/stop      RAG環境停止 (バックグラウンド)
 - GET  /api/rag/job       RAG 起動/停止ジョブの進捗
 - GET  /api/thermal       GPU サーマルガード (root unit) の状態
-- GET  /                  front/ の静的ファイル
+- GET  /api/page-version  配信中 index.html の ETag (フロントの自動リロード判定用)
+- GET  /                  front/ の静的ファイル (Cache-Control: no-cache)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -27,7 +29,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -198,6 +200,19 @@ def api_thermal() -> dict:
 
 
 # front/ の静的ファイル (index.html / chart.umd.js 等)
+def _page_etag(p: Path) -> str:
+    """index.html の mtime+size から ETag を算出 (starlette の FileResponse と同一方式)。"""
+    st = p.stat()
+    return hashlib.sha1(f"{st.st_mtime_ns}-{st.st_size}".encode()).hexdigest()
+
+
+@app.get("/api/page-version")
+def api_page_version() -> dict:
+    """配信中 index.html の ETag。フロントはページ自身に注入された ETag と比較し、
+    違えば location.reload() で最新ページへ自動更新する (キャッシュの古いタブ対策)。"""
+    return {"etag": _page_etag(FRONT_DIR / "index.html")}
+
+
 if FRONT_DIR.is_dir():
     app.mount(
         "/static",
@@ -206,5 +221,18 @@ if FRONT_DIR.is_dir():
     )
 
     @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(FRONT_DIR / "index.html")
+    def index() -> Response:
+        # Cache-Control: no-cache でブラウザは毎回サーバーに再検証 (変更なければ 304)。
+        # ページを開くたびに最新 index.html を取得し、手動リロードを不要にする。
+        # __PAGE_ETAG__ には配信中ページの ETag を注入し、自動リロード判定の基準にする。
+        p = FRONT_DIR / "index.html"
+        etag = _page_etag(p)
+        # 先頭 1 箇所 (const PAGE_ETAG = "__PAGE_ETAG__") のみ置換。
+        # 防御チェックの PAGE_ETAG === "__PAGE_ETAG__" リテラルはそのまま残す
+        # (全置換するとチェックが実 ETag 比較になり常に早期 return する)。
+        html = p.read_text().replace("__PAGE_ETAG__", etag, 1)
+        return Response(
+            html,
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-cache", "ETag": f'"{etag}"'},
+        )

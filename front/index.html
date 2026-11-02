@@ -601,6 +601,10 @@ const API = "";  // 同一オリジン (FastAPI が front/ を配信)
 const MAX_POINTS = 4500;   // 3時間 / 2秒
 const POLL_MS = 2000;
 
+// 配信中ページの ETag。サーバー (main.py の index()) が下のプレースホルダを実値に置換して
+// 注入する。/api/page-version の ETag と違えば最新ページへ自動リロードする。
+const PAGE_ETAG = "__PAGE_ETAG__";
+
 // プラットフォーム情報 (/api/platform で取得。既定は DGX Spark 挙動 = 従来動作)
 // memory_mode: unified=統合メモリ1枚 / discrete=RAM+VRAM 2枚
 // backend: compose=docker-compose + switch_models.sh / modelctl=WSL の model-ctl.sh
@@ -1255,6 +1259,24 @@ async function fetchJson(url, timeoutMs = 6000) {
   }
 }
 
+// 自動リロード: 配信中 index.html の ETag (/api/page-version) がこのページの ETag
+// (PAGE_ETAG) と違えばサーバー側のページが更新されたので最新へリロードする。
+// 長時間開いたタブがキャッシュの古い版のままであるのを防ぐ (手動リロード不要)。
+// 15 秒に 1 回へスロットル (レスポンスは数バイト)。
+let lastPageVersionCheck = 0;
+async function checkPageVersion() {
+  if (!PAGE_ETAG || PAGE_ETAG === "__PAGE_ETAG__") return;
+  const now = Date.now();
+  if (now - lastPageVersionCheck < 15000) return;
+  lastPageVersionCheck = now;
+  try {
+    const v = await fetchJson(API + "/api/page-version", 3000);
+    if (v && v.etag && v.etag !== PAGE_ETAG) location.reload();
+  } catch (e) {
+    // 取得失敗 (一時的なネットワーク等) は無視してリロードしない
+  }
+}
+
 async function poll() {
   // 4 エンドポイントを並列に引き、それぞれに期限を付ける。長文推論中は
   // /api/vllm/status が数秒かかるので、直列 + 期限なしだとゲージもサーマル表示も
@@ -1294,6 +1316,7 @@ async function poll() {
   THERMAL = tth.status === "fulfilled" ? tth.value : { enabled: false };
   renderThermal();
   pollJob();
+  checkPageVersion();
 }
 
 let currentStatus = null;
@@ -1314,11 +1337,24 @@ function markHdrManual() {
   hdrManualUntil = Date.now() + HDR_MANUAL_MS;
 }
 
-// 自動追随: 手動選択の猶予を過ぎたら selectedProfile を稼働中モデル (無ければ未選択) へ戻す。
+// 自動追随: 手動選択の猶予を過ぎたら、稼働中 (LLM > RAG) → 最終稼働プロファイルの順で選択する。
+// 何も稼働していない (再起動直後等) でも last_active で復元し「モデルを選択」にしない。
 // 毎ポーリング (2秒) の renderModelList() から呼ぶので、猶予経過の実効遅れは最大 2 秒。
 function syncHdrModelSelection() {
   if (Date.now() < hdrManualUntil) return;
-  selectedProfile = currentStatus && currentStatus.active ? currentStatus.active.profile : null;
+  const st = currentStatus;
+  if (st && st.active) {
+    selectedProfile = st.active.profile;
+  } else if (ragStatus && ragStatus.running) {
+    // RAG 稼働中 (atom2 排他環境では LLM 停止中) → RAG を選択
+    selectedProfile = RAG_VALUE;
+  } else if (st && st.last_active) {
+    // 最終稼働プロファイル (compose 一覧に無い stale 値は選択しない)
+    const known = st.containers && st.containers.some((c) => c.profile === st.last_active);
+    selectedProfile = st.last_active === RAG_VALUE || known ? st.last_active : null;
+  } else {
+    selectedProfile = null;
+  }
 }
 
 function openModal(id) { document.getElementById(id).classList.remove("hidden"); }

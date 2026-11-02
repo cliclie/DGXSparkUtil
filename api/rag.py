@@ -203,6 +203,10 @@ def get_status() -> dict:
         llm = _llm_running()
         out["llm_running"] = llm
         out["blocked_by_llm"] = llm and not out["services"]["embedding"]["running"]
+    # 最終稼働プロファイル (フロントのヘッダプルダウンのフォールバック選択用)。
+    # 稼働中の間だけ "__rag__" を記録し、再起動後にフロントが RAG 選択へ復元できる
+    if out["running"]:
+        config.save_last_active("__rag__")
     return out
 
 
