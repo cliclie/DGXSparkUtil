@@ -2659,6 +2659,17 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
+- **atom1 (WhitebearATOM1)**: 2026-11-03 に **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**
+  を反映（`f0b548b`。atom2 実装）。`git pull --ff-only origin main`（a8f46cb → f0b548b、fast-forward、
+  1 コミット、作業ツリー clean）、変更 Python ファイルの構文チェック OK、`sudo systemctl restart
+  dgx-spark-api`（04:31:56 JST）。実測: `GET /` は `Cache-Control: no-cache` / `ETag` ヘッダ付き 200、
+  注入 `PAGE_ETAG` が `GET /api/page-version` と一致、`__PAGE_ETAG__` リテラルは防御チェック 1 箇所の
+  み残存、`/api/vllm/status` の `last_active = qwen38flashnextexl3_4p05`（稼働中モデルと一致）、
+  `~/.dgxsparkutil/last_active.json` 正常書き込み、`server.log` にエラーなし。稼働中モデルは docker
+  コンテナのため API 再起動の影響なし。`HEAD /` が 405 なのは既存動作（Starlette の `@app.get` は
+  HEAD を処理しない）。詳細は末尾「ヘッダプルダウンのフォールバック選択とキャッシュ自動更新
+  （2026-11-03）」節
+
 - **atom2 (WhitebearATOM2)**: 2026-11-03 に **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**を実装・反映（本機。運用者依頼）。
   (1) 起動後（何も稼働していない）にヘッダのモデル選択プルダウンが「モデルを選択」になるのを回避するため、
   最後に稼働していた LLM / RAG (`__rag__`) を `~/.dgxsparkutil/last_active.json` に永続化し、フロントが
@@ -4009,3 +4020,10 @@ cat /run/thermal/state                         # "groups":true が入る
 
 `api/` 変更（config / vllm / rag / main）のため `sudo systemctl restart dgx-spark-api` を実施。
 フロントは静的配信なので反映後のページは次回アクセスで最新（no-cache により自動）。
+
+**atom1 (WhitebearATOM1) 反映（2026-11-03）**: `git pull --ff-only origin main`（a8f46cb → f0b548b、
+fast-forward、1 コミット）+ `sudo systemctl restart dgx-spark-api`（04:31:56 JST）。実測: `GET /` は
+`Cache-Control: no-cache` / `ETag` ヘッダ付き 200、注入 `PAGE_ETAG` が `/api/page-version` と一致、
+`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存、`/api/vllm/status` の `last_active =
+qwen38flashnextexl3_4p05`（稼働中モデルと一致）、`~/.dgxsparkutil/last_active.json` 正常書き込み、
+`server.log` にエラーなし。稼働中モデルは docker コンテナのため API 再起動の影響なし。
