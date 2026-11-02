@@ -2986,6 +2986,37 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   リロードで反映、配信中の `/` はリポジトリの `front/index.html` とバイト一致。`requirements.txt` /
   `requirements.lock` は差分ゼロなので venv の依存更新は不要、`thermal-guard` も `api/` 対象外で
   active のまま再起動不要）
+  **2026-11-03: 本機でリモートの更新 4 コミット（`4a0fa96` → `2d37a0d`、atom2 / atom1 側）を反映した**
+  （`git fetch --all --prune` + `git pull --ff-only origin main` の fast-forward、作業ツリーはクリーン・
+  コンフリクトなし。取り込み内容は (1) サーマルガードの **CPU 群 / GPU 群分離段** `loop_clock_groups()`
+  （`089af1b` + docs `a8f46cb`）と (2) **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**
+  （`f0b548b` + docs `2d37a0d`、atom2 実装）。
+  (1) は **本機では無効のまま = 従来動作**（`THERMAL_GROUPS` 既定 0。本機 unit は `Environment=THERMAL_CONTAINERS=`
+  空の監視専ら + `THERMAL_MODE=clock` で `loop_clock()` 経路のまま。既存コードの削除行は末尾の
+  `case → if/elif` 化のみ）。groups 有効化は atom1 固有（git 管理外 `api/install_service.env` の
+  `TG_GROUPS=1` と unit への `Environment=THERMAL_GROUPS=1`）なので本機の env は変更せず、
+  **`thermal-guard` は再起動不要**（実測 `/api/thermal` は `groups` キーなし / `locked_mhz:0` /
+  `model_running:0` の従来形のまま）。
+  (2) は `api/`（config / vllm / rag / main）変更なので **`sudo systemctl restart dgx-spark-api` を
+  04:40:47 JST に実施**（本機は `KILL_MODE=process` + modelctl 経路のため稼働中の `swift40` を
+  停止せずに反映できた）。構文チェック: `venv/bin/python -m py_compile config.py main.py vllm.py rag.py`
+  OK / `bash -n` と `dash -n`（thermal_guard.sh・install_service.sh・restart_service.sh）OK /
+  `requirements.txt` は差分ゼロで venv 更新不要。
+  実測（ポート **8090**）: unit `active`（MainPID 992984 / `ExecMainStartTimestamp=Tue 2026-11-03
+  04:40:47 JST` / `NRestarts=0`）、`/`・`/api/platform`・`/api/vllm/status`・`/api/thermal`・
+  `/api/rag/status`・`/api/page-version` がすべて 200（`/api/vllm/status` 0.74 秒、他は ≤0.05 秒）。
+  `GET /` は `Cache-Control: no-cache` + `ETag: "32638c98…"`、HTML に注入された `const PAGE_ETAG` が
+  `/api/page-version` の etag と一致、`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存。
+  `/api/vllm/status` の `last_active = swift40`（稼働中モデルと一致、`containers` 15 件に同 profile が
+  存在するので stale 判定を通過）、`~/.dgxsparkutil/last_active.json` に `{"profile": "swift40", …}` を
+  正常書き込み（modelctl 経路の `_get_status_modelctl()` 経由）。稼働中モデル
+  `python3 start.py --config config-swift40.yml`（pid 5985）は再起動後も生存（cgroup 外）。
+  `journalctl -u dgx-spark-api --since 04:40:40` は Stopping → Stopped → Started のみでエラー・
+  トレースバックなし（`Unit process 992981 (nvidia-smi) remains running` は `KillMode=process` 由来の
+  既存警告）。`HEAD /` が 405 なのは既存動作（Starlette の `@app.get` は HEAD を処理しない）。
+  **注意**: 新規 `api/restart_service.sh` は `PORT=8080` 直書きで、本機（8090）では応答待ちループが
+  必ず FAIL するため使わない（atom1 / atom2 の Docker 系用。本機は `sudo systemctl restart` + 8090 の
+  手動検証）。詳細は末尾「ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03）」節）
 
 ## 統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）
 
