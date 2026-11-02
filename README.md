@@ -2,6 +2,71 @@
 
 DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 
+## 目次
+
+- [目的](#目的)
+- [表示スタイル(ゲージ)](#表示スタイルゲージ)
+- [表示レイアウト(4段構成)](#表示レイアウト4段構成)
+- [調査結果(2026-08-22 実機確認)](#調査結果2026-08-22-実機確認)
+- [既存資産(参照のみ・実行・変更しない)](#既存資産参照のみ実行変更しない)
+- [技術基盤(実装アーキテクチャ)](#技術基盤実装アーキテクチャ)
+- [実行](#実行)
+- [実装メモ(2026-08-24)](#実装メモ2026-08-24)
+- [実装メモ(2026-08-26)](#実装メモ2026-08-26)
+- [実装メモ(2026-08-27)](#実装メモ2026-08-27)
+- [実装メモ(2026-08-28)](#実装メモ2026-08-28)
+- [実装メモ(2026-08-29)](#実装メモ2026-08-29)
+- [実装メモ(2026-08-30)](#実装メモ2026-08-30)
+- [実装メモ(2026-08-31)](#実装メモ2026-08-31)
+- [実装メモ(2026-09-03)](#実装メモ2026-09-03)
+- [実装メモ(2026-09-13)](#実装メモ2026-09-13)
+- [実装メモ(2026-09-14)](#実装メモ2026-09-14)
+- [実装メモ(2026-09-17)](#実装メモ2026-09-17)
+- [実装メモ(2026-09-19)](#実装メモ2026-09-19)
+- [実装メモ(2026-09-25)](#実装メモ2026-09-25)
+- [実装メモ(2026-09-27)](#実装メモ2026-09-27)
+- [実装メモ(2026-09-29)](#実装メモ2026-09-29)
+- [実装メモ(2026-10-02)](#実装メモ2026-10-02)
+- [実装メモ(2026-10-03)](#実装メモ2026-10-03)
+- [実装メモ(2026-10-04)](#実装メモ2026-10-04)
+- [実装メモ(2026-10-05)](#実装メモ2026-10-05)
+- [実装メモ(2026-10-06)](#実装メモ2026-10-06)
+- [Magnitude (magn) 切替運用 (2026-10-06)](#magnitude-magn-切替運用-2026-10-06)
+- [Magnitude (magn) 表示の不整合修正 (2026-10-06)](#magnitude-magn-表示の不整合修正-2026-10-06)
+- [Magnitude (magn) の Cline 接続・外部公開設定 (2026-10-06)](#magnitude-magn-の-cline-接続外部公開設定-2026-10-06)
+- [Magnitude (magn) の KVCache・E2E・TTFT・スループット表示 (2026-10-06)](#magnitude-magn-の-kvcachee2ettftスループット表示-2026-10-06)
+- [E2E・TTFT・スループットの前回値保持をフロント側へ移行 (2026-10-06)](#e2ettftスループットの前回値保持をフロント側へ移行-2026-10-06)
+- [実装メモ(2026-10-07)](#実装メモ2026-10-07)
+- [Magnitude (magn) の OS 起動直後に「ロード済み」と誤表示する不具合修正 (2026-10-08)](#magnitude-magn-の-os-起動直後にロード済みと誤表示する不具合修正-2026-10-08)
+- [稼働モデルなしのときポート〜出力スループットをクリア (2026-10-08)](#稼働モデルなしのときポート出力スループットをクリア-2026-10-08)
+- [UI タブ化・現在値の vLLM テキストカード・prefill/decode 表記・モデル一覧の常設表示 (2026-10-11)](#ui-タブ化現在値の-vllm-テキストカードprefilldecode-表記モデル一覧の常設表示-2026-10-11)
+- [現在値の vLLM テキストカード: タイトルとモデル名ラベルを削除・「状態」表記 (2026-10-12)](#現在値の-vllm-テキストカード-タイトルとモデル名ラベルを削除状態表記-2026-10-12)
+- [GB10 サーマルガード: 温度連動の GPU クロック制御 (2026-10-16)](#gb10-サーマルガード-温度連動の-gpu-クロック制御-2026-10-16)
+- [GB10 サーマルガード: 対象をコンテナ名リスト化し Ornith 122B を追加（2026-10-28）](#gb10-サーマルガード-対象をコンテナ名リスト化し-ornith-122b-を追加2026-10-28)
+- [atom2 サーマルガード: 温度連動の GPU 電力上限制御 (2026-10-17)](#atom2-サーマルガード-温度連動の-gpu-電力上限制御-2026-10-17)
+- [atom1 フロントのサーマルガード表示: 監視対象を CPU/GPU 温度の 2 枚に (2026-10-17)](#atom1-フロントのサーマルガード表示-監視対象を-cpugpu-温度の-2-枚に-2026-10-17)
+- [一段目メーターの Chart.js 移植（2026-10-20・canvas 直描画の撤去）](#一段目メーターの-chartjs-移植2026-10-20canvas-直描画の撤去)
+- [WSL2 モデル切替バックエンド modelctl (2026-10-21)](#wsl2-モデル切替バックエンド-modelctl-2026-10-21)
+- [api venv のセキュリティ/保守更新と依存ピン留め（2026-10-23）](#api-venv-のセキュリティ保守更新と依存ピン留め2026-10-23)
+- [履歴書き換え（API key 除去）後の他機同期手順（2026-10-23）](#履歴書き換えapi-key-除去後の他機同期手順2026-10-23)
+- [統合時系列グラフの GPU クロック/電力が 100% を超える不具合の修正（2026-10-24）](#統合時系列グラフの-gpu-クロック電力が-100-を超える不具合の修正2026-10-24)
+- [レイアウト圧縮: ヘッダ行タブ統合・ヘッダのモデル選択・ゲージ/時系列の 80% 縮小（2026-10-26）](#レイアウト圧縮-ヘッダ行タブ統合ヘッダのモデル選択ゲージ時系列の-80-縮小2026-10-26)
+- [ヘッダ操作とゲージ表示の改訂: タブ維持・自動追随・dual メーター統一（2026-10-26）](#ヘッダ操作とゲージ表示の改訂-タブ維持自動追随dual-メーター統一2026-10-26)
+- [server.log の日次アーカイブ（JST 0 時・zip）（2026-10-26）](#serverlog-の日次アーカイブjst-0-時zip2026-10-26)
+- [server.log はアーカイブせず JST 0 時に truncate（2026-10-26）](#serverlog-はアーカイブせず-jst-0-時に-truncate2026-10-26)
+- [vLLM 情報カードの状態表示の短縮（2026-10-26）](#vllm-情報カードの状態表示の短縮2026-10-26)
+- [ヘッダのモデル選択プルダウンで重み未導入を灰色表示（2026-10-27）](#ヘッダのモデル選択プルダウンで重み未導入を灰色表示2026-10-27)
+- [Strata (strata・atom2) の Cline 設定値と prefill/decode 表示（2026-10-26 / 10-28）](#strata-strataatom2-の-cline-設定値と-prefilldecode-表示2026-10-26--10-28)
+- [ダッシュボードのポーリング緩和と GPU クロックの実値表示 (2026-10-28)](#ダッシュボードのポーリング緩和と-gpu-クロックの実値表示-2026-10-28)
+- [ストレージ I/O（DISK）ゲージの上限を WSL 環境のみ 7 GB/s に（2026-10-30）](#ストレージ-iodiskゲージの上限を-wsl-環境のみ-7-gbs-に2026-10-30)
+- [GPU クロックゲージのサブ行を「最大 <実測値> MHz」に（2026-10-30）](#gpu-クロックゲージのサブ行を最大-実測値-mhzに2026-10-30)
+- [WSL2 でサーマルガードを監視専らで導入する（2026-10-30）](#wsl2-でサーマルガードを監視専らで導入する2026-10-30)
+- [GPU クロック ゲージのサブ行を「最大 <HW 上限> MHz」にする（2026-10-30 / 本機依頼）](#gpu-クロック-ゲージのサブ行を最大-hw-上限-mhzにする2026-10-30--本機依頼)
+- [vLLM 状態表示「稼働中（推論中）」を「推論中」(緑) に（2026-10-30 / 本機依頼）](#vllm-状態表示稼働中推論中を推論中緑-に2026-10-30--本機依頼)
+- [SGLang → TabbyAPI 切替で prefill/decode が消えた（エンジン種別キャッシュの last 残留）（2026-11-01 / 本機調査）](#sglang--tabbyapi-切替で-prefilldecode-が消えたエンジン種別キャッシュの-last-残留2026-11-01--本機調査)
+- [CPU 群と GPU 群を分けた段に改訂（2026-11-01 / 本機 = WhitebearATOM1 のみ）](#cpu-群と-gpu-群を分けた段に改訂2026-11-01--本機--whitebearatom1-のみ)
+- [ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03 / 本機 = WhitebearATOM2）](#ヘッダプルダウンのフォールバック選択とキャッシュ自動更新2026-11-03--本機--whitebearatom2)
+
 ## 目的
 
 クライアント(別のWindows PC)からブラウザでアクセスし、API経由で以下を行う仕組みを構築する。
@@ -40,7 +105,10 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - root 特権は `thermal-guard.service` だけに限局し、API は `/api/thermal` で状態を読むだけ
    - 詳細は「GB10 サーマルガード」「atom2 サーマルガード」の各節を参照
    - WSL2 は GPU がホスト (Windows) 側ドライバ管理で `-lgc` / `power1_cap` が効かないため
-     **導入しない**(`install_service.sh` が自動でスキップ)
+     **監視専らのオプトイン導入**（既定は `install_service.sh` が自動スキップ）。有効化は
+     `api/install_service.env` の `DGXUTIL_THERMAL=1` で、unit には `Environment=THERMAL_CONTAINERS=`
+     （空）が注入されるのでクロック書き換えは起こさない（2026-10-30 節「WSL2 でサーマルガードを
+     監視専らで導入する」参照）
 
 - 対象機材: GIGABYTE AI TOP ATOM (NVIDIA GB10 / Grace Blackwell Superchip) および
   WhitebearATOM2 (Intel i9-12900KF + AMD Radeon AI PRO R9700 / ROCm)、
@@ -346,6 +414,8 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 │     GET  /api/rag/job        → RAG ジョブ進捗         │
 │     GET  /api/thermal        → GPU サーマルガード状態   │
 │                                (/run/thermal/state を読むだけ) │
+│     GET  /api/page-version   → 配信中 index.html の ETag │
+│                                (フロントの自動リロード判定) │
 │     データ源: /proc/stat, /proc/meminfo,              │
 │      /sys/class/thermal/*, /proc/diskstats,           │
 │      nvidia-smi(subprocess) / amdgpu sysfs,           │
@@ -587,8 +657,14 @@ tail -f /home/cliclie/DGXSparkUtil/api/server.log  # ログ確認
 systemctl status thermal-guard        # GPU サーマルガードの状態確認
 journalctl -u thermal-guard -f        # 発動ログ（温度連動の切替）
 curl -s localhost:8080/api/thermal    # ガードの状態 JSON
+bash /home/cliclie/DGXSparkUtil/api/restart_service.sh   # 再起動 + 応答待ち + 検証 (既定 8080)
 ```
 
+- **`api/restart_service.sh`**（2026-11-03 追加）は `sudo systemctl restart dgx-spark-api` のあと
+  `/api/platform` の応答を最大 30 秒待ち、`/`・`/api/platform`・`/api/vllm/status` の 200 と直近ログを
+  確認する。**ポートは 8080 直書き**なので、`api/install_service.env` でポートを上書きしている機
+  （WSL2 Whitebear2026 は 8090）では応答待ちが必ず FAIL する — その場合は手動で
+  `sudo systemctl restart dgx-spark-api` + 実ポートの curl 検証を使うこと
 - ユニットファイル: `/home/cliclie/DGXSparkUtil/api/dgx-spark-api.service`
   (テンプレート: `__API_DIR__` / `__USER__` / `__PORT__` プレースホルダを `install_service.sh` が
   sed で置換して `/etc/systemd/system/` にインストール)
@@ -2659,6 +2735,16 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
+> **現況（2026-11-03）**: 3 機とも `origin/main` 最新（`f0b548b` 系 + README 記録）まで同期済み。
+> 以下の項は**時系列の記録**なので、途中にある「atom1 / atom2 / Whitebear2026 は未同期」の注記は
+> いずれも**その時点**のもので、現在は解消済み（各機の 2026-11-03 項が現在の状態）。
+
+| 機 | 2026-11-03 時点の同期 | `dgx-spark-api` 再起動 | thermal-guard |
+|---|---|---|---|
+| atom1 (WhitebearATOM1) | `f0b548b` + 自機の記録 `2d37a0d` | 済（04:31 JST） | 分離段は既定 0 で稼働（`TG_GROUPS=1` の unit 反映は root 作業未実施） |
+| atom2 (WhitebearATOM2) | `f0b548b` を実装（自機） | 済 | power モード（分離段と無関係） |
+| Whitebear2026 (WSL2 / modelctl) | `2d37a0d` + 自機の記録 `6217b4d` | 済（04:40 JST） | 監視専ら・分離段無効（再起動不要） |
+
 - **atom1 (WhitebearATOM1)**: 2026-11-03 に **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**
   を反映（`f0b548b`。atom2 実装）。`git pull --ff-only origin main`（a8f46cb → f0b548b、fast-forward、
   1 コミット、作業ツリー clean）、変更 Python ファイルの構文チェック OK、`sudo systemctl restart
@@ -4058,3 +4144,19 @@ fast-forward、1 コミット）+ `sudo systemctl restart dgx-spark-api`（04:31
 `__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存、`/api/vllm/status` の `last_active =
 qwen38flashnextexl3_4p05`（稼働中モデルと一致）、`~/.dgxsparkutil/last_active.json` 正常書き込み、
 `server.log` にエラーなし。稼働中モデルは docker コンテナのため API 再起動の影響なし。
+
+**Whitebear2026 (WSL2 / modelctl) 反映（2026-11-03）**: `git fetch --all --prune` +
+`git pull --ff-only origin main`（`4a0fa96` → `2d37a0d`、fast-forward・4 コミット = CPU/GPU 群分離段
+`089af1b` を含む）+ `sudo systemctl restart dgx-spark-api`（04:40:47 JST）。実測（ポート **8090**）:
+`GET /` は `Cache-Control: no-cache` + `ETag`、注入 `PAGE_ETAG` が `/api/page-version` と一致、
+`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存、`/api/vllm/status` の `last_active = swift40`
+（稼働中モデルと一致 — modelctl 経路の `_get_status_modelctl()` でも `containers[].profile` が揃うので
+stale 判定を通過する）、`~/.dgxsparkutil/last_active.json` 正常書き込み、`journalctl` にエラーなし。
+`KILL_MODE=process` なので稼働中モデル（`start.py --config config-swift40.yml`）は停止していない。
+**分離段 (`THERMAL_GROUPS`) は本機では無効のまま**（監視専ら + 既定 0 = 従来動作なので
+`thermal-guard` の再起動は不要）。詳細は「5. 各機の同期状況」の Whitebear2026 項。
+
+**`api/restart_service.sh` の制約（8080 以外の機）**: `PORT=8080` 直書きで、環境変数でも上書きできない。
+`api/install_service.env` でポートを変える機（Whitebear2026 は 8090）では再起動自体走るが応答待ちが
+30 秒で必ず FAIL するため、手動で `sudo systemctl restart dgx-spark-api` + 実ポートの curl 検証を使う。
+汎用化するなら `PORT="${PORT:-8080}"` 化が要る（未実施）。
