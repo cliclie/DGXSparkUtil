@@ -2777,7 +2777,9 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   （power モードで元々常時監視・`api/install_service.env` を持たない）と WSL2（監視専ら）は
   **無影響**。本機固有の有効化は `api/install_service.env`（git 管理外）の `TG_GROUPS=1` で、
   unit への `Environment=THERMAL_GROUPS=1` 注入と `systemctl restart thermal-guard` は
-  **root 作業で未実施**（2026-11-01 11:55 時点）。フロントは `cpu_locked_khz` を読むようにした
+  **2026-11-06 に実施済み**（drop-in `/etc/systemd/system/thermal-guard.service.d/groups.conf`。
+  起動ログ `groups=1 cpu=88/93/82C ... gpu=84/90/78C` と `/run/thermal/state` の `"groups":true` を確認）。
+  フロントは `cpu_locked_khz` を読むようにした
   （静的配信なのでブラウザリロードで反映）。詳細は末尾「CPU 群と GPU 群を分けた段に改訂
   （2026-11-01）」節
 
@@ -4052,14 +4054,24 @@ groups の発動時は `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)
 
 ### 反映（root 作業）
 
+**2026-11-06 に atom1 で実施済み**。初回は `tee` が親ディレクトリを作らないため
+`tee: .../groups.conf: そのようなファイルやディレクトリはありません` で失敗し（service は
+従来モードで再起動されるだけ）、`sudo mkdir -p` が必須（実機確認済み）。
+
 ```
 cd ~/DGXSparkUtil
+sudo mkdir -p /etc/systemd/system/thermal-guard.service.d
 printf '[Service]\nEnvironment=THERMAL_GROUPS=1\n' \
   | sudo tee /etc/systemd/system/thermal-guard.service.d/groups.conf
 sudo systemctl daemon-reload && sudo systemctl restart thermal-guard
 journalctl -u thermal-guard -n 3 --no-pager   # "groups=1 cpu=88/93/82C ... gpu=84/90/78C" が出る
-cat /run/thermal/state                         # "groups":true が入る
+cat /run/thermal/state                         # "groups":true が入る (初回ループ末尾の数秒後に書かれる)
 ```
+
+実施結果: 起動ログ `thermal-guard start: mode=clock groups=1 cpu=88/93/82C
+lock=3200000/2400000kHz small=2400000/1800000kHz gpu=84/90/78C lock=1665/1000MHz ...`、
+state に `"groups":true` / `"model_running":1`、CPU policy 全 policy が最大
+（大核 3900000 / 小核 2808000 kHz）に復帰。
 
 `install_service.sh` を再実行する運用（`sudo bash api/install_service.sh`）では
 `api/install_service.env` の `TG_GROUPS=1` から自動注入される（`==> ... thermal-guard=1
