@@ -894,16 +894,9 @@ function gaugeDefs() {
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
-      // 通常時は HW 上限を表示する (nvidia-smi -q -d CLOCK の Max Clocks = clocks.max.sm)。
-      // 半円内の中央値は実測クロックのまま (get: gpu_clock_mhz)。
-      // サーマルガード発動中は目盛りをロック段に寄せる (tuneGauge 参照) ので
-      // 実値が読み取れるよう「実 1651 / ロック 1665 MHz」を出す
+      // 最下行は常に取得した HW 上限 (nvidia-smi -q -d CLOCK の Max Clocks = clocks.max.sm)。
+      // サーマルガード発動中も同じ表示 (目盛りは tuneGauge がロック段に寄せるが最下行は取得値)。
       sub: (m) => {
-        const lock = thermalClockLockMhz();
-        if (lock) {
-          const real = m.gpu_clock_mhz != null ? m.gpu_clock_mhz.toFixed(0) : "-";
-          return `実 ${real} / ロック ${lock.toFixed(0)} MHz`;
-        }
         const mx = m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003);
         return `最大 ${mx} MHz`;
       } },
@@ -2148,17 +2141,27 @@ function thermalState() {
   } else {
     cpuSide = a >= g;
   }
-  const parts = [];
-  if (mhz) parts.push(t.groups ? `GPU ${mhz}MHz` : `${mhz}MHz`);
-  if (cpuKhz) parts.push(`CPU ${Math.round(cpuKhz / 1000)}MHz`);
   const crit =
     (t.lock_crit_mhz != null && mhz > 0 && mhz <= t.lock_crit_mhz) ||
     (t.cpu_lock_crit_khz != null && cpuKhz > 0 && cpuKhz <= t.cpu_lock_crit_khz);
+  // ヘッダインジケータは折り返さない短記法「GPUクロック制限中(GPU 84℃超過)」。
+  // 温度は現在値ではなく超過した閾値 (1段目 = high / 2段目 = crit)。
+  const parts = [];
+  if (mhz) {
+    const th = t.groups
+      ? (g >= (t.gpu_crit_c ?? 999) ? t.gpu_crit_c : t.gpu_high_c)
+      : ((t.temp_c ?? 0) >= (t.crit_c ?? 999) ? t.crit_c : t.high_c);
+    parts.push(`GPUクロック制限中(${t.groups ? "GPU" : cpuSide ? "CPU" : "GPU"} ${th}℃超過)`);
+  }
+  if (cpuKhz) {
+    const th = a >= (t.cpu_crit_c ?? 999) ? t.cpu_crit_c : t.cpu_high_c;
+    parts.push(`CPUクロック制限中(CPU ${th}℃超過)`);
+  }
   return {
     crit,
     watchId: cpuSide ? "g-cpu-temp" : "g-gpu-temp",
     limitId: "g-gpu-clock",
-    text: `クロック制限 ${parts.join(" / ")} (${cpuSide ? "CPU" : "GPU"} ${cpuSide ? a : g}℃)`,
+    text: parts.join(" / "),
   };
 }
 

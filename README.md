@@ -66,6 +66,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [SGLang → TabbyAPI 切替で prefill/decode が消えた（エンジン種別キャッシュの last 残留）（2026-11-01 / 本機調査）](#sglang--tabbyapi-切替で-prefilldecode-が消えたエンジン種別キャッシュの-last-残留2026-11-01--本機調査)
 - [CPU 群と GPU 群を分けた段に改訂（2026-11-01 / 本機 = WhitebearATOM1 のみ）](#cpu-群と-gpu-群を分けた段に改訂2026-11-01--本機--whitebearatom1-のみ)
 - [ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03 / 本機 = WhitebearATOM2）](#ヘッダプルダウンのフォールバック選択とキャッシュ自動更新2026-11-03--本機--whitebearatom2)
+- [サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)](#サーマルガード表示の短縮-インジケータ短記法とgpuクロックタイル最下行の取得値固定-2026-11-06--本機--whitebearatom1)
 
 ## 目的
 
@@ -231,8 +232,8 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
   - atom2 (R9700 / power モード): 監視「GPU 温度」+ 制限「GPU 電力」(250W=黄 / 210W=赤)
   - atom1 (GB10 / clock モード): 監視「CPU 温度」または「GPU 温度」のうち**制限値に
     引っかかった方**(`temp_c` は `max(acpitz, GPU)` なので、その max を生んだセンサー)+
-    制限「GPU クロック」(1665MHz=黄 / 1000MHz=赤)。ヘッダのインジケータも
-    `クロック制限 1665MHz (CPU 92℃)` のように犯人側を明記する
+    制限「GPU クロック」(1665MHz=黄 / 1000MHz=赤)。ヘッダのインジケータは
+    `GPUクロック制限中(GPU 84℃超過)` の短記法 (温度は現在値ではなく超過した閾値)
   復帰 (上限=最大 / クロック解除) と unit 停止時は灰色 (`--border`) に戻る
   (各節の「フロント表示」参照)
 
@@ -2744,6 +2745,15 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 | atom1 (WhitebearATOM1) | `f0b548b` + 自機の記録 `2d37a0d` | 済（04:31 JST） | 分離段は既定 0 で稼働（`TG_GROUPS=1` の unit 反映は root 作業未実施） |
 | atom2 (WhitebearATOM2) | `f0b548b` を実装（自機） | 済 | power モード（分離段と無関係） |
 | Whitebear2026 (WSL2 / modelctl) | `2d37a0d` + 自機の記録 `6217b4d` | 済（04:40 JST） | 監視専ら・分離段無効（再起動不要） |
+- **atom1 (WhitebearATOM1)**: 2026-11-06 に **サーマルガード表示を短縮**（本機。運用者依頼）。
+  `front/index.html` のみ — 発動中のヘッダインジケータが長文で折り返し・レイアウトがずれるため
+  (groups モード: `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)`)、短記法
+  `GPUクロック制限中(GPU 84℃超過)` に変更（温度は現在値ではなく**超過した閾値** = 1段目 high /
+  2段目 crit。CPU 側制限は `CPUクロック制限中(CPU 88℃超過)`）。GPU クロックタイルの最下行も
+  `最大 <gpu_clock_max_mhz> MHz`（取得値）に固定し、発動中の `実 X / ロック Y MHz` 分岐を削除。
+  発動中の目盛りがロック段に寄る挙動 (`tuneGauge()`) は据え置き。実コード抽出 + node で
+  13 ケース ALL PASS。フロントは静的配信なので `dgx-spark-api` 再起動不要。詳細は末尾
+  「サーマルガード表示の短縮 (2026-11-06)」節
 
 - **atom1 (WhitebearATOM1)**: 2026-11-03 に **ヘッダプルダウンのフォールバック選択とキャッシュ自動更新**
   を反映（`f0b548b`。atom2 実装）。`git pull --ff-only origin main`（a8f46cb → f0b548b、fast-forward、
@@ -4172,3 +4182,37 @@ stale 判定を通過する）、`~/.dgxsparkutil/last_active.json` 正常書き
 `api/install_service.env` でポートを変える機（Whitebear2026 は 8090）では再起動自体走るが応答待ちが
 30 秒で必ず FAIL するため、手動で `sudo systemctl restart dgx-spark-api` + 実ポートの curl 検証を使う。
 汎用化するなら `PORT="${PORT:-8080}"` 化が要る（未実施）。
+
+## サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)
+
+**背景**: サーマルガード発動中のヘッダインジケータが長文で折り返し、レイアウトがずれる
+(groups モード: `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)`)。GPU クロックタイルの
+最下行も発動中は `実 1651 / ロック 1665 MHz` と長い。運用者依頼で表示内容を短縮する。
+
+**変更内容**（`front/index.html` のみ。API 再起動不要）:
+
+- `thermalState()` のヘッダインジケータ文言 → 短記法:
+  - groups モード: `GPUクロック制限中(GPU 84℃超過)` / `CPUクロック制限中(CPU 88℃超過)`
+    （両方発動は ` / ` で結合）
+  - 従来 clock モード: `GPUクロック制限中(CPU 90℃超過)`（制限対象は常に GPU クロックで、
+    制限値に引っかかった側を明記）
+  - **温度は現在値ではなく超過した閾値 (1段目 = `*_high_c` / 2段目 = `*_crit_c`)**
+  - power モード `電力制限 250W (GPU 85℃)`・色段 (crit/high)・犯人パネルの着色
+    (`watchId` / `limitId`) は不変
+- `gaugeDefs()` の `g-gpu-clock` `sub()`: **常に** `最大 <gpu_clock_max_mhz> MHz`（取得値）。
+  発動中の `実 <現在値> / ロック <Y> MHz` 分岐を削除（サーマルガード時も同じ表示）
+- **据え置き**: 発動中のゲージ目盛りは従来どおりロック段に寄せる
+  (`tuneGauge()` + `thermalClockLockMhz()`)、半円内の中央値は実測クロックのまま、
+  統合時系列の 100% 基準は不変
+
+**検証**（本機 atom1 / `uvx nodeenv` の node 20。`index.html` から実コードを抽出して実行）:
+
+- `thermalState()` 10 ケース — groups GPU/CPU × high/crit、両方発動、従来 CPU 側 / GPU 側、
+  power 不変、解除 / unit 停止 = null → 全 PASS
+- `g-gpu-clock` `sub()` 3 ケース — 通常 / 発動中（同一表示 `最大 3003 MHz`）/
+  取得値なしフォールバック → 全 PASS
+
+**反映**: フロントは静的配信 (no-cache + `/api/page-version` 自動リロード) なので
+`dgx-spark-api` の再起動は不要。ブラウザアクセスで反映。
+2026-10-16 / 10-17 節の「フロント表示」と 2026-10-28 / 10-30 節のサブ行の記述は
+履歴として残る。
