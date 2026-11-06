@@ -2744,7 +2744,26 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 |---|---|---|---|
 | atom1 (WhitebearATOM1) | `06e5eda` を実装（自機）+ 記録 `925dd3e` | 不要（フロントのみ） | groups モード稼働中（2026-11-06 に `THERMAL_GROUPS=1` 反映済み） |
 | atom2 (WhitebearATOM2) | `06e5eda` + 自機の記録 | 不要（フロントのみ） | power モード（変更は clock/groups 分岐のみで無影響） |
-| Whitebear2026 (WSL2 / modelctl) | `2d37a0d` + 自機の記録 `6217b4d` | 済（04:40 JST） | 監視専ら・分離段無効（再起動不要） |
+| Whitebear2026 (WSL2 / modelctl) | `06e5eda` を反映 + 自機の記録 | 不要（フロントのみ） | 監視専ら・従来モード（`groups` なし / `locked_mhz=0`） |
+- **Whitebear2026 (WSL2 / modelctl)**: 2026-11-06 に **サーマルガード表示の短縮を反映**（`06e5eda`。atom1 実装）。
+  `git pull --ff-only origin main`（`6aa016e` → `06e5eda`、fast-forward、2 コミット、作業ツリー clean）。
+  コード変更は `front/index.html` のみ（残 1 コミットは README）なので `dgx-spark-api` 再起動不要
+  （静的配信 + no-cache + `/api/page-version` 自動リロードでブラウザアクセス時に反映）。
+  **本機への動作影響なし** — `/run/thermal/state` は `groups` なし・`locked_mhz: 0`（監視専らの
+  従来形式）で、`thermalState()` は `mhz == 0 && cpuKhz == 0` により `null` を返す（ヘッダに
+  インジケータは出ない）。仮に発動しても `acpitz_c` / `temp_c` が 0（WSL2 で温度センサー未取得）のため
+  `cpuSide` は false、新短記法は `GPUクロック制限中(GPU 90℃超過)`（`high_c` = 90 が閾値表示）になる。
+  GPU クロックタイルの最下行は発動有無にかかわらず `最大 <gpu_clock_max_mhz> MHz`（取得値）表示に
+  なった。README に追記された `THERMAL_GROUPS=1`
+  の systemd drop-in は **WSL2（監視専ら）は対象外**。
+  実測（ポート **8090**）: `GET /` は `Cache-Control: no-cache` + `ETag` 付き 200、注入 `PAGE_ETAG`
+  が `/api/page-version` と一致（`68d39424…`）、`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ
+  残存、配信中 HTML（96,741 B）とリポジトリ `front/index.html`（96,714 B）は ETag 注入分のみ差分、
+  旧 `実 X / ロック Y MHz` 分岐は 0 箇所・新短記法はヘッダ 2 + CPU 1 箇所、`/api/platform`・
+  `/api/vllm/status`・`/api/thermal`・`/api/rag/status`・`/api/page-version` がすべて 200、
+  `server.log` にエラーなし、`dgx-spark-api` / `thermal-guard` とも `active` のまま。詳細は末尾
+  「サーマルガード表示の短縮 (2026-11-06)」節
+
 - **atom2 (WhitebearATOM2)**: 2026-11-06 に **サーマルガード表示の短縮を反映**（`06e5eda`。atom1 実装）。
   `git pull --ff-only origin main`（f0b548b → 06e5eda、fast-forward、5 コミット、作業ツリー clean）。
   コード変更は `front/index.html` のみ（残 4 コミットは README）なので `dgx-spark-api` 再起動不要
@@ -4242,3 +4261,17 @@ thermal-guard は power モード（R9700 電力制限）で、変更された `
 分岐は power モードでは到達しない（`電力制限 xxW (GPU xx℃)` 表示は不変）。GPU クロックタイルの
 `実 X / ロック Y MHz` 分岐も `thermalClockLockMhz()` が power モードでは常に null なので元々
 表示されなかった。詳細は「5. 各機の同期状況」の atom2 項。
+
+**Whitebear2026 (WSL2 / modelctl) 反映（2026-11-06）**: `git pull --ff-only origin main`
+（`6aa016e` → `06e5eda`、fast-forward、2 コミット = `front/index.html` + README、作業ツリー clean）。
+`front/index.html` のみ変更なので `dgx-spark-api` の再起動は不要。実測（ポート **8090**）: `GET /` は
+`Cache-Control: no-cache` + `ETag` 付き 200、注入 `PAGE_ETAG` が `/api/page-version` と一致
+（`68d39424…`）、`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存、配信中 HTML（96,741 B）と
+リポジトリ `front/index.html`（96,714 B）は ETag 注入分のみ差分、旧 `実 X / ロック Y MHz` 分岐は
+0 箇所、`/api/platform`・`/api/vllm/status`・`/api/thermal`・`/api/rag/status`・`/api/page-version`
+がすべて 200、`server.log` にエラーなし、`dgx-spark-api` / `thermal-guard` とも `active` のまま。
+**本機への動作影響なし** — `/run/thermal/state` は `groups` なし・`locked_mhz: 0`（監視専らの従来
+形式）で、`thermalState()` は `mhz == 0 && cpuKhz == 0` により `null` を返す（ヘッダにインジケータは
+出ない）。発動時のみ新短記法 `GPUクロック制限中(GPU 90℃超過)` が出る（従来 clock モードは
+`temp_c` と `high_c` / `crit_c` の比較で閾値を表示）。`THERMAL_GROUPS=1` の systemd drop-in は
+監視専らの本機では不要（未適用）。詳細は「5. 各機の同期状況」の Whitebear2026 項。
