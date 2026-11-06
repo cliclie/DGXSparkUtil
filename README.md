@@ -4230,3 +4230,15 @@ stale 判定を通過する）、`~/.dgxsparkutil/last_active.json` 正常書き
 `dgx-spark-api` の再起動は不要。ブラウザアクセスで反映。
 2026-10-16 / 10-17 節の「フロント表示」と 2026-10-28 / 10-30 節のサブ行の記述は
 履歴として残る。
+
+**atom2 (WhitebearATOM2) 反映（2026-11-06）**: `git pull --ff-only origin main`（f0b548b → 06e5eda、
+fast-forward、5 コミット、作業ツリー clean）。`front/index.html` のみ変更なので
+`dgx-spark-api` の再起動は不要。実測（ポート **8080**）: `GET /` は `Cache-Control: no-cache` +
+`ETag` 付き 200、注入 `PAGE_ETAG` が `/api/page-version` と一致（`00a94fdf…`）、`__PAGE_ETAG__`
+リテラルは防御チェック 1 箇所のみ残存、配信中 HTML とリポジトリ `front/index.html` は ETag 注入分
+のみ差分、`/api/platform`・`/api/vllm/status`・`/api/thermal`・`/api/rag/status`・
+`/api/page-version` がすべて 200、`server.log` にエラーなし。**本機への動作影響なし** —
+thermal-guard は power モード（R9700 電力制限）で、変更された `thermalState()` の clock/groups
+分岐は power モードでは到達しない（`電力制限 xxW (GPU xx℃)` 表示は不変）。GPU クロックタイルの
+`実 X / ロック Y MHz` 分岐も `thermalClockLockMhz()` が power モードでは常に null なので元々
+表示されなかった。詳細は「5. 各機の同期状況」の atom2 項。
