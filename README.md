@@ -67,6 +67,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [CPU 群と GPU 群を分けた段に改訂（2026-11-01 / 本機 = WhitebearATOM1 のみ）](#cpu-群と-gpu-群を分けた段に改訂2026-11-01--本機--whitebearatom1-のみ)
 - [ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03 / 本機 = WhitebearATOM2）](#ヘッダプルダウンのフォールバック選択とキャッシュ自動更新2026-11-03--本機--whitebearatom2)
 - [サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)](#サーマルガード表示の短縮-インジケータ短記法とgpuクロックタイル最下行の取得値固定-2026-11-06--本機--whitebearatom1)
+- [api venv の保守更新と hf-venv の 2.x 化 (2026-11-07 / 本機 = WhitebearATOM2)](#api-venv-の保守更新と-hf-venv-の-2x-化-2026-11-07--本機--whitebearatom2)
 
 ## 目的
 
@@ -4275,3 +4276,29 @@ thermal-guard は power モード（R9700 電力制限）で、変更された `
 出ない）。発動時のみ新短記法 `GPUクロック制限中(GPU 90℃超過)` が出る（従来 clock モードは
 `temp_c` と `high_c` / `crit_c` の比較で閾値を表示）。`THERMAL_GROUPS=1` の systemd drop-in は
 監視専らの本機では不要（未適用）。詳細は「5. 各機の同期状況」の Whitebear2026 項。
+## api venv の保守更新と hf-venv の 2.x 化 (2026-11-07 / 本機 = WhitebearATOM2)
+
+`~/LLM/tools/sec_scan.py` §1（毎週月曜 09:30 の timer）に出た版上げ候補 9 件を適用した。
+**OSV 該当はゼロ**で、2026-10-23 のような CVE 対応ではなく純粋な保守更新。
+
+- **更新（api venv）**: anyio 4.15.1 → **4.16.0** / click 8.5.0 → **8.5.1** /
+  fastapi 0.161.1 → **0.162.0** / opentelemetry-api 1.45.1 → **1.45.2** /
+  pydantic 2.14.1 → **2.14.3** / pydantic_core 2.50.1 → **2.50.4** / starlette 1.9.0 → **1.10.0** /
+  typing-inspection 0.4.4 → **0.4.5** / websockets 17.3 → **17.4**
+- **`requirements.lock` を再生成**（更新前は gitignore 済みの `requirements.lock.pre-update` へ退避）。
+  `requirements.txt` の下限は 2026-10-23 の設定が今回の実測版を包含しているため変更不要を確認
+- **検証**: `sudo systemctl restart dgx-spark-api.service` → `active`。
+  `/`・`/api/platform`・`/api/vllm/status`・`/api/rag/status` すべて 200（実データ返却）、
+  journal にエラーなし。starlette 1.9 → 1.10 はマイナー上げだが import 失敗・route 数の変化なし
+- **同時更新（`~/LLM/tools/hf-venv`）**: huggingface_hub 1.33.0 → **2.4.0**（メジャー）/
+  hf-xet 1.7.0 → 1.8.0 / filelock → 4.2.9 / certifi → 2026.10.23 / httpx2・httpcore2 → 2.16.0。
+  `hf download` の `--include` / `--local-dir` / `--repo-type` は 2.x でも構文互換で、
+  `HF_HUB_ENABLE_HF_TRANSFER=1` 経路の実取得も動作確認済み
+  （詳細は `~/LLM/README.md` の 2026-11-07 エントリ）
+- **他機同期**: `origin/main` の Whitebear2026 (WSL2) 反映記録（`f98a1d2`、README のみ）の上に
+  本更新を rebase して push。変更ファイルが `api/requirements.lock` と README で重なる行はなく
+  競合なし。front 変更ではないため他機の `dgx-spark-api` 再起動は不要
+- **sec_scan 側の改善（本機 atom2）**: §6「上流リリース（実稼働の版 vs 上流最新）」を追加し、
+  llama.cpp nightly / Strata / `magnitude-release.json` / vllm-radiance tag を自動照合。
+  ローカルビルドイメージ（`llama-cpp-vulkan-r9700` / `sociax-rag/vllm`）が §3 の digest 比較で
+  監視できない穴を塞いだ。今回の Strata 0.2.11 と llama.cpp b12180 は従来この検知が無かった
