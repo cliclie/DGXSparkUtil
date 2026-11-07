@@ -101,7 +101,7 @@ PLATFORMS: dict[str, dict] = {
         "net_max_mbps": 1000,
         "exclusive_llm_rag": False,
         "backend": "modelctl",
-        "model_ctl": "/home/cliclie/scripts/model-ctl.sh",
+        "model_ctl": "/home/cliclie/llm/script/model-ctl.sh",
         "rag_enabled": False,     # WSL 側に RAG compose 環境なし → セクション非表示
         "params_editable": False,  # 設定形式が複数 (yml / json / .env) → 表示のみ
         # WSL の nvidia-smi は温度上限を公開しない (T.Limit Specification = N/A/0)。

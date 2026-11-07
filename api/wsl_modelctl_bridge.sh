@@ -21,14 +21,14 @@
 #   mode  label  port  dir  ready  running  engine  log
 #
 # 環境変数:
-#   DGXUTIL_MODEL_CTL  model-ctl.sh のパス (既定: $HOME/scripts/model-ctl.sh)
+#   DGXUTIL_MODEL_CTL  model-ctl.sh のパス (既定: $HOME/llm/script/model-ctl.sh)
 #   MC_TIMEOUT         起動完了待機の秒数 (model-ctl.sh 側の既定 600 を継承)
 
 # set -u は使わない: model-ctl.sh は対話シェルでの source を前提として
 # PROMPT_COMMAND 等の未設定変数を参照するため、nounset では途中で落ちる。
 set -o pipefail
 
-MODEL_CTL="${DGXUTIL_MODEL_CTL:-$HOME/scripts/model-ctl.sh}"
+MODEL_CTL="${DGXUTIL_MODEL_CTL:-$HOME/llm/script/model-ctl.sh}"
 # source 前の安全策 (model-ctl.sh 末尾が PROMPT_COMMAND を参照する)
 PROMPT_COMMAND="${PROMPT_COMMAND:-}"
 
