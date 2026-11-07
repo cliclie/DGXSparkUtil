@@ -97,7 +97,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
    - Web UI から稼働モデルを切替(サーバ側で既存の切替スクリプトを呼ぶ)
    - 既存スクリプト参照: `/home/cliclie/llm/compose/switch_models.sh`(参照のみ。調査フェーズでは実行しない)
    - WSL2 は docker compose を使わないため、汎用ランチャー
-     `/home/cliclie/scripts/model-ctl.sh`(14 モードを VRAM 排他切替)を呼ぶ
+     `/home/cliclie/llm/script/model-ctl.sh`(15 モードを VRAM 排他切替)を呼ぶ
 4. **稼働モデルに与えているパラメータ値の表示・編集**
    - コンテキストサイズ等のパラメータ値を表示
    - 一部項目は編集可能。編集後はコンテナを再作成して反映
@@ -2448,7 +2448,7 @@ python3 -m venv /tmp/jsenv && /tmp/jsenv/bin/pip install -q websocket-client
 ## WSL2 モデル切替バックエンド modelctl (2026-10-21)
 
 Whitebear2026 (WSL2 Ubuntu 26.04 / RTX 5090 32GB) を第 3 の対象機材として導入した。
-**docker compose を新設せず**、既存の汎用ランチャー `~/scripts/model-ctl.sh`
+**docker compose を新設せず**、既存の汎用ランチャー `~/llm/script/model-ctl.sh`
 (RTX 5090 上の 14 モードを VRAM 排他で切替) をそのまま Web UI の切替バックエンドに使う。
 atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.sh` が担う、という対応関係。
 
@@ -2461,7 +2461,7 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   `label=Whitebear2026-WSL` / `gpu_backend=nvidia` / `memory_mode=discrete`
   (RAM 82GB + VRAM 32GB → atom2 と同じ 2 ゲージを再利用) / `net_max_mbps=1000` /
   `exclusive_llm_rag=False` / **`backend=modelctl`** /
-  `model_ctl=/home/cliclie/scripts/model-ctl.sh` / `rag_enabled=False` /
+  `model_ctl=/home/cliclie/llm/script/model-ctl.sh` / `rag_enabled=False` /
   `params_editable=False` / `gpu_temp_crit_c=95.0`
 - 未設定キーは `_cfg()` の既定値に落ちるため、`backend=compose` / `rag_enabled=True` /
   `params_editable=True` = 既存 2 環境は従来どおりの解決値
@@ -2589,7 +2589,7 @@ RTX 5090 1 枚では `model-ctl.sh` が 14 モードを **VRAM 排他**で管理
   末尾行を返す。`/api/vllm/cline` は LAN IP + API キー + ctx 262144 を返す
   (WSL 内は mDNS 解決不可のため `hostname.local` ではなく LAN IP。`model-ctl.sh` の案内と同じ)
 - **model-ctl.sh 無変更**: `git -C ~/Whitebear2026-WSL2 status --porcelain scripts/` が空、
-  `~/scripts/model-ctl.sh` の mtime も運用前そのまま (対話 CLI `llm` / `tabby` / `unloadllm` に影響なし)
+  `~/llm/script/model-ctl.sh` の mtime も運用前そのまま (対話 CLI `llm` / `tabby` / `unloadllm` に影響なし)
 - **systemd 導入後の再検証 (2026-10-21 05:33)**: `dgx-spark-api.service` (system.slice /
   `LimitNOFILE=1048576` / `KillMode=process`) 経由で `swift40` へ切替 → `job success=True`。
   リクエスト後に `e2e 1.56 s / ttft 0.21 s / prefill 300 tok/s / decode 162.8 tok/s /
@@ -2732,12 +2732,22 @@ git --no-pager log -S'<旧 API key の実値>' --all --oneline   # 空である�
   `git reflog expire --expire=now --all && git gc --prune=now`
 - 以降も `git pull` を使うなら `git config pull.ff only`（または `pull.rebase true`）を推奨。
   force push 直後の pull はマージコミットを生成する
-- 他機で modelctl バックエンド（WSL2）を使う場合は、同期後に `~/scripts/model-ctl.sh` の実在を確認する。
-  `api/config.py` は既定で `PLATFORMS["wsl"].model_ctl = /home/cliclie/scripts/model-ctl.sh` を使い、
+- 他機で modelctl バックエンド（WSL2）を使う場合は、同期後に `~/llm/script/model-ctl.sh` の実在を確認する。
+  `api/config.py` は既定で `PLATFORMS["wsl"].model_ctl = /home/cliclie/llm/script/model-ctl.sh` を使い、
   上書きは環境変数 `DGXUTIL_MODEL_CTL`。**`install_service.env` に書いても api プロセスには届かない**
   （`install_service.sh` が自プロセス内で export するだけで、`dgx-spark-api.service` のテンプレートに
   `Environment=` 置換がない）。既定パスに置けない場合は unit に直接
   `Environment=DGXUTIL_MODEL_CTL=/path/to/model-ctl.sh` を追記して `daemon-reload` + `restart` すること
+
+- **WSL 側のフォルダ再編（2026-11-08）**: `~/scripts/` は廃止。汎用ランチャーは
+  **`~/llm/script/model-ctl.sh`**（新設 `WSL-llm` リポジトリ）、hermes 系は `~/agent/script/`（新設 `WSL-agent`）へ移設した。
+  `DGXSparkUtil` は atom1 / atom2 と共有するため**移動しておらず**、`dgx-spark-api.service` /
+  `thermal-guard.service` の実行パス（`~/DGXSparkUtil/api`）は従来どおり。
+  再編後の実測: `GET /api/vllm/status` が **15 プロファイル**を返し、ブリッジが新パスの `model-ctl.sh` を
+  source して稼働状態を正しく報告する（`api/config.py` は import 時に読むため、変更の適用には
+  `sudo systemctl restart dgx-spark-api` が必要）。
+  WSL 側の詳細は `~/llm/README.md` と `~/agent/README.md`（Strata は `WSL-llm` の submodule、
+  Hermes の状態実体は `~/agent/hermes` ＋ `~/.hermes` は symlink）。
 
 ### 4. 残る前提（重要）
 
