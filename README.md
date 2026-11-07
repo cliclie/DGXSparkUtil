@@ -68,6 +68,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [ヘッダプルダウンのフォールバック選択とキャッシュ自動更新（2026-11-03 / 本機 = WhitebearATOM2）](#ヘッダプルダウンのフォールバック選択とキャッシュ自動更新2026-11-03--本機--whitebearatom2)
 - [サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)](#サーマルガード表示の短縮-インジケータ短記法とgpuクロックタイル最下行の取得値固定-2026-11-06--本機--whitebearatom1)
 - [api venv の保守更新と hf-venv の 2.x 化 (2026-11-07 / 本機 = WhitebearATOM2)](#api-venv-の保守更新と-hf-venv-の-2x-化-2026-11-07--本機--whitebearatom2)
+- [hipfire (hipfire・atom2) の Cline 設定値と prefill/decode 表示（2026-11-07 / 本機 = WhitebearATOM2）](#hipfire-hipfireatom2-の-cline-設定値と-prefilldecode-表示2026-11-07--本機--whitebearatom2)
 
 ## 目的
 
@@ -504,6 +505,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | 同上(llama.cpp) | `GET /metrics` (`--metrics` 指定時、Prometheus 形式) + `GET /slots` (KVキャッシュ使用率) |
 | 同上(Magnitude / magn) | `~/.magnitude/serving-usage.sqlite` (usage 表) + GPU 負荷から実行中を推定 (`/metrics` 無し、実装メモ 2026-10-06) |
 | 同上(Strata / strata・atom2 compose) | `GET /metrics` (**JSON 形式・Bearer key 必須**。Prometheus ではない) + `/health` (key 不要・Cline 設定の max_context/images 用)。実装メモ 2026-10-28 |
+| 同上(hipfire / hipfire・atom2 compose) | `GET /metrics` (**Prometheus 形式・key 不要**。`hipfire_*` 系列は瞬时値を持たずリクエスト単位の histogram `sum/count` 累計のみ → 前回ポーリングとの差分で直近平均を算出) + `/v1/models` の `meta.n_ctx` / `input_modalities` (Cline 設定用)。実装メモ 2026-11-07 |
 | 同上(modelctl / WSL2) | TabbyAPI=起動ログ解析、Strata=`/metrics/prometheus`(`llamacpp:*` 同名系列)+`/slots`+`[strata] done:` ログ、llama.cpp=`/slots`+`print_timing` ログ、ExLlamaV3=`/health` のカウンタ差分 (実装メモ 2026-10-21) |
 | 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`、modelctl は `logs/ctl-*.log` 等のログファイル末尾) |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
@@ -528,6 +530,16 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   (リクエスト直後 5 秒はモジュールレベルキャッシュで計測値を維持。実装メモ 2026-10-28)。
   なお modelctl/WSL2 の `engine == "strata"` は**別物** (llama.cpp 系フォークの
   `/metrics/prometheus` + ログ解析、実装メモ 2026-10-21) で本分岐とは無関係
+- **hipfire (hipfire・atom2 compose のみ) は `/metrics` が Prometheus 形式だが系列名が `hipfire_*`**
+  で既存の `vllm:`/`sglang:`/`llamacpp:` 検出チェーンに入らないため、`_engine_kind()` を通すと
+  `unknown` で `metrics={}` になり prefill/decode が空欄になる。加えて hipfire は
+  **瞬时スループットを持たない** (リクエスト単位の値を `sum/count` の累計 histogram でしか出さない)。
+  → `get_status()` の hipfire 分岐で `_hipfire_server_metrics()` が early return し、
+  **前回ポーリングとの差分**で直近完了リクエストの平均を出す (差分が無ければ累計平均に
+  フォールバックするので idle でも 0 や "-" に落ちない)。KVCache 使用率は hipfire が
+  使用量を出さないため直近リクエストの `(prompt+output) ÷ hipfire_context_capacity_tokens` の
+  推定 (Strata と同じ定義)。Cline 設定値の context/images は `/v1/models` の
+  `meta.n_ctx` / `architecture.input_modalities` から動的取得する (実装メモ 2026-11-07)
 - **E2E・TTFT・入力/出力スループット(表示ラベルは `prefill` / `decode`)の前回値保持はフロント側で実施**: `api/vllm.py` は算出値(0/None を含む)をそのまま返す。
   `front/index.html` の `pickMetric()` が直近の非ゼロ値を保持し、API が 0/None を返した間は前回値を維持表示する(実装メモ 2026-10-06)。
   稼働モデル消失・モデル切替(profile 変化)で保持値をリセット。スループットの白/灰は「API が非ゼロの新しい計測値を返した」側を白とする相対判定
@@ -4302,3 +4314,79 @@ thermal-guard は power モード（R9700 電力制限）で、変更された `
   llama.cpp nightly / Strata / `magnitude-release.json` / vllm-radiance tag を自動照合。
   ローカルビルドイメージ（`llama-cpp-vulkan-r9700` / `sociax-rag/vllm`）が §3 の digest 比較で
   監視できない穴を塞いだ。今回の Strata 0.2.11 と llama.cpp b12180 は従来この検知が無かった
+
+## hipfire (hipfire・atom2) の Cline 設定値と prefill/decode 表示（2026-11-07 / 本機 = WhitebearATOM2）
+
+**経緯**: 2026-11-07 に atom2 へ 6 番目のエンジン **hipfire 0.4.5**（Rust + HIP ネイティブ。
+同一 Qwen3.8-27B を公式 MQ4V2 XT-symmetric 量子化でロード。compose プロファイル `hipfire`、
+ホストポート **8011**）を追加した（`~/LLM` コミット `9aa1ee9`）。profiles 対応表は
+`_load_profiles()` の compose 動的パースで自動追従したが、稼働中に次の 2 件が出たため
+`api/vllm.py` 側を追加した（**フロントは無変更**）。
+
+1. システムタブの **prefill / decode が空欄**
+2. モデルタブの Cline 設定値で **Context Windows Size が null**
+
+**原因**:
+
+1. hipfire の `/metrics` は Prometheus 形式だが系列名が `hipfire_*` で、`_engine_kind()` の
+   `vllm:` / `sglang:` / `llamacpp:` 検出チェーンが判別できず `unknown` → `metrics={}` になる。
+   さらに hipfire は**瞬时スループットを持たない**（リクエスト単位の値を `sum/count` の
+   累計 histogram でしか出さない）ため、単にマッピングを足すだけでは値が動かない
+2. hipfire は compose の `command:` を持たず環境変数 `HIPFIRE_MODEL` で起動するので、
+   `--max-model-len` / `--context-length` / `--ctx-size` の動的取得が全滅。
+   `CLINE_MODEL_TABLE` にも `hipfire` が無く、`context_recommended` / `context_max` が
+   どちらも None になった（Magnitude・Strata と同じ構造）
+
+**hipfire の API 仕様（本機実測）**:
+
+| エンドポイント | 認証 | 形式 |
+|---|---|---|
+| `GET /health` | 不要 | JSON（`status` / `model` / `loading_model` / `n_ctx` / `capabilities`） |
+| `GET /v1/models` | 不要 | OpenAI 互換 + `meta.n_ctx`（262144）+ `architecture.input_modalities` |
+| `GET /metrics` | 不要 | **Prometheus 形式**。`hipfire_prefill_tokens_per_second_{sum,count}` / `hipfire_decode_tokens_per_second_*` / `hipfire_ttft_milliseconds_*` / `hipfire_request_latency_milliseconds_*` / `hipfire_queue_depth` / `hipfire_context_capacity_tokens` / `hipfire_prompt_tokens_total` / `hipfire_completion_tokens_total` |
+
+**実装**（`api/vllm.py` のみ）:
+
+- `get_status()`: strata 分岐の隣に hipfire 分岐を追加し、`_engine_kind()` を通さず
+  `_hipfire_server_metrics()` で early-return する
+- `_hipfire_server_metrics()`: 既存の汎用パーサ `_parse_vllm_metrics()`（`hipfire_*` をそのまま
+  拾える。`_total` 末尾は合計、それ以外は初出採用）と `_hist_avg()` を再利用。
+  **前回ポーリングとの差分**で直近完了リクエストの平均を出す（front は 2 秒間隔で叩く）。
+  差分が取れなければ累計平均にフォールバックするので、idle でも 0 や "-" に落ちない
+  （auto-unload で 0 を返す Strata とは意図的に違う）
+  - decode = Δ`hipfire_decode_tokens_per_second_sum` ÷ Δ`_count`、prefill も同様
+  - TTFT・E2E = Δ`hipfire_ttft_milliseconds` / Δ`hipfire_request_latency_milliseconds`（ms → s）
+  - `requests_running` = `hipfire_queue_depth`（in-flight + queued。hipfire は両者を区別しないため
+    `requests_waiting` は None のまま = front では "-"）。`hipfire_model_loading` 中は 0
+  - KVCache 使用率 = hipfire が KV 使用量を出さないため、直近リクエストの
+    `(prompt+output) ÷ hipfire_context_capacity_tokens × 100` の推定（Strata と同じ定義）。
+    差分 0 の間は 5 秒維持し以降 0（モジュール状態 `_hipfire_prev`）
+- `get_cline_config()`: hipfire 分岐で `_hipfire_models_info()`（`/v1/models` の `meta.n_ctx` と
+  `architecture.input_modalities`）を優先し、`CLINE_MODEL_TABLE["hipfire"]`
+  （262144 / images: true / temperature **1.0**）をフォールバックに。温度を 0.6 でなく 1.0 とした
+  のは hipfire の registry `recommended_settings` が `temp 1.0 / top_p 0.95 / top_k 20`
+  （Qwen3.8 系の公式推奨）だから
+
+**検証**（実 HTTP・hipfire 0.4.5 / `qwen3.8:27b-mq4-xts`）:
+
+- `GET /api/vllm/cline` → `context_recommended=262144` / `context_max=262144` /
+  `supports_images=true` / `temperature=1.0` / `model_id=qwen3.8:27b-mq4-xts`
+- `GET /api/vllm/status`（idle）→ `prompt_tokens_per_s=3784.17` / `generation_tokens_per_s=46.65`
+  （累計平均へのフォールバック。空欄にならない）
+- **生成中の追従**（`bench_speed.py` を流しながら 2 秒間隔でポーリング）:
+
+  | 段階 | running | prefill | decode | KV |
+  |---|---|---|---|---|
+  | warmup 生成中 | 1.0 | 155.4 | 23.5 | 0.01% |
+  | prefill 完了 | 1.0 | 3557.4 | 45.2 | 0.01% |
+  | decode 中 | 1.0 | 558.8 | **146.9** | 0.21% |
+  | 完了後 | 0.0 | 3432.5 | 49.5 | **4.12%** |
+
+  decode 146.9 T/s は同一リクエストの `bench_speed.py` 実測 147.06 T/s と一致。
+  KV 4.12% は `(10809+500) ÷ 262144 = 4.31%` と整合
+- 反映には `sudo systemctl restart dgx-spark-api.service` が必要（uvicorn は `--reload` なし）
+
+**未対応・留意**: `reasoning_effort_options` は全エンジン共通のハードコード
+（`None/Low/Medium/High/XHigh`）で、hipfire の Qwen3.8 が実際に受け付けるのは `low` /
+`medium` / `xhigh`（`High` は drop+warn）。hipfire の `/health` は `reasoning_efforts` を
+返すので、必要ならここも動的化できる（今回は未実施）

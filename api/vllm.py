@@ -161,6 +161,9 @@ _prev_metrics: dict = {"ts": None, "prompt": None, "generation": None}
 
 # Strata の直近スループットキャッシュ（idle/unloaded で 5s 以内は前回値を返す）
 _strata_last_metrics: dict = {}
+# hipfire の /metrics はリクエスト単位の値を累計 histogram (sum/count) でしか出さないため、
+# 前回ポーリングとの差分を取る状態を保持する (_hipfire_server_metrics が使う)
+_hipfire_prev: dict = {}
 
 
 def _tps_of(key: str, metric: str, pm: dict, now: float) -> float | None:
@@ -571,6 +574,26 @@ def _strata_health_info(port: int) -> dict:
     return out
 
 
+def _hipfire_models_info(port: int) -> dict:
+    """hipfire の /v1/models (key 不要) から n_ctx / images を読む (Cline 設定補完用)。
+
+    hipfire は compose の command を持たず環境変数 (HIPFIRE_MODEL) で起動するため、
+    Magnitude / Strata と同じく API から取る。KV 容量はカード実測で解決される
+    （本機 R9700 では max_seq 262144 / card_cap 477153）ので静的値より正確。
+    """
+    txt = _http_get(f"http://localhost:{port}/v1/models", 5)
+    if not txt:
+        return {}
+    out: dict = {}
+    m = re.search(r'"n_ctx"\s*:\s*(\d+)', txt)
+    if m:
+        out["n_ctx"] = int(m.group(1))
+    # architecture.input_modalities に "image" が立っていれば vision 対応
+    if re.search(r'"input_modalities"\s*:\s*\[[^\]]*"image"', txt):
+        out["images"] = True
+    return out
+
+
 def _strata_server_metrics(port: int) -> dict:
     """Strata の /metrics (Bearer 必須・JSON。Prometheus 形式ではない) をマッピングする。
 
@@ -661,6 +684,81 @@ def _strata_server_metrics(port: int) -> dict:
                 "kv_cache_usage_pct": m["kv_cache_usage_pct"],
             }
         )
+    return m
+
+
+def _hipfire_server_metrics(port: int) -> dict:
+    """hipfire の /metrics (Prometheus 形式・API key 不要) をマッピングする。
+
+    hipfire は瞬时スループットを持たない。リクエスト単位の値を histogram
+    (sum/count) として累計するだけなので、**前回ポーリングとの差分**で
+    「直近に完了したリクエストの平均」を出す (front は 2 秒間隔で叩く)。
+    差分が取れないとき (初回ポーリング・生成していない間) は累計平均に
+    フォールバックするので、Strata の idle 時のように 0 や "-" には落ちない。
+    - 出力スループット = hipfire_decode_tokens_per_second  (直近平均 → 累計平均)
+    - 入力スループット = hipfire_prefill_tokens_per_second (同上)
+    - TTFT / E2E      = hipfire_ttft_milliseconds / hipfire_request_latency_milliseconds
+    - KVCache 使用率  = 直近リクエストの (prompt+output) ÷ context_capacity × 100
+      (hipfire は KV 使用量を出さないため Strata と同じ定義の推定値)
+    - requests_running = hipfire_queue_depth (in-flight + queued。hipfire は両者を
+      区別しないので requests_waiting は None のまま = front では "-")
+    """
+    m = {
+        "requests_running": None,
+        "requests_waiting": None,
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": None,
+        "prompt_tokens_per_s": None,
+        "generation_tokens_per_s": None,
+    }
+    txt = _http_get(f"http://localhost:{port}/metrics", 5)
+    if not txt:
+        return m
+    pm = _parse_vllm_metrics(txt)
+    if not pm:
+        return m
+
+    def recent(name: str) -> float | None:
+        """<name>_sum / <name>_count の差分平均。count 増が無ければ累計平均。"""
+        s, c = pm.get(f"hipfire_{name}_sum"), pm.get(f"hipfire_{name}_count")
+        if s is None or c is None:
+            return None
+        prev = _hipfire_prev.get(name)
+        _hipfire_prev[name] = (s, c)
+        if prev is not None and c > prev[1]:
+            return (s - prev[0]) / (c - prev[1])
+        return _hist_avg(pm, f"hipfire_{name}")
+
+    m["generation_tokens_per_s"] = recent("decode_tokens_per_second")
+    m["prompt_tokens_per_s"] = recent("prefill_tokens_per_second")
+    ttft = recent("ttft_milliseconds")
+    e2e = recent("request_latency_milliseconds")
+    if ttft is not None:
+        m["ttft_s"] = ttft / 1000.0
+    if e2e is not None:
+        m["e2e_latency_s"] = e2e / 1000.0
+    if not pm.get("hipfire_model_loading"):
+        m["requests_running"] = pm.get("hipfire_queue_depth")
+
+    cap = pm.get("hipfire_context_capacity_tokens")
+    pt, ct = pm.get("hipfire_prompt_tokens_total"), pm.get("hipfire_completion_tokens_total")
+    if cap and pt is not None and ct is not None:
+        prev = _hipfire_prev.get("tokens")
+        _hipfire_prev["tokens"] = (pt, ct)
+        # 初回は累計、以降は差分（直近リクエストが KV を占有した割合）
+        used = ((pt - prev[0]) + (ct - prev[1])) if prev else (pt + ct)
+        if used > 0:
+            m["kv_cache_usage_pct"] = min(100.0, used / float(cap) * 100.0)
+            _hipfire_prev["kv"] = (time.time(), m["kv_cache_usage_pct"])
+        else:
+            # 差分 0 = この 2 秒間にリクエストが完了していない。直近値を 5 秒維持し、
+            # その後は 0（Strata / llama.cpp の idle 時の「直近値表示」と同じ挙動）
+            ts_kv, last_kv = _hipfire_prev.get("kv", (0.0, None))
+            if last_kv is not None and time.time() - ts_kv <= 5.0:
+                m["kv_cache_usage_pct"] = last_kv
+            else:
+                m["kv_cache_usage_pct"] = 0.0
     return m
 
 
@@ -1416,6 +1514,18 @@ def get_status() -> dict:
         out["active"] = active
         return out
 
+    # hipfire: /metrics は Prometheus 形式 (API key 不要)。瞬时スループットを持たないため
+    # 累計 histogram (sum/count) の差分で直近平均を出す (_hipfire_server_metrics 参照)。
+    # _engine_kind に hipfire 系名 (hipfire_*) の判定は無いため、通すと "unknown" で
+    # metrics={} になり prefill/decode が空欄になる。ここで早期 return する
+    if running_profile == "hipfire":
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _hipfire_server_metrics(port)
+        active["logs"] = _logs_tail(info["container"])
+        out["active"] = active
+        return out
+
     # 組み込みメトリクス (/metrics): vLLM は常時公開、SGLang は --enable-metrics 指定時のみ
     # vLLM 26.x の系列名: e2e 相当は request_inference_time_seconds、
     # KV キャッシュは kv_cache_usage_perc。エンジン種別は 120 秒キャッシュなので
@@ -1958,6 +2068,13 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
+    "hipfire": {
+        "images": True,  # 動的: /v1/models の input_modalities（2026-11-07 検証済み）
+        "context_max": 262144,  # 動的: /v1/models の meta.n_ctx（MQ4V2 のネイティブ 262K）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,  # registry の recommended_settings（top_p 0.95 / top_k 20）
+    },
 }
 
 
@@ -2109,6 +2226,15 @@ def get_cline_config() -> dict:
         if hi.get("max_context"):
             context_recommended = hi["max_context"]
             context_max = hi["max_context"]
+        if "images" in hi:
+            images = hi["images"]
+    # hipfire も compose の command が無く環境変数設定 → /v1/models から動的取得
+    # （取れないときのみ CLINE_MODEL_TABLE の 262144 にフォールバックする）
+    if profile == "hipfire":
+        hi = _hipfire_models_info(port)
+        if hi.get("n_ctx"):
+            context_recommended = hi["n_ctx"]
+            context_max = hi["n_ctx"]
         if "images" in hi:
             images = hi["images"]
     max_output_recommended = table.get("max_output_recommended", 8192)
