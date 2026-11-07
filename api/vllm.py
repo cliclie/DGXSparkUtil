@@ -2071,6 +2071,9 @@ CLINE_MODEL_TABLE = {
     "hipfire": {
         "images": True,  # 動的: /v1/models の input_modalities（2026-11-07 検証済み）
         "context_max": 262144,  # 動的: /v1/models の meta.n_ctx（MQ4V2 のネイティブ 262K）
+        # hipfire の KV 予算は prefill + max_tokens + 1 <= 262144（超過は 400 で縮小しない）。
+        # 推奨 8192 を保つこと。contextWindow と同じ大きさの max_tokens を送ると
+        # prefill が約 16.5K を超えた時点で必ず拒否される（2026-11-07 実測）
         "max_output_recommended": 8192,
         "max_output_max": 32768,
         "temperature": 1.0,  # registry の recommended_settings（top_p 0.95 / top_k 20）

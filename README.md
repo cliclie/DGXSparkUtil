@@ -4386,6 +4386,16 @@ thermal-guard は power モード（R9700 電力制限）で、変更された `
   KV 4.12% は `(10809+500) ÷ 262144 = 4.31%` と整合
 - 反映には `sudo systemctl restart dgx-spark-api.service` が必要（uvicorn は `--reload` なし）
 
+**Cline 設定値の落とし穴（KV 予算）**: hipfire の受理条件は
+`prefill + max_tokens + 1(trailer) ≤ physical_cap (262144)` で、超過は
+`400 request exceeds loaded KV budget … reload model with a larger max_seq` で**即拒否
+（自動縮小なし）**。Cline の Context Window を 245558 のような値にすると `max_tokens` にも
+同じ大きさが入り、prefill が約 16.5K を超えた瞬間に壊れる（2026-11-07 実測:
+prefill 19828 で `max_tokens=242315` は OK / `242316` は 400 = 262144−19828−1 と一致）。
+**正しくは Context Window 262144 / Max Output Tokens 8192（最大 32768）**で、
+これは `CLINE_MODEL_TABLE["hipfire"]` の提示値どおり。`get_cline_config()` が返す
+`context_recommended` / `context_max` は「総コンテキスト」であり「出力上限」ではない点に注意。
+
 **未対応・留意**: `reasoning_effort_options` は全エンジン共通のハードコード
 （`None/Low/Medium/High/XHigh`）で、hipfire の Qwen3.8 が実際に受け付けるのは `low` /
 `medium` / `xhigh`（`High` は drop+warn）。hipfire の `/health` は `reasoning_efforts` を
