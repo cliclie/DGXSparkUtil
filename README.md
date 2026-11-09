@@ -73,6 +73,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [GPU クロックの 100% 基準: ゲージは最下行と一致・線グラフは記録上の最大値に (2026-11-09 / 本機 = WhitebearATOM1)](#gpu-クロックの-100-基準-ゲージは最下行と一致・線グラフは記録上の最大値に-2026-11-09--本機--whitebearatom1)
 - [線グラフのツールチップをラベルに書かれた単位の値に (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフのツールチップをラベルに書かれた単位の値に-2026-11-09--本機--whitebearatom1)
 - [線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフの-gpu-クロック-100-基準を-hw-上限-clocksmaxsm-に統一-2026-11-09--本機--whitebearatom1)
+- [dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09 / 本機 = WhitebearATOM2)](#dgx-spark-api-再起動の-stop-停滞対策-timeoutstopsec-と-switch_modelssh-cleanup-ハング-2026-11-09--本機--whitebearatom2)
 
 ## 目的
 
@@ -2858,7 +2859,8 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `switch_models.sh hipfire` と `docker logs --follow` の残骸が SIGTERM に応答せず stop が 90 秒
   （`final-sigterm`）停滞し、`systemctl restart` の同期ブロック経由で呼び出し側の 30 秒制限を越えたため。
   `KillMode` は設計どおり `control-group` のまま（`process` は WSL 専用。残すと残骸が溜まり続ける）。
-  詳細は末尾「線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09)」節
+  詳細は末尾「線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09)」節と
+  「dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09)」節
 
 - **atom1 (WhitebearATOM1)**: 2026-11-06 に **サーマルガード表示を短縮**（本機。運用者依頼）。
   `front/index.html` のみ — 発動中のヘッダインジケータが長文で折り返し・レイアウトがずれるため
@@ -4297,6 +4299,7 @@ stale 判定を通過する）、`~/.dgxsparkutil/last_active.json` 正常書き
 `api/install_service.env` でポートを変える機（Whitebear2026 は 8090）では再起動自体走るが応答待ちが
 30 秒で必ず FAIL するため、手動で `sudo systemctl restart dgx-spark-api` + 実ポートの curl 検証を使う。
 汎用化するなら `PORT="${PORT:-8080}"` 化が要る（未実施）。
+**もう一つの制約（2026-11-09 / atom2 実測）**: `systemctl restart` は**同期ブロック**するため、unit の CGroup に `switch_models.sh` / `docker logs --follow` の残骸が残っていると、stop の `final-sigterm` 待ち（既定 `TimeoutStopSec=90s`）がスクリプト全体に効いて、呼び出し側の 30 秒制限で kill されることがある。本機は systemd drop-in で `TimeoutStopSec=15` を適用済み（詳細は末尾「dgx-spark-api 再起動の stop 停滞対策」節）
 
 ## サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)
 
@@ -4673,9 +4676,63 @@ atom2 (R9700 2350 MHz) / Whitebear2026 (WSL2 RTX 5090 3090 MHz) は `discrete` �
 
 **atom2 (WhitebearATOM2) 反映（2026-11-09）**: `git fetch --all --prune` + `git merge --ff-only origin/main`（`0442624` → `6aaf0c1`、8 コミット、作業ツリー clean）+ `sudo systemctl restart dgx-spark-api`（10:48:58 SIGTERM → 10:50:28 新 Invocation 起動）。本機は `gpu_backend=amdgpu`（`_read_gpu_amd()` 経路）なので `api/metrics.py` の nvidia 側 index 変更（`clocks.max.sm` 末尾移動 / `power.limit` を `cols[7]`）は**非該当**だが、`discrete` として従来から返していた `gpu_clock_max_mhz = 2350.0` を新 `refreshMainChart()` が採用するため、**線グラフの GPU MHz が R9700 の HW 上限 2350 MHz 基準へ揃った**（ツールチップは `GPU MHz: <実測>`、`tuneGauge()` は `lock || gpu_clock_max_mhz || max0`）。実測（8080）: 配信中 HTML（99,125 B）とリポジトリ `front/index.html`（99,098 B）の差分は ETag 注入分 27 B のみ、`/`・`/api/platform`・`/api/metrics`・`/api/vllm/{status,cline}`・`/api/thermal`・`/api/rag/status`・`/api/page-version`・`/api/history` すべて 200、アプリ側の error / traceback 0 件、稼働中 `hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続のまま（**API 再起動に巻き込まれて停止していない**）、`thermal-guard` も `active` / `mode=power`。
 
-- **反映時の注意（本機で実測 → 2026-11-09 対応済み）**: 本機の実 unit `/etc/systemd/system/dgx-spark-api.service` には `KillMode` 行が**無く**（既定 = `control-group`）、API が派生した `switch_models.sh <profile>` とその `docker logs --follow` が CGroup に残っている場合、stop が **`final-sigterm` で 90 秒停滞**して `State 'final-sigterm' timed out. Killing.` → `Failed with result 'timeout'` が出る（今回の 10:48:58 → 10:50:28 がこれ。モデルは docker コンテナなので実害なし）。`api/restart_service.sh` は `sudo systemctl restart` が**同期ブロック**するためこの 90 秒がそのまま待ち時間になり、呼び出し側（シェルの 30 秒制限など）で kill される
-  - **`KILL_MODE=process` は不正解**（本節初出の記述を訂正）: `KILL_MODE` は `modelctl` (WSL) 専用の設定で、README の設計どおり atom1 / atom2 はモデルが docker コンテナ（dockerd の cgroup）のため `control-group` のままで良い。`process` にすると上記の `switch_models.sh` / `docker logs --follow` 残骸が再起動のたびに**掃除されず溜まり続ける**
-  - **本機の対応**: systemd drop-in `/etc/systemd/system/dgx-spark-api.service.d/10-timeout-stop.conf` で **`TimeoutStopSec=15`** を追加（`KillMode` は `control-group` 据え置き）。本体 unit を触らないので `install_service.sh` の再実行で再生成されても残る。実測: SIGTERM を無視するプロセスを持つ probe unit（`systemd-run --property=TimeoutStopSec=15`）の stop が**ちょうど 15 秒**で SIGKILL 完了 / 本番 `dgx-spark-api` の `systemctl restart` は **0 秒**（graceful shutdown は 15 秒に達せず無影響）、`/api/platform` 200、稼働中 `hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続、`thermal-guard` も `active`。`systemctl show` で `TimeoutStopUSec=15s` と `DropInPaths=…10-timeout-stop.conf` を確認、`systemd-analyze verify` に dgx-spark-api のエラーなし（既存の `wsdd.service` の `user nobody` 警告のみ）
-  - **根本策も実施済み（2026-11-09）**: 残骸の直接原因は `~/LLM/compose/switch_models.sh` の `cleanup()` が `wait "${DOCKER_LOG_PID}"` を**無制限**で待っていたこと。`docker logs --follow` は SIGTERM を握りつぶすため EXIT trap の cleanup ごと固まり、スクリプトは「[3/3] 切り替え完了」を出力した後も終了できない（= API の CGroup 残骸になる）。**poll 最大 2 秒 + `kill -9`** に修正（バックアップ `switch_models.sh.bak-20261109`）。検証: SIGTERM を無視する子を `DOCKER_LOG_PID` にした cleanup 単体テストで、**旧版は 5 秒以内に完了せず（timeout で kill）、新版は 2179ms で子終了 OK**、`bash -n` 通過。同スクリプトは git 管理外（本機固有の `~/LLM/compose/`）のためリポジトリ変更はなし。drop-in の `TimeoutStopSec=15` は他の残骸要因に対する保険として**維持**する
-  - **解除方法**: `sudo rm -rf /etc/systemd/system/dgx-spark-api.service.d && sudo systemctl daemon-reload`（`TimeoutStopSec` は 90 秒の既定値に戻る）
+- なお今回の再起動で **stop が 90 秒停滞**する事象を確認したため、`TimeoutStopSec` の drop-in と `switch_models.sh` の `cleanup()` 修正で対応済み（手順・検証は次節）
+
+## dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09 / 本機 = WhitebearATOM2)
+
+**症状**: 2026-11-09 に本機で `sudo systemctl restart dgx-spark-api` を実行すると、stop が **10:48:58 → 10:50:28 の約 90 秒**停滞し、`journalctl` に `dgx-spark-api.service: State 'final-sigterm' timed out. Killing.` → `Failed with result 'timeout'` が出た。`api/restart_service.sh` は `sudo systemctl restart` が**同期ブロック**するためこの 90 秒がそのまま待ち時間になり、呼び出し側（シェルの 30 秒制限など）で kill される。稼働中のモデルは docker コンテナなので**実害はない**（`hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続を毎回確認）。
+
+### 原因（3 段）
+
+1. **CGroup 残骸**: API がモデル切替用に派生した `switch_models.sh <profile>` と、その `docker logs --tail 0 --follow` が `dgx-spark-api.service` の CGroup に残る。`docker logs` は SIGTERM を握りつぶすため stop に応答しない
+2. **残骸が生まれる理由**: `~/LLM/compose/switch_models.sh` の `cleanup()`（`trap cleanup EXIT INT TERM`）が `wait "${DOCKER_LOG_PID}"` を**無制限**で待つ。`kill` 後も子が死なないため cleanup ごと固まり、スクリプトは「[3/3] 切り替え完了」を出力済みなのに終了できない
+3. **90 秒待たされる理由**: `KillMode` が既定の `control-group`（全プロセスの終了待ち）。本機の実 unit `/etc/systemd/system/dgx-spark-api.service` には `KillMode` / `LimitNOFILE` 行が**存在しない** — 現行テンプレートは `KillMode=control-group` を書き出すため、**本機の unit は現行版で再レンダリングされていない（drift）**。`api/install_service.env` も本機には無い（= `PORT=8080` / control-group 相当の既定）
+
+- **`KillMode=process` は不正解**: `KILL_MODE` は `modelctl` (WSL) 専用（「管理対象モード」前の設計メモのとおり WSL は cgroup 内でモデルサーバーを起動するため必要）。atom1 / atom2 はモデルが dockerd の cgroup なので `control-group` のままが設計。`process` にすると上記の残骸が再起動のたびに**掃除されず溜まり続ける**
+- **`install_service.sh` の再実行での解消は行わない**: 本機は `install_service.env` が無いため、再実行すると `DGXUTIL_THERMAL` 未指定扱いで **thermal-guard が外れるリスク**がある（`KillMode` 行の欠落解消は drop-in で代替済み）
+
+### 対応 1（本機・恒久）: systemd drop-in で `TimeoutStopSec=15`
+
+`/etc/systemd/system/dgx-spark-api.service.d/10-timeout-stop.conf`（本体 unit を触らないので `install_service.sh` の再実行で再生成されても残る）:
+
+```ini
+[Service]
+TimeoutStopSec=15
+```
+
+→ `sudo systemctl daemon-reload`（再起動不要。次回 stop から有効）
+
+### 対応 2（根本策・本機固有）: `cleanup()` を有限待ち + SIGKILL
+
+`~/LLM/compose/switch_models.sh` の `cleanup()` を、SIGTERM 後に最大 2 秒 poll して死ななければ SIGKILL する形へ修正（`bash -n` 通過、差分は 10 行のみ）。**git 管理外**のためリポジトリ変更はなし。バックアップ: `switch_models.sh.bak-20261109`
+
+```bash
+    kill "${DOCKER_LOG_PID}" 2>/dev/null || true
+    # 最大 2 秒だけ poll で待ち、死ななければ SIGKILL する
+    for _ in $(seq 1 20); do
+      kill -0 "${DOCKER_LOG_PID}" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "${DOCKER_LOG_PID}" 2>/dev/null || true
+    wait "${DOCKER_LOG_PID}" 2>/dev/null || true   # SIGKILL 後なので即返る
+```
+
+### 検証
+
+- **drop-in 有効化**: `systemctl show dgx-spark-api` → `TimeoutStopUSec=15s` / `DropInPaths=…10-timeout-stop.conf` / `KillMode=control-group`（据え置き）/ `NRestarts=0`
+- **drop-in の効果**: SIGTERM を無視するプロセスを持つ probe unit（`systemd-run --property=TimeoutStopSec=15`）の stop が**ちょうど 15 秒**で SIGKILL 完了（従来 90 秒）
+- **副作用なし**: 本番 `dgx-spark-api` の `systemctl restart` は **0 秒**（graceful shutdown は 15 秒に達せず打ち切られない）。`/`・`/api/platform`・`/api/metrics`・`/api/vllm/status`・`/api/thermal` すべて 200、`thermal-guard` も `active` 継続
+- **cleanup 単体テスト**: SIGTERM を無視する子を `DOCKER_LOG_PID` にして `cleanup` を実行 → **旧版は 5 秒以内に完了せず（exit=124 = ハング再現）/ 新版は 2179ms で子終了 OK（exit=0）**
+- `systemd-analyze verify` に dgx-spark-api のエラーなし（既存の `wsdd.service` の `user nobody` 警告のみ）
+
+### 解除 / 復元
+
+```bash
+# drop-in を外す (TimeoutStopSec は既定 90 秒に戻る)
+sudo rm -rf /etc/systemd/system/dgx-spark-api.service.d && sudo systemctl daemon-reload
+# switch_models.sh を戻す
+cd ~/LLM/compose && cp -a switch_models.sh.bak-20261109 switch_models.sh
+```
+
+**他機への示唆**: atom1 も compose 環境で `switch_models.sh` を使うため同じ残骸・停滞が起きうる（`KILL_MODE=control-group`）。本節の 2 対応はどちらも git 管理外（systemd の drop-in と `~/LLM/compose/`）なので、他機で踏む場合は同手順を適用する
 
