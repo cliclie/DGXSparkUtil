@@ -2039,6 +2039,55 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
+    # --- 2026-11-07 追加 (Qwen3-Coder-Next) / 2026-11-09 追加 (Ripple-65B Preview) ---
+    # 一覧・切替・監視・パラメータ表示は compose 動的パースで自動追従するが、
+    # TabbyAPI 系は command が "main.py --host --port" のみでコンテキストフラグが
+    # 無いため context_max が null になる (フロントの Cline 設定値が「null (最大)」)。
+    "qwen3codernext_exl3": {
+        "images": False,  # vision tower なし（config_qwencoder_exl3.yml: vision: false）
+        # /v1/model の max_seq_len / cache_size 1048576（Q8・exllamav3 側 rope 適用済み）
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,  # 作者推奨（sampler_overrides/qwen3_coder_next.yml override 1.0）
+    },
+    "qwen3codernext_nvfp4": {
+        "images": False,  # テキスト専用
+        # --max-model-len 1048576（YaRN factor 4.0 を config.json shadow で付与）
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,  # EXL3 経路と同一（Qwen3-Coder-Next 公式推奨）
+    },
+    "ripplea": {
+        "images": False,  # dense 65B・テキスト専用
+        "context_max": 262144,  # --context-length 262144（native 2097152 の運用値）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.0,  # generation_config.json に既定値が無いため greedy（temp 1.0 系で日本語破綻の報告）
+    },
+    "ripplead": {
+        "images": False,
+        "context_max": 262144,  # --context-length 262144（DFlash2 draft 付き）
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.0,
+    },
+    "rippleexl3": {
+        "images": False,  # vision tower なし（config_ripple.yml: vision: false）
+        # config_ripple.yml の max_seq_len 262144（cache_size 2097152 は 8 スロット合計）
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.0,  # sampler_overrides/ripple.yml override 0.0
+    },
+    "rippleexl3d": {
+        "images": False,
+        "context_max": 262144,  # config_ripple_dflash.yml の max_seq_len 262144
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.0,
+    },
     # --- WhitebearATOM2 (R9700 / VRAM 32GB) 用 -----------------
     "strata": {
         "images": True,  # 動的: /health の images（table はフォールバック）
