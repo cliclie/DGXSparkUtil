@@ -194,13 +194,17 @@ def _read_gpu_nvidia() -> dict:
     """nvidia-smi で GPU メトリクスを取得する (DGX Spark / GB10)。
 
     memory_mode=discrete (WSL2 の RTX 5090 のような分離 VRAM) では、フロントの
-    「VRAM」ゲージと上限表示に使う値を追加で読む。unified (GB10) は従来と
-    同一キー・同一クエリのまま (追加キーを出さない)。
+    「VRAM」ゲージと上限表示に使う値を追加で読む。
+    clocks.max.sm (= nvidia-smi -q -d CLOCK の Max Clocks → SM = HW 上限クロック) は
+    memory_mode を問わず読む。unified (GB10 = 3003 MHz) でも GPU クロックの 100% 基準
+    (半円ゲージの「最大 N MHz」と二段目グラフ) に使うため (2026-11-09 運用者要望)。
     """
     discrete = config.MEMORY_MODE == "discrete"
     fields = "utilization.gpu,temperature.gpu,power.draw,clocks.sm,pstate"
     if discrete:
-        fields += ",memory.total,memory.used,clocks.max.sm,power.limit"
+        fields += ",memory.total,memory.used,power.limit"
+    # clocks.max.sm は**末尾**に足す (discrete の既存 cols index を崩さないため)
+    fields += ",clocks.max.sm"
     try:
         r = subprocess.run(
             [
@@ -224,6 +228,13 @@ def _read_gpu_nvidia() -> dict:
             "gpu_clock_mhz": float(c),
             "gpu_pstate": ps,
         }
+        # 末尾の clocks.max.sm。N/A の環境ではキーを出さない (フロントは gaugeDefs() の
+        # max0 / CHART_NORM のプラットフォーム既定値へフォールバックする)
+        if len(cols) >= 6:
+            try:
+                out["gpu_clock_max_mhz"] = float(cols[-1])
+            except ValueError:
+                pass
         if discrete and len(cols) >= 9:
             vram_total_mib = float(cols[5])
             vram_used_mib = float(cols[6])
@@ -231,8 +242,7 @@ def _read_gpu_nvidia() -> dict:
                 out["vram_total_gib"] = vram_total_mib / 1024.0
                 out["vram_used_gib"] = vram_used_mib / 1024.0
                 out["vram_used_pct"] = vram_used_mib / vram_total_mib * 100.0
-            out["gpu_clock_max_mhz"] = float(cols[7])
-            out["gpu_power_cap_w"] = float(cols[8])
+            out["gpu_power_cap_w"] = float(cols[7])
             # WSL の nvidia-smi は温度上限を公開しない (T.Limit Specification が
             # N/A / 0) ため、プラットフォーム既定値 (config) を使う
             if config.GPU_TEMP_CRIT_C is not None:

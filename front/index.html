@@ -892,14 +892,16 @@ function gaugeDefs() {
       get: (m) => m.gpu_power_w, fmt: (v) => v.toFixed(1),
       sub: (m) => `上限 ${m.gpu_power_cap_w ? m.gpu_power_cap_w.toFixed(0) : (discrete ? 300 : 140)} W` },
     { id: "g-gpu-clock", title: "GPU クロック", max: discrete ? 2350 : 3003, unit: "MHz", color: "#8b949e",
+      // max0 = プラットフォーム既定の HW 上限。tuneGauge() が max をロック段へ寄せるため、
+      // 解除時にここへ戻す (API が clocks.max.sm を返さない環境のフォールバック)
+      max0: discrete ? 2350 : 3003,
       zoneStops: discrete ? undefined : [2520 / 3003, 2700 / 3003], // DGX のみ運用実測値のゾーン
       get: (m) => m.gpu_clock_mhz, fmt: (v) => v.toFixed(0),
-      // 最下行は常に取得した HW 上限 (nvidia-smi -q -d CLOCK の Max Clocks = clocks.max.sm)。
-      // サーマルガード発動中も同じ表示 (目盛りは tuneGauge がロック段に寄せるが最下行は取得値)。
-      sub: (m) => {
-        const mx = m.gpu_clock_max_mhz ? m.gpu_clock_max_mhz.toFixed(0) : (discrete ? 2350 : 3003);
-        return `最大 ${mx} MHz`;
-      } },
+      // 最下行はアーチの 100% 基準そのもの (this.max) を出す。tuneGauge() が HW 上限
+      // (clocks.max.sm、unified は gaugeDefs の既定値) を d.max に反映し、サーマルガード
+      // 発動中はロック段へ切り替えるので、ゲージの 100% と最下行が常に一致する
+      // (発動中はここもロック値へ変わる)。2026-11-09 運用者要望
+      sub() { return `最大 ${this.max.toFixed(0)} MHz`; } },
     { id: "g-disk-used", title: "ストレージ使用率", max: 100, unit: "%", color: "#79c0ff",
       // サブ行は必ず 1 行に収める (カード幅 118px で 2 行折り返しになると行高さが 14px 増えるため、
       // 単位は総量に合わせて末尾に 1 回だけ付ける)
@@ -959,11 +961,12 @@ function tuneGauge(g, m) {
   let max = null;
   if (d.id === "g-gpu-power" && m.gpu_power_cap_w) max = m.gpu_power_cap_w;
   if (d.id === "g-gpu-clock") {
-    // 上限は HW の clocks.max.sm (GB10 3003MHz / R9700 2350MHz)。サーマルガード発動中は
-    // ロック段が実効上限なので目盛りをそこに寄せる (解除時は clocks.max.sm へ戻る)
+    // ゲージの 100% (= 最下行の「最大 N MHz」) は順に サーマルガードのロック段 →
+    // HW 上限 clocks.max.sm (GB10 3003MHz / R9700 2350MHz / WSL RTX 5090 3090MHz) →
+    // プラットフォーム既定値 d.max0。d.max0 を置くことで解除時にロック段 (1665MHz) へ
+    // 据わらない (2026-11-09 運用者要望)
     const lock = thermalClockLockMhz();
-    if (lock) max = lock;
-    else if (m.gpu_clock_max_mhz) max = m.gpu_clock_max_mhz;
+    max = lock || m.gpu_clock_max_mhz || d.max0;
   }
   if (d.id === "g-gpu-temp" && m.gpu_temp_crit_c) max = m.gpu_temp_crit_c;
   if (d.id === "g-net" && m.net_max_mbps) max = m.net_max_mbps;
@@ -991,7 +994,8 @@ function renderGauges(m) {
 
 // ------------------------------------------------------------- 統合時系列グラフ
 // 100% 換算: CPU温度=100°C / ストレージI/O=WSL 7GB/s・その他 5GB/s / GPU電力=GB10 140W (TDP)・R9700 300W (PPT) /
-// GPUクロック=GB10 3003MHz・R9700 2350MHz (HW上限)
+// GPUクロック=HW 上限 clocks.max.sm (refreshMainChart() が gpu_clock_max_mhz で更新し、
+// 半円ゲージの「最大 N MHz」と同一基準。サーマルガードのロック値には連動させない)
 const toPct = (arr, max) => arr.map((v) => (v == null ? null : v / max * 100));
 
 const lineDS = (label, data, color, fill) => ({
@@ -1001,9 +1005,32 @@ const lineDS = (label, data, color, fill) => ({
   spanGaps: true,
 });
 
+// ツールチップの値を「ラベルに書かれた単位どおりの実値」で返す (2026-11-09 運用者要望)。
+// 0〜100% に換算した系列は % のままではラベル単位とズレて誤読される
+// (例: `GPU MHz: 92.946` は 92.946% ≒ 2398 MHz / `GPU W: 8.293` は 8.293% ≒ 11.6 W)。
+// % ラベルの系列 (CPU % / GPU % / メモリ % / RAM % / VRAM % / DISK %) は元から % なので変換しない。
+// digits は一段目のゲージ表記に合わせた (℃=0 桁/W=1 桁/MHz=0 桁/MB・s=2 桁)
+const TOOLTIP_RAW = {
+  "CPU ℃": { key: "cpuTemp", digits: 1 },
+  "GPU ℃": { key: "gpuTemp", digits: 1 },
+  "GPU W": { key: "gpuPower", digits: 1 },
+  "GPU MHz": { key: "gpuClock", digits: 0 },
+  "DISK Read": { key: "diskRead", digits: 2 },
+  "DISK Write": { key: "diskWrite", digits: 2 },
+};
+const tooltipLabel = (c) => {
+  const t = TOOLTIP_RAW[c.dataset.label];
+  const raw = t && chartRaw ? chartRaw[t.key][c.dataIndex] : null;
+  return `${c.dataset.label}: ` +
+    (raw == null ? c.formattedValue : raw.toFixed(t.digits));
+};
+
 let mainChart = null;   // buildMainChart() で生成 (プラットフォーム確定後)
 let chartDs = null;     // ラベル参照用のデータセット辞書
 let CHART_NORM = null;  // 100% 換算基準
+// 表示範囲の生値 (viewArrays() の結果)。0〜100% に換算した系列のツールチップを
+// % でなく実値で出すために refreshMainChart() が毎回保持する
+let chartRaw = null;
 
 function buildMainChart() {
   const discrete = PLAT.memory_mode === "discrete";
@@ -1038,7 +1065,9 @@ function buildMainChart() {
       maintainAspectRatio: false,
       animation: false,
       interaction: { mode: "index", intersect: false },
-      plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } },
+      plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } },
+                 // 換算系列は % でなくラベル単位の値を出す (TOOLTIP_RAW を見る)
+                 tooltip: { callbacks: { label: tooltipLabel } } },
       scales: {
         x: { ticks: { maxTicksLimit: 10, maxRotation: 0, font: { size: 10 } } },
         y: { min: 0, max: 100, ticks: { callback: (v) => v + "%" } },
@@ -1051,11 +1080,14 @@ function refreshMainChart() {
   if (!mainChart) return;
   const v = viewArrays();
   const N = CHART_NORM;
+  chartRaw = v;   // ツールチップが実値を引けるように生値を保持 (dataIndex は v と同一範囲)
   // 100% 換算基準の実測上限補正 (tuneGauge() と同じ思想)。
-  // buildMainChart() 時点の discrete 既定値 (2350MHz / 300W) は R9700 前提で、
-  // WSL の RTX 5090 (clocks.max.sm=3090MHz / power.limit=600W) では基準が低く
-  // グラフが 100% を超えた。API が gpu_clock_max_mhz / gpu_power_cap_w を返す
-  // 環境ではそれに追随させる (unified = GB10 はキーなし → 既定値のまま)。
+  // GPU クロックは HW 上限 = nvidia-smi の clocks.max.sm (= -q -d CLOCK の Max Clocks → SM)、
+  // amdgpu は pp_dpm_sclk の最大。サーマルガードのロック段には連動させないので、
+  // 発動中も基準は動かない (2026-11-09 運用者要望: 半円ゲージの「最大 N MHz」と
+  // 二段目の % がズレて見えていたのを揃える)。GPU 電力は gpu_power_cap_w に追随する。
+  // 両キーとも API が返さない環境は buildMainChart() の既定値 (GB10 3003MHz / 140W、
+  // R9700 2350MHz / 300W) のまま。
   if (lastMetrics) {
     if (lastMetrics.gpu_clock_max_mhz) N.gpuClock = lastMetrics.gpu_clock_max_mhz;
     if (lastMetrics.gpu_power_cap_w) N.gpuPower = lastMetrics.gpu_power_cap_w;

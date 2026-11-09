@@ -70,6 +70,9 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [api venv の保守更新と hf-venv の 2.x 化 (2026-11-07 / 本機 = WhitebearATOM2)](#api-venv-の保守更新と-hf-venv-の-2x-化-2026-11-07--本機--whitebearatom2)
 - [hipfire (hipfire・atom2) の Cline 設定値と prefill/decode 表示（2026-11-07 / 本機 = WhitebearATOM2）](#hipfire-hipfireatom2-の-cline-設定値と-prefilldecode-表示2026-11-07--本機--whitebearatom2)
 - [Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)](#qwen3-coder-next-と-ripple-65b-preview-の追加-6-プロファイル-への追従-2026-11-09--本機--whitebearatom1)
+- [GPU クロックの 100% 基準: ゲージは最下行と一致・線グラフは記録上の最大値に (2026-11-09 / 本機 = WhitebearATOM1)](#gpu-クロックの-100-基準-ゲージは最下行と一致・線グラフは記録上の最大値に-2026-11-09--本機--whitebearatom1)
+- [線グラフのツールチップをラベルに書かれた単位の値に (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフのツールチップをラベルに書かれた単位の値に-2026-11-09--本機--whitebearatom1)
+- [線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフの-gpu-クロック-100-基準を-hw-上限-clocksmaxsm-に統一-2026-11-09--本機--whitebearatom1)
 
 ## 目的
 
@@ -169,7 +172,7 @@ Chart.js doughnut での再現方式(実装メモ(2026-10-20)):
 | GPU負荷 | `GPU 負荷` | 使用率 % | — |
 | GPU温度 | `GPU 温度` | 現在温度(例: `40°C`) | 上限(例: `上限 95°C`) |
 | GPU電力 | `GPU 電力` | 現在消費電力(例: `51.5W`) | 上限(例: `上限 600 W`) |
-| GPUクロック | `GPU クロック` | 現在クロック(例: `1245 MHz`) | 最大=**HW 上限**(`clocks.max.sm`。例: `最大 3090 MHz`。実装メモ 2026-10-30。サーマルガード発動中のみ `実 X / ロック Y MHz`) |
+| GPUクロック | `GPU クロック` | 現在クロック(例: `1245 MHz`) | 最大=**HW 上限**(`clocks.max.sm`。例: `最大 3090 MHz`。実装メモ 2026-10-30。サーマルガード発動中はロック段へ寄る `最大 Y MHz`。発動中の `実 X / ロック Y MHz` 分岐は 2026-11-06 に削除。二段目のグラフも同一基準、2026-11-09) |
 | ストレージの使用率 | `ストレージ使用率` | 使用率 % | 使用/総量(例: `232 / 1007 GiB`) |
 | ストレージの負荷 | **`DISK(B/s)`** | 読込/書込を 2 行(1 行目 `R 120.0M` / 2 行目 `W 45.2M`。数値 13px 白、接頭語 M/G 11px グレー、ラベルは対応リング色) | 上限(DGX Spark / atom2 = `上限 5 GB/s`、WSL2 = `上限 7 GB/s`。実装メモ 2026-10-30) |
 | ネットワークの負荷 | **`NW(bps)`** | 上り/下りを 2 行(1 行目 `UP 300.5M` / 2 行目 `DL 1.2G`) | 上限=**実測リンク速度**(例: `上限 10 Gbps`、実装メモ 2026-10-06 参照) |
@@ -813,8 +816,8 @@ cd /home/cliclie/DGXSparkUtil/api
   モーダルを持たず、vLLM 行下の常設一覧 + 「切り替え実行」と、ヘッダ行のモデル選択プルダウン +
   切替ボタン(ロード済モデル選択時は「停止」)で操作する(実装メモ 2026-10-11 / 2026-10-26)
 - 一段目は半円ゲージ 10 種 + vLLM 情報のテキストカード 1 枚(計 11 枚、10枚/行で折り返し)。外側細リングにゾーン帯(緑 <60% / 橙 60〜85% / 赤 >85%)、内側に値アーチ、中央に現在値を表示。IOPS は廃止しストレージ負荷を読込/書込 MB/s の 2 ゲージに分割(上限は DGX Spark / atom2 = 5 GB/s、WSL2 = 7 GB/s。実装メモ 2026-10-30)。ゲージは 2026-10-26 に縦横・文字を 80% 縮小(canvas 150×76/56 → 118×60/44、カード 176px → 140px、中央値 16px → 13px、タイトル 12px → 10px。最小の 11px 文字は据え置き)
-- ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz、ストレージ I/O は 5 GB/s(WSL2 のみ 7 GB/s)。調整は `index.html` の `gaugeDefs()` の `max` と `CHART_NORM` のみ。ただし GPU クロックゲージは**サーマルガード発動中に限り目盛りをロック段(1665 MHz)へ寄せる**(`thermalClockLockMhz()`、2026-10-28 節)。二段目の時系列グラフは HW 上限基準のまま
-- 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / ストレージ I/O=5 GB/s(WSL2 は 7 GB/s)で割って倍率 100)。横軸は「直近30分(既定) / 直近3時間 / すべて」で切替可能。見出しは「時系列 (全項目・2秒間隔)」1 行に集約し(左端に見出し・右端に範囲ボタン。副題「CPU / メモリ / GPU / ストレージ (全項目 100% 換算)」は廃止)、グラフ高さは 288px → 232px(80%、2026-10-26)
+- ゲージの 100% 基準: GPU 電力は 140 W(GB10 TDP、`nvidia-smi` の power.limit が [N/A] のため固定値)、GPU クロックは実測の `clocks.max.sm` = 3003 MHz(`api/metrics.py` が **memory_mode を問わず** `gpu_clock_max_mhz` で返す。unified は `gaugeDefs()` の既定値 3003 にフォールバック、2026-11-09)、ストレージ I/O は 5 GB/s(WSL2 のみ 7 GB/s)。調整は `index.html` の `gaugeDefs()` の `max` と `CHART_NORM` のみ。GPU クロックゲージは**最下行「最大 N MHz」がアーチの 100% と常に同基準**で、**サーマルガード発動中は両方がロック段(1665 MHz)へ寄り、解除時は HW 上限(`d.max0`)へ復帰**する(`thermalClockLockMhz()` + `tuneGauge()`、2026-10-28 / 2026-11-09 節)。二段目の時系列グラフの GPU クロックも**同じ HW 上限(`clocks.max.sm`)基準**で、発動でも基準は動かさない(2026-11-09 節)
+- 二段目は全 9 系列を 0〜100% に換算して 1 枚の横長統合グラフに集約(CPU 温度=100°C / GPU 電力=140 W / GPU クロック=HW 上限(`gpu_clock_max_mhz` = `clocks.max.sm`。半円ゲージと同一基準) / ストレージ I/O=5 GB/s(WSL2 は 7 GB/s)で割って倍率 100)。横軸は「直近30分(既定) / 直近3時間 / すべて」で切替可能。見出しは「時系列 (全項目・2秒間隔)」1 行に集約し(左端に見出し・右端に範囲ボタン。副題「CPU / メモリ / GPU / ストレージ (全項目 100% 換算)」は廃止)、グラフ高さは 288px → 232px(80%、2026-10-26)。ホバー時のツールチップは**ラベルに書かれた単位の値**で出す(2026-11-09: `%` ラベルは %、換算した ℃ / W / MHz / MB・s ラベルは % でなく実値)
 - 時系列バッファは `MAX_POINTS = 4500`(2 秒間隔×3 時間)のリングバッファ。範囲切替は `ts` 基準で配列先頭を切る方式
 - `GET /api/metrics` に `cpu_cores`(`os.cpu_count()`)を追加
 - タブの favicon は `front/meter-dgx.ico`(`/static/` マウント経由で配信)
@@ -4529,4 +4532,113 @@ atom2 / Whitebear2026 には本機固有のモデル（当機 compose の 6 プ�
 DFlash2 draft 7.5 GiB + KV 17 GiB で `--mem-fraction-static 0.78`。**RAG embedding（約 12 GiB）を
 停止してから起動する**こと。atom1 は `exclusive_llm_rag = false` なので DGXSparkUtil 側の
 排他警告は出ない（compose コメント側の運用前提）。
+
+
+## GPU クロックの 100% 基準: ゲージは最下行と一致・線グラフは記録上の最大値に (2026-11-09 / 本機 = WhitebearATOM1)
+
+運用者要望 2 件を `front/index.html` のみで解消した（静的配信なので **API 再起動不要**、ブラウザリロードで反映）。
+
+> **★★ 同日に訂正済み（末尾の「線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一」節が正）**: ここで「線グラフは記録上の最大値」としたのは**運用者の意図と食い違った**。要望の「記録上の最大値」は `nvidia-smi -q -d CLOCK` の **Max Clocks（= `clocks.max.sm`、本機 3003 MHz）** の意味で、半円ゲージの「最大 3003 MHz」と二段目の % を揃えたかったもの。実測で線グラフ基準が 2580 MHz（= 記録上の最高クロック）、ゲージは 3003 MHz となり「灰色の線が 90% 超に見える」と指摘された。
+
+### 要望と当時の挙動
+
+| 箇所 | 要望 | 当時の挙動（本機 = GB10 unified・`gpu_clock_mhz` 2398） |
+|---|---|---|
+| 一段目 半円メーター | **下部の「最大 N MHz」を 100% とした割合でアーチを出す**。サーマルガード時は 100% の値も変わってほしい | アーチの 100% は `tuneGauge()` が決める `d.max`（発動中はロック段 1665）、最下行は `m.gpu_clock_max_mhz` 表示。unified は同キーを返さないため**最下行は 3003 固定**で、発動中は 1665 と 3003 が食い違った |
+| 二段目 線グラフ | 100% 基準を**記録上の最大値**にしたい。サーマルガード時でも基準を変えたくない | `CHART_NORM.gpuClock` = 3003 固定（discrete は `gpu_clock_max_mhz` に追随）。実測最大 2398 MHz でもグラフは 79.9% で頭打ち、発動中は基準がロック段へ切り替わった |
+
+### 修正（`front/index.html` の 3 箇所）
+
+- `gaugeDefs()` の `g-gpu-clock`: 最下行 `sub()` を **`最大 ${this.max} MHz`**（= アーチの 100% 基準そのもの）に変更。`Gauge.set()` は `this.def.sub(m)` で呼ぶので `this` は定義オブジェクト（`g-net` の `sub()` と同じ書き方）。プラットフォーム既定の HW 上限を `max0`（unified 3003 / discrete 2350）として保持
+- `tuneGauge()`: `g-gpu-clock` の `max` を **`lock || m.gpu_clock_max_mhz || d.max0`** の順に決定。発動中はロック段、解除時は HW 上限へ復帰する。`gpu_clock_max_mhz` を返さない unified は `d.max0` が効くため、**解除後もロック段 (1665) に据わる既存不具合を同時に解消**（従来は `max` が null のまま = `d.max` が 1665 に固定され、以後 2398 MHz で常時振り切り）
+- `refreshMainChart()`: `CHART_NORM.gpuClock` を毎回 **`series.gpuClock` の最大値**（記録上の最大値）で上書き。`gpu_clock_max_mhz` による gpuClock 基準の上書きは削除した（`gpu_power_cap_w` による電力基準の追随は従来どおり）
+
+### 検証（headless Chrome + CDP、ポート 8080 の実ページ）
+
+`/tmp/verify_clock.py`（リポジトリ外の使い捨て）で `gages[]` / `chartDs` / `CHART_NORM` を `Runtime.evaluate` で実測。**13 ケース ALL PASS**（`window.__errs` は空 = JS 例外なし）。
+
+**CDP はまりどころ（今回も踏んだ／2026-10-20 節の教訓そのもの）**: `--user-data-dir` を新規にすると `chrome://newtab/` と `about:blank` の page ターゲットが混ざるので、`/json/list` の `url` を見てから WS 接続する（`--remote-debugging-port` 起動時に URL を渡しても headless=new は about:blank に留まる）。`Page.navigate` は `Page.enable` 後に効く。`Runtime.evaluate` の既定 `mode: "whenIdle"` は 2 秒ポーリングで常時活動中のこのページでは応答が 20〜30 秒遅れるので、受信タイムアウトは 30 秒では不足（`settimeout(120)` 相当が必要）。
+
+- 通常時: `def.max` 3003 / 最下行 `最大 3003 MHz` / アーチ 79.853% = 2398 ÷ 3003 × 100
+- 擬似発動（`THERMAL.locked_mhz = 1665` を注入）: `def.max` 1665 / 最下行 **`最大 1665 MHz`** / アーチ 100%（2398 ÷ 1665 をクランプ）
+- 解除（`locked_mhz = 0`）: `def.max` と最下行が **3003 へ復帰**（`d.max0` 追加前は 1665 に据わり FAIL になった）
+- 線グラフ: `CHART_NORM.gpuClock` = 2398 = `series.gpuClock` の最大、系列の最大点が **ちょうど 100%**、発動注入の前後で基準は **2398 → 2398 と不変**
+
+### 反映と影響範囲
+
+- 変更は `front/index.html` と README のみ。`dgx-spark-api` は静的配信なので**再起動不要**（ブラウザリロードで反映）。`/api/metrics` は従来どおり（本機 unified は `gpu_clock_max_mhz` を返さない）
+- 半円のゾーン帯（緑 ≤2520 / 黄 ≤2700 MHz の比率）は `max` に比例して付くため、発動中は 3 帯がロック段内に収まる（2026-10-28 節の「発動判断がつきにくい」解消意図を維持）
+- 線グラフの基準はリングバッファ `MAX_POINTS = 4500`（2 秒 × 3 時間）内の最大値。3 時間より前に観測した最高クロックは基準から外れる
+- atom2 (R9700) / Whitebear2026 (WSL2 RTX 5090) は `memory_mode=discrete` で `gpu_clock_max_mhz` を返すため、ゲージは従来どおり実測 HW 上限（2350 / 3090 MHz）基準。線グラフのみ記録上の最大値基準に変わる。**front のみの反映なので `git pull` 後はブラウザリロードで有効**
+
+
+## 線グラフのツールチップをラベルに書かれた単位の値に (2026-11-09 / 本機 = WhitebearATOM1)
+
+**質問**: 二段目の時系列グラフでホバーすると `GPU MHz: 92.946` と出る。これは % なのか？ MHz 値にしてほしい
+
+**回答**: はい、**% でした**。グラフは全系列を 0〜100% に換算して描画しており、ツールチップは Chart.js の既定で**換算後の値**を出します（`92.946%` × 基準 2580 MHz ≒ 実値 2398 MHz）。同じ問題は他の換算系列にもあり、`GPU W: 8.293` は実値 11.4 W、`DISK Read / DISK Write` も MB/s ではなく % でした（℃ 系は基準 100 なので偶然 ℃ と同値に見えている）。運用者方針は「**ラベルに書かれた単位どおりの値**」→ `%` ラベルは % のまま、換算した系列だけ実値にしました。
+
+### 修正（`front/index.html` の 3 箇所）
+
+- `chartRaw`（表示範囲の生値 = `viewArrays()` の結果）を新設し、`refreshMainChart()` が毎回保持する。`mainChart.data.labels` と `dataIndex` が同一範囲なので、ツールチップの `dataIndex` で直接引ける
+- `TOOLTIP_RAW` マップで「ラベル → 生値キーと小数桁」を宣言し、`tooltipLabel(c)` を追加。桁数は一段目のゲージ表記に合わせた（℃=1 桁 / W=1 桁 / MHz=0 桁 / MB・s=2 桁）
+- `buildMainChart()` の `options.plugins` に `tooltip: { callbacks: { label: tooltipLabel } }` を設定。`%` ラベル（`CPU %` / `GPU %` / `メモリ %` / `RAM %` / `VRAM %` / `DISK %`）はマップに無いため従来どおり % 値のまま
+
+### 検証（headless Chrome + CDP、ポート 8080 の実ページ）
+
+`mainChart.options.plugins.tooltip.callbacks.label` を全系列 × 3 地点（先頭 / 中間 / 最新）で直接呼び、`chartRaw` の生値と突き合わせた。**34 ケース ALL PASS**（JS 例外なし）。
+
+| ラベル | 修正前 | 修正後 |
+|---|---|---|
+| `GPU MHz` | 92.946（%） | **2398**（MHz） |
+| `GPU W` | 8.293（%） | **11.4**（W） |
+| `GPU ℃` / `CPU ℃` | 39 / 41.7（%=℃ と同値） | 39.0 / 41.1（℃） |
+| `DISK Read` / `DISK Write` | 0（%） | 0.00（MB/s） |
+| `CPU %` / `GPU %` / `メモリ %` / `DISK %` | % | %（変更なし） |
+
+### 反映
+
+`front/index.html` と README のみのため `dgx-spark-api` **再起動不要**（ブラウザリロードで反映）。グラフの描画・Y 軸（0〜100%）・100% 換算基準は一切変えておらず、ツールチップの表示文言だけの変更です。
+
+**headless Chrome 起動時の注意（`.clinerules/09.chrome.md`）**: ログインキーリングにアクセスさせないため `--password-store=basic` を付ける。今回の検証起動でも付け、keyring 関連のログは 0 件を確認した。
+
+
+## 線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)
+
+**指摘**: 二段目の最上部を走る灰色の線（GPU MHz）が 90% 超に見える。半円ゲージの下部「最大 3003 MHz」は `nvidia-smi -q -d CLOCK` の Max Clocks。実測 2398 MHz なら 79.9% のはずで割合が合わない — **記録上の最大値の取得元は Max Clocks ではないのか？**
+
+**回答**: 灰色の線は GPU MHz で正しい。しかし当時の 100% 基準は **2580 MHz（= 記録上の最高クロック）** だった。前節の実装が「記録上の最大値」を `series.gpuClock`（= `nvidia-smi` の**現在**クロック `gpu_clock_mhz`）の最大と解釈したもので、Max Clocks ではない。実測で基準 2580 MHz に対し 2398 MHz → **92.95%** となり、ゲージ（3003 MHz 基準 = 79.85%）とズレていた。要望の「記録上の最大値」は **Max Clocks = `clocks.max.sm`（本機 3003 MHz）** の意味だったので、**一段目・二段目を同じ HW 上限基準に統一**した。
+
+### 修正（`api/metrics.py` + `front/index.html`）
+
+- `api/metrics.py` の nvidia 経路: `clocks.max.sm` を **`memory_mode` を問わず**クエリに追加し、`gpu_clock_max_mhz` を返す（従来は `discrete` のときだけ）。**追加フィールドは末尾に置く**（`discrete` の既存 `cols` index を崩さないため）。discrete の `power.limit` は `cols[8]` → `cols[7]` へ移動し、`clocks.max.sm` は `cols[-1]`（末尾）で読む。`N/A` の環境ではキーを出さない（フロントは `gaugeDefs()` の `max0` / `CHART_NORM` の既定値へフォールバック）
+- `front/index.html` の `refreshMainChart()`: GPU クロックの 100% 基準を **`lastMetrics.gpu_clock_max_mhz`（HW 上限）** に戻す（前節の「記録上の最大値」から差し替え）。サーマルガードのロック段には連動させないので、**発動中も基準は動かない**（前節のこの要望は維持）
+- 半円ゲージ側はコード変更なし（`tuneGauge()` は `lock || gpu_clock_max_mhz || d.max0`）。unified でも `gpu_clock_max_mhz` が届くようになり、`d.max0` は API が `N/A` を返す環境のフォールバックに格下げ
+
+### 検証（テスト API 8099 + headless Chrome / CDP、`--password-store=basic` 付き）
+
+**12 ケース ALL PASS**（JS 例外なし）。テスト API は `fuser -k 8099/tcp` で停止、本番 8080 は 200 のまま無傷。
+
+| 状態 | 線グラフ基準 | ゲージ基準 / 最下行 | 2398 MHz の % | ツールチップ |
+|---|---|---|---|---|
+| 通常時 | **3003**（= API `gpu_clock_max_mhz`） | 3003 / `最大 3003 MHz` | 線 79.85% = ゲージ 79.85% | `GPU MHz: 2398` |
+| 擬似発動 `locked_mhz=1665` | **3003（不変）** | 1665 / `最大 1665 MHz` | 線 79.85%（基準が動かず MHz ÷ 3003） | `GPU MHz: 2398` |
+| 解除 `locked_mhz=0` | 3003 | 3003 へ復帰 | 79.85% | `GPU MHz: 2398` |
+
+- テスト API の `/api/metrics` は `gpu_clock_max_mhz: 3003.0` を返し、`nvidia-smi --query-gpu=clocks.max.sm` = **3003 MHz** / `nvidia-smi -q -d CLOCK` の `Max Clocks → SM : 3003 MHz` と一致
+- `py_compile` 通過
+- `gpu_power_cap_w` は unified では従来どおり出ない（`power.limit` が N/A）ため、GPU 電力の 100% 基準は 140 W 固定のままで**変更なし**
+
+### 反映（**API 再起動が必要**）
+
+`api/metrics.py` に手を入れたため **`bash api/restart_service.sh`（`sudo systemctl restart dgx-spark-api`）が必要**。**2026-11-09 10:22:34 に運用者が実施**（`bash api/restart_service.sh` → 続けて `sudo systemctl restart dgx-spark-api` も 1 回）。反映後の実測:
+
+- `dgx-spark-api` / `thermal-guard` とも `active`、`NRestarts=0`、`MainPID=1734941`（10:22:34 起動）
+- `/api/platform` / `/api/metrics` / `/api/vllm/{status,job,cline}` / `/api/rag/status` / `/api/thermal` / `/api/page-version` / `/api/history` / `/` が**すべて 200**
+- **`/api/metrics` が `gpu_clock_max_mhz: 3003.0` を返す**（`nvidia-smi --query-gpu=clocks.max.sm` の 3003 MHz と一致）。`gpu_power_cap_w` は unified では従来どおり出ない（`power.limit` が N/A）ので GPU 電力の 100% 基準は 140 W 固定のまま
+- `journalctl -u dgx-spark-api`（10:22 以降）と `api/server.log` に error / traceback **0 件**
+- 稼働中コンテナ `tabbyapi-qwen3codernext` は `Up About an hour` のまま = **API 再起動に巻き込まれて停止していない**
+- headless Chrome + CDP で 8080 の実ページを再検証し **12 ケース ALL PASS**（`apiMax: 3003` = API 経由で受領、線グラフ基準 3003 = ゲージ基準 3003、2398 MHz で 79.85%、ツールチップ `GPU MHz: 2398`、擬似発動時はゲージ 1665 / 線グラフ基準 3003 不変）
+
+atom2 (R9700 2350 MHz) / Whitebear2026 (WSL2 RTX 5090 3090 MHz) は `discrete` で既に `gpu_clock_max_mhz` を返しており、**線グラフが従来の固定/記録基準から実測 HW 上限基準へ揃う**。`clocks.max.sm` のクエリ位置（末尾）と `power.limit` の index 変更を追従させているので、**両機も API 再起動が必須**。
 
