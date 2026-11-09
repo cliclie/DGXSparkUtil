@@ -69,6 +69,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [サーマルガード表示の短縮: インジケータ短記法とGPUクロックタイル最下行の取得値固定 (2026-11-06 / 本機 = WhitebearATOM1)](#サーマルガード表示の短縮-インジケータ短記法とgpuクロックタイル最下行の取得値固定-2026-11-06--本機--whitebearatom1)
 - [api venv の保守更新と hf-venv の 2.x 化 (2026-11-07 / 本機 = WhitebearATOM2)](#api-venv-の保守更新と-hf-venv-の-2x-化-2026-11-07--本機--whitebearatom2)
 - [hipfire (hipfire・atom2) の Cline 設定値と prefill/decode 表示（2026-11-07 / 本機 = WhitebearATOM2）](#hipfire-hipfireatom2-の-cline-設定値と-prefilldecode-表示2026-11-07--本機--whitebearatom2)
+- [Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)](#qwen3-coder-next-と-ripple-65b-preview-の追加-6-プロファイル-への追従-2026-11-09--本機--whitebearatom1)
 
 ## 目的
 
@@ -354,10 +355,10 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   - 動作: 対象が既に起動中で健全なら何もしない → 既存のモデルコンテナを全停止 →
     `docker compose --profile <profile> up -d --force-recreate <service>` →
     `/health` 応答を待機(タイムアウト 1800 秒、起動ログをライブ表示) → API URL とモデル名を報告
-  - プロファイル: `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | qwen38flashnextexl3_3p05 | qwen38flashnextexl3_4p05 | qwen38swift | qwen38swift_dflash | muse | mimo9b | glm53flash | qwen38flashnext_nvfp4`
+  - プロファイル (27 種): `nemotron | qwen38 | qwen38bf16 | qwen38nvfp4 | muse | qwen38sglang | qwen38sglangeagle | qwen38sglangdflash | qwen38sglangdspark | qwen38flashnextexl3 | qwen38flashnextexl3_3p05 | qwen38flashnextexl3_4p05 | qwen38flashnext_nvfp4 | qwen38swift | qwen38swift_dflash | mimo9b | glm53flash | glm53flash_mosaic | ornith122b | nanbeige43 | nanbeige43nospec | qwen3codernext_exl3 | qwen3codernext_nvfp4 | ripplea | ripplead | rippleexl3 | rippleexl3d`
   - 同時に稼働できるモデルは 1 つ(切替時は現モデルを停止)
 - `/home/cliclie/llm/compose/docker-compose.yml`
-  - モデルサービス 17 種(vLLM 7 + SGLang 6 + llama.cpp 1 + TabbyAPI 3)と起動パラメータの定義
+  - モデルサービス 27 種(vLLM 9 + SGLang 10 + llama.cpp 1 + TabbyAPI 7)と起動パラメータの定義
 - `/home/cliclie/llm/compose/sociax-rag/collect-dgx-info.sh`
   - 既存の read-only 収集スクリプト(hostname / docker / GPU / ポート / 稼働コンテナ / ストレージ)
 
@@ -382,10 +383,26 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | mimo9b | vllm-mimo-9b | 8014 | vLLM 26.08 | 1010000 (YaRN) | 0.70 | 16G (fp8_e4m3) |
 | glm53flash | sglang-glm53-flash | 8013 | SGLang (GLM-5.3-Flash NVFP4) | 262144 | 0.65 | bfloat16 |
 | qwen38flashnext_nvfp4 | vllm-qwen38-flashnext-nvfp4 | 8015 | vLLM (qwen38-flash-dgx:v0.30-tp1) | 262144 | 0.72 | NVFP4 |
+| glm53flash_mosaic | sglang-glm53-mosaic | 8017 | SGLang (GLM-5.3-Flash mosaic) | 262144 | 0.95 | fp8_e4m3 |
+| ornith122b | tabbyapi-ornith122b | 8018 | TabbyAPI (ExLlamaV3) | 262144 (ネイティブ) | - | Q8 |
+| nanbeige43 | sglang-nanbeige43-33b-fp8-dflash | 8019 | SGLang (DFlash) | 524288 | 0.80 | fp8_e4m3 |
+| nanbeige43nospec | sglang-nanbeige43-33b-fp8 | 8019 | SGLang | 524288 | 0.80 | fp8_e4m3 |
+| qwen3codernext_exl3 | tabbyapi-qwen3codernext | 8020 | TabbyAPI (ExLlamaV3) | 1048576 | - | Q8 |
+| qwen3codernext_nvfp4 | vllm-qwen3-coder-next-nvfp4 | 8021 | vLLM 0.32.0 (YaRN 4.0) | 1048576 | 0.80 | 12.6G (fp8) |
+| ripplea | sglang-ripple-65b-a | 8022 | SGLang (Ripple plugin) | 262144 | 0.78 | bfloat16 |
+| ripplead | sglang-ripple-65b-a-dflash | 8023 | SGLang (DFlash2) | 262144 | 0.78 | bfloat16 |
+| rippleexl3 | tabbyapi-ripple-65b | 8026 | TabbyAPI (ExLlamaV3) | 262144 | - | Q4 |
+| rippleexl3d | tabbyapi-ripple-65b-dflash | 8027 | TabbyAPI (ExLlamaV3・DFlash2) | 262144 | - | Q4 |
 
 - コンテキストサイズ: vLLM は `--max-model-len`、SGLang は `--context-length`
   (sglang dflash / dspark と TabbyAPI の qwen38flashnextexl3 系は YaRN で 1M 拡張、
   mimo9b は YaRN で 1,010,000)、llama.cpp (muse) は `--ctx-size`
+- TabbyAPI は `compose/tabbyapi/config*.yml` の `max_seq_len` / `cache_size`
+  (qwen3codernext_exl3 は 1048576 / Q8、rippleexl3 系は 262144 / Q4。
+  `cache_size` 2097152 は 8 スロット合計)。`command` が `main.py --host --port` のみのため
+  `get_cline_config()` は静的テーブル `CLINE_MODEL_TABLE` の `context_max` を使う
+- `temperature` は sampling 既定を持たないモデルを静的テーブルで補完する
+  (Ripple 系 0.0 = greedy / Qwen3-Coder-Next 1.0 = 作者推奨。sampler_overrides と一致させる)
 - 共通: vLLM は `--max-num-seqs 1`・`--enable-chunked-prefill`、qwen38 系は MTP 推測デコード
   (`--speculative-config`)。SGLang は `--mem-fraction-static 0.65`・`--enable-metrics`、
   muse は `--temp / --top-p / --top-k`
@@ -2759,9 +2776,13 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
-> **現況（2026-11-06）**: 3 機とも `origin/main` 最新（`06e5eda` 系 + README 記録）まで同期済み。
+> **現況（2026-11-09）**: 3 機とも `origin/main` 最新まで同期済み。atom1 が自機の 2026-11-09
+> （新モデル 6 プロファイル追従 = `api/vllm.py` の `CLINE_MODEL_TABLE` のみ。当機の compose に
+> 存在するモデルの変更なので他機に実装上の影響なし）、atom2 が自機の 2026-11-07
+> （hipfire 対応と api venv 更新）、Whitebear2026 が 2026-11-06 反映 + 自機の 2026-11-08
+> （WSL 側フォルダ再編 `dc19be7` / `54a3dfe`）。
 > 以下の項は**時系列の記録**なので、途中にある「atom1 / atom2 / Whitebear2026 は未同期」の注記は
-> いずれも**その時点**のもので、現在は解消済み（各機の 2026-11-06 項が現在の状態）。
+> いずれも**その時点**のもので、現在は解消済み（各機の最新項が現在の状態）。
 
 | 機 | 2026-11-06 時点の同期 | `dgx-spark-api` 再起動 | thermal-guard |
 |---|---|---|---|
@@ -2801,6 +2822,12 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `/api/vllm/status`・`/api/thermal`・`/api/rag/status`・`/api/page-version` がすべて 200、
   `server.log` にエラーなし。詳細は末尾「サーマルガード表示の短縮 (2026-11-06)」節
 
+- **atom1 (WhitebearATOM1)**: 2026-11-09 に **Qwen3-Coder-Next / Ripple-65B Preview 追加 (6 プロファイル)
+  への追従**（本機。`api/vllm.py` の `CLINE_MODEL_TABLE` に 6 エントリ追加のみ）。一覧・切替・状態・
+  ログ・パラメータ表示は `_load_profiles()` の compose 動的パースで自動追従しており、TabbyAPI 系 3 件
+  （`qwen3codernext_exl3` / `rippleexl3` / `rippleexl3d`）は `command` にコンテキストフラグが無いため
+  `/api/vllm/cline` が `context_recommended / context_max = null` を返していた（フロントの Cline 設定値が
+  「null (最大)」）。追加後の実測は末尾「Qwen3-Coder-Next と Ripple-65B Preview の追加 (2026-11-09)」節
 - **atom1 (WhitebearATOM1)**: 2026-11-06 に **サーマルガード表示を短縮**（本機。運用者依頼）。
   `front/index.html` のみ — 発動中のヘッダインジケータが長文で折り返し・レイアウトがずれるため
   (groups モード: `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)`)、短記法
@@ -4410,3 +4437,76 @@ prefill 19828 で `max_tokens=242315` は OK / `242316` は 400 = 262144−19828
 （`None/Low/Medium/High/XHigh`）で、hipfire の Qwen3.8 が実際に受け付けるのは `low` /
 `medium` / `xhigh`（`High` は drop+warn）。hipfire の `/health` は `reasoning_efforts` を
 返すので、必要ならここも動的化できる（今回は未実施）
+## Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)
+
+**背景**: `~/llm/compose` 側に 2026-11-07 の Qwen3-Coder-Next（EXL3 6.0bpw・8020 / NVFP4-GB10・8021）と
+2026-11-09 の Ripple-65B Preview（SGLang・8022 / SGLang+DFlash2・8023 / TabbyAPI EXL3・8026 /
+TabbyAPI EXL3+DFlash2・8027）が追加され、プロファイル付きモデルサービスが **21 → 27 種**
+（vLLM 9 + SGLang 10 + llama.cpp 1 + TabbyAPI 7）になった。DGXSparkUtil 側の追従を確認し、
+必要最小限の修正を行う。
+
+**追従が不要だった箇所（実測で確認）**:
+
+- **一覧・切替・状態・ログ・パラメータ表示**: `_load_profiles()` が `docker-compose.yml` を動的パース
+  するため**自動追従**。`GET /api/vllm/status` の `containers` に 27 プロファイル（新 6 件を含む）が
+  出ること、`switch_models.sh` に 6 case と排他停止リスト（`tabbyapi-qwen3codernext` /
+  `vllm-qwen3-coder-next-nvfp4` / `sglang-ripple-65b-a` / `sglang-ripple-65b-a-dflash` /
+  `tabbyapi-ripple-65b` / `tabbyapi-ripple-65b-dflash`）が揃っていることを確認
+- **`GET /api/vllm/params`**: 新 6 件すべて成功（`qwen3codernext_nvfp4` 17 引数 / `ripplea` 26 /
+  `ripplead` 32 / TabbyAPI 3 件は単一行 `command` を 3 引数に分解）
+- **`GET /api/vllm/log`**: 未作成コンテナ（`tabbyapi-ripple-65b-dflash`）も
+  `Error response from daemon: No such container: …` を logs 配列で返すだけで 500 にならない
+- **エンジン種別判定とメトリクス**: 稼働中の `qwen3codernext_exl3` で `_engine_kind()` が `tabby` を返し、
+  TabbyAPI ログ解析 (`_TABBY_START_RE` / `_TABBY_DONE_RE`) が新ログ形式（ExLlamaV3 v1.6.5）に
+  適合。`/v1/chat/completions` を 1 本流して `kv_cache_usage_pct 0.0014% / e2e 3.46 s / ttft 1.96 s /
+  prefill 6.67 T/s / decode 1.3 T/s` を実測（折り返し継続行の結合が効いている）
+- **サーマルガード**: 本機は `TG_GROUPS=1`（groups モード）で**コンテナ名に依らない常時監視**のため
+  新モデルも自動的に対象。既定リスト `vllm-nemotron120b tabbyapi-ornith122b` の更新は不要
+- **`front/index.html`**: `st.containers` をループするプロファイル名非依存の実装で**変更不要**
+
+**修正内容**（`api/vllm.py` の `CLINE_MODEL_TABLE` に 6 エントリ追加のみ）:
+
+| プロファイル | images | context_max | temperature | 根拠 |
+|---|---|---|---|---|
+| `qwen3codernext_exl3` | false | 1048576 | 1.0 | `/v1/model` の `max_seq_len` / `cache_size` 1048576（Q8）、`vision: false`、`sampler_overrides/qwen3_coder_next.yml` override 1.0 |
+| `qwen3codernext_nvfp4` | false | 1048576 | 1.0 | `--max-model-len 1048576`（YaRN factor 4.0 を config.json shadow で付与） |
+| `ripplea` | false | 262144 | 0.0 | `--context-length 262144`（native 2097152 の運用値）、`sampler_overrides/ripple.yml` override 0.0 |
+| `ripplead` | false | 262144 | 0.0 | 同上（DFlash2 draft 付き） |
+| `rippleexl3` | false | 262144 | 0.0 | `config_ripple.yml` の `max_seq_len` 262144（`cache_size` 2097152 は 8 スロット合計）、`vision: false` |
+| `rippleexl3d` | false | 262144 | 0.0 | `config_ripple_dflash.yml` の `max_seq_len` 262144 |
+
+TabbyAPI 系 3 件は `command` が `main.py --host 0.0.0.0 --port 5000` のみでコンテキストフラグが
+無いため、追加前は `GET /api/vllm/cline` が `context_recommended / context_max = null` を返し、
+フロントの Cline 設定値が「**null (最大)**」表示になっていた（Ripple 系は temperature も既定 0.6 に
+なっていた）。
+
+**検証**（venv の python と、テスト用 uvicorn を `127.0.0.1:8099` に立てて実施）:
+
+- `get_cline_config()` を 6 プロファイルで注入実行 → `context_recommended` / `context_max` が
+  すべて整数（1048576 / 262144）、`temperature` 1.0 / 0.0、`base_url` は各ポート
+  （8020 / 8021 / 8022 / 8023 / 8026 / 8027）
+- 既存 4 件の回帰なし（`qwen38flashnextexl3_4p05` 1048576・`ornith122b` 262144・
+  `nemotron` 262144・`mimo9b` 1010000）
+- 8099 の API で `GET /api/vllm/cline` を実測 → `context_recommended/context_max 1048576`・
+  `temperature 1.0`（修正前は null / 0.6）。テスト API は `fuser -k 8099/tcp` で停止、
+  既存 API（8080）は 200 のまま無傷
+- `GET /api/vllm/status` の `active = qwen3codernext_exl3`・`model_name = qwen3_coder_next_exl3_6bpw`・
+  `health true`・`busy false` を確認
+
+**反映**: `CLINE_MODEL_TABLE` は import 時に読まれるため `bash api/restart_service.sh`
+（`sudo systemctl restart dgx-spark-api`）が必要。**2026-11-09 時点では未実施**（当環境の sudo が
+パスワード要求のため運用者側で実施）。稼働中モデルは docker コンテナ側（dockerd の cgroup）なので
+API 再起動に巻き込まれない。
+
+**未修正の既知の staleness（今回変更せず）**: `glm53flash`（`vllm-glm53-flash-exl3`・8013）は
+`CLINE_MODEL_TABLE` 未登録で `context_max` が null（2026-10-07 節に記載済みの既知事項）。
+`nanbeige43` / `nanbeige43nospec` / `glm53flash_mosaic` / `qwen38flashnext_nvfp4` /
+`qwen38swift` / `qwen38swift_dflash` は command からコンテキストを取得できるため実害なし。
+「モデル一覧と主要パラメータ」表の `glm53flash` 行のコンテナ名（`sglang-glm53-flash`）は
+実コンテナ `vllm-glm53-flash-exl3` とズレている（歴史記述として据え置き）。
+
+**Ripple 系の運用メモ（compose 側の制約）**: `ripplea` / `ripplead` は重み 53.3 GiB +
+DFlash2 draft 7.5 GiB + KV 17 GiB で `--mem-fraction-static 0.78`。**RAG embedding（約 12 GiB）を
+停止してから起動する**こと。atom1 は `exclusive_llm_rag = false` なので DGXSparkUtil 側の
+排他警告は出ない（compose コメント側の運用前提）。
+
