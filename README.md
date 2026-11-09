@@ -2784,8 +2784,9 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 > （新モデル 6 プロファイル追従 = `api/vllm.py` の `CLINE_MODEL_TABLE` のみ。当機の compose に
 > 存在するモデルの変更なので他機に実装上の影響なし）、atom2 は自機の 2026-11-07（hipfire 対応と
 > api venv 更新）に加えて 2026-11-09 の 8 コミット（`f309f17` の GPU クロック 100% 基準 HW 上限統一
-> を含む）を反映 + `dgx-spark-api` 再起動済み、Whitebear2026 が 2026-11-06 反映 + 自機の 2026-11-08
-> （WSL 側フォルダ再編 `dc19be7` / `54a3dfe`）。
+> を含む）を反映 + `dgx-spark-api` 再起動済み、Whitebear2026 が 2026-11-09 に 10 コミット
+> （`f309f17` の GPU クロック 100% 基準 HW 上限統一 + 新モデル 6 プロファイルを含む）を反映 +
+> `dgx-spark-api` 再起動済み。
 > 以下の項は**時系列の記録**なので、途中にある「atom1 / atom2 / Whitebear2026 は未同期」の注記は
 > いずれも**その時点**のもので、現在は解消済み（各機の最新項が現在の状態）。
 
@@ -2826,6 +2827,31 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   残存、配信中 HTML とリポジトリ `front/index.html` は ETag 注入分のみ差分、`/api/platform`・
   `/api/vllm/status`・`/api/thermal`・`/api/rag/status`・`/api/page-version` がすべて 200、
   `server.log` にエラーなし。詳細は末尾「サーマルガード表示の短縮 (2026-11-06)」節
+
+- **Whitebear2026 (WSL2 / modelctl)**: 2026-11-09 に **atom1 / atom2 由来の 10 コミットを反映**
+  （`f309f17` の GPU クロック 100% 基準 HW 上限統一 + `3599547` の新モデル 6 プロファイル +
+  `.clinerules` / README）。`git pull --ff-only origin main`（`54a3dfe` → `449f3cb`、fast-forward、
+  10 コミット、作業ツリー clean）。ローカル未コミットの `.clinerules/00-ClineTips.md` /
+  `09.chrome.md` はリモート版とバイト一致（hash 一致確認済）のため破棄してから pull。
+  コード変更は `api/metrics.py` / `api/vllm.py` / `front/index.html` を含むので
+  **`dgx-spark-api` 再起動が必要**（`sudo systemctl restart dgx-spark-api` を 11:22:32 JST に実施、
+  新 PID 1633273）。**本機の線グラフ基準は 3090 MHz（RTX 5090 の HW 上限）で不変** —
+  `gpu_vendor=nvidia` + `discrete` で旧コードも `gpu_clock_max_mhz` に追随済みだったため。
+  本機への可視変化は (1) 半円ゲージの 100% 基準と最下行「最大 N MHz」が同一値になったこと
+  （サーマルガード発動中もロック段へ揃う。本機は監視専らで `locked_mhz=0`）、(2) ツールチップが
+  ラベル単位の値を表示したこと（`TOOLTIP_RAW` / `chartRaw`。従来は換算系列が % 表示で
+  `GPU MHz: 92.9` のような誤読を生んでいた）。`api/metrics.py` の `clocks.max.sm` 末尾化は
+  本機（discrete）でも index 変更（`power.limit` → `cols[7]`）だが値は不変。`CLINE_MODEL_TABLE`
+  の 6 エントリは atom1 の compose 固有モデルで本機の一覧には出ない（`/api/vllm/status` 不変、
+  テーブルは 26 項目ロード確認）。atom2 の `TimeoutStopSec=15` drop-in は本機に未適用
+  （本機は WSL 環境で `KillMode=process` 済みの compose 外環境のため対象外）。
+  実測（ポート **8090**）: `GET /` は `Cache-Control: no-cache` + `ETag` 付き 200、注入 `PAGE_ETAG`
+  が `/api/page-version` と一致（`e9c2bb53…`）、配信中 HTML とリポジトリ `front/index.html`
+  （99,098 B）は ETag 注入分のみ差分、`/api/platform`・`/api/metrics`・`/api/vllm/status`・
+  `/api/thermal`・`/api/rag/status`・`/api/history` がすべて 200。稼働中モデル `strataq3`
+  （Strata swift-1.5-iq3_s、ポート 8080）は API 再起動の影響なし（`/health` loaded: true、
+  uptime 連続）。`thermal-guard` も `active`（監視専ら / `locked_mhz=0`）継続。
+  詳細は末尾「線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09)」節
 
 - **atom1 (WhitebearATOM1)**: 2026-11-09 に **Qwen3-Coder-Next / Ripple-65B Preview 追加 (6 プロファイル)
   への追従**（本機 `3599547`。`api/vllm.py` の `CLINE_MODEL_TABLE` に 6 エントリ追加のみ）。一覧・切替・状態・
@@ -4675,6 +4701,8 @@ DFlash2 draft 7.5 GiB + KV 17 GiB で `--mem-fraction-static 0.78`。**RAG embed
 atom2 (R9700 2350 MHz) / Whitebear2026 (WSL2 RTX 5090 3090 MHz) は `discrete` で既に `gpu_clock_max_mhz` を返しており、**線グラフが従来の固定/記録基準から実測 HW 上限基準へ揃う**。`clocks.max.sm` のクエリ位置（末尾）と `power.limit` の index 変更を追従させているので、**両機も API 再起動が必須**。
 
 **atom2 (WhitebearATOM2) 反映（2026-11-09）**: `git fetch --all --prune` + `git merge --ff-only origin/main`（`0442624` → `6aaf0c1`、8 コミット、作業ツリー clean）+ `sudo systemctl restart dgx-spark-api`（10:48:58 SIGTERM → 10:50:28 新 Invocation 起動）。本機は `gpu_backend=amdgpu`（`_read_gpu_amd()` 経路）なので `api/metrics.py` の nvidia 側 index 変更（`clocks.max.sm` 末尾移動 / `power.limit` を `cols[7]`）は**非該当**だが、`discrete` として従来から返していた `gpu_clock_max_mhz = 2350.0` を新 `refreshMainChart()` が採用するため、**線グラフの GPU MHz が R9700 の HW 上限 2350 MHz 基準へ揃った**（ツールチップは `GPU MHz: <実測>`、`tuneGauge()` は `lock || gpu_clock_max_mhz || max0`）。実測（8080）: 配信中 HTML（99,125 B）とリポジトリ `front/index.html`（99,098 B）の差分は ETag 注入分 27 B のみ、`/`・`/api/platform`・`/api/metrics`・`/api/vllm/{status,cline}`・`/api/thermal`・`/api/rag/status`・`/api/page-version`・`/api/history` すべて 200、アプリ側の error / traceback 0 件、稼働中 `hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続のまま（**API 再起動に巻き込まれて停止していない**）、`thermal-guard` も `active` / `mode=power`。
+
+**Whitebear2026 (WSL2) 反映（2026-11-09）**: `git pull --ff-only origin main`（`54a3dfe` → `449f3cb`、10 コミット、作業ツリー clean。ローカル未コミットの `.clinerules` 2 件はリモート版とバイト一致のため破棄）+ `sudo systemctl restart dgx-spark-api`（11:22:32 JST、新 PID 1633273）。本機は `gpu_vendor=nvidia` + `discrete`（RTX 5090）で旧コードも `gpu_clock_max_mhz = 3090.0` を `refreshMainChart()` に渡していたため、**線グラフ基準は 3090 MHz（RTX 5090 の HW 上限）で不変**。可視変化は半円ゲージの 100% 基準と最下行「最大 N MHz」が同一値になったこと（`tuneGauge()` は `lock || gpu_clock_max_mhz || max0`。本機は監視専らで `locked_mhz=0`）と、ツールチップがラベル単位の値を表示したこと（`TOOLTIP_RAW` / `chartRaw`）。`api/metrics.py` の `clocks.max.sm` 末尾化に伴う index 変更（`power.limit` → `cols[7]`）も本機で有効だが値は不変。実測（8090）: 注入 `PAGE_ETAG` が `/api/page-version` と一致（`e9c2bb53…`）、配信中 HTML とリポジトリ `front/index.html`（99,098 B）の差分は ETag 注入分のみ、`/api/platform`・`/api/metrics`・`/api/vllm/status`・`/api/thermal`・`/api/rag/status`・`/api/history` すべて 200、稼働中 `strataq3`（Strata swift-1.5-iq3_s / ポート 8080）は `/health` loaded: true・uptime 連続のまま（**API 再起動に巻き込まれて停止していない**）、`thermal-guard` も `active`（監視専ら / `locked_mhz=0`）。
 
 - なお今回の再起動で **stop が 90 秒停滞**する事象を確認したため、`TimeoutStopSec` の drop-in と `switch_models.sh` の `cleanup()` 修正で対応済み（手順・検証は次節）
 
