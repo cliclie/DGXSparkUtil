@@ -4494,9 +4494,27 @@ TabbyAPI 系 3 件は `command` が `main.py --host 0.0.0.0 --port 5000` のみ�
   `health true`・`busy false` を確認
 
 **反映**: `CLINE_MODEL_TABLE` は import 時に読まれるため `bash api/restart_service.sh`
-（`sudo systemctl restart dgx-spark-api`）が必要。**2026-11-09 時点では未実施**（当環境の sudo が
-パスワード要求のため運用者側で実施）。稼働中モデルは docker コンテナ側（dockerd の cgroup）なので
-API 再起動に巻き込まれない。`git push origin main`（`54a3dfe..07eaa38`）で push 済み。
+（`sudo systemctl restart dgx-spark-api`）が必要。**2026-11-09 09:24:20 に運用者が実施**
+（unit `active`・`NRestarts=0`・`/api/platform` / `/api/metrics` / `/api/vllm/{status,job,cline}` /
+`/api/rag/{status,job}` / `/api/thermal` / `/api/page-version` / `/api/history` / `/` がすべて 200、
+`journalctl -u dgx-spark-api`（09:24 以降）に error / traceback 0 件）。稼働中コンテナ
+`tabbyapi-qwen3codernext` は `Up 16 minutes` のまま = **API 再起動に巻き込まれて停止していない**。
+
+反映後の実測（ポート 8080）:
+- `GET /api/vllm/cline` → `context_recommended / context_max 1048576`・`temperature 1.0`・
+  `base_url=http://WhitebearATOM1.local:8020/v1/`・`model_id=qwen3_coder_next_exl3_6bpw`
+  （**修正前は `context_* = null`・`temperature 0.6` だった**）
+- `GET /api/vllm/status` → `containers 27`・`active=qwen3codernext_exl3`・`health true`・
+  `busy false`・`uptime 00:15:55`（再起動を跨いで連続）、TabbyAPI メトリクス 5 キー維持
+  （`kv_cache 0.0014% / e2e 3.46 s / ttft 1.96 s / prefill 6.67 T/s / decode 1.3 T/s`）
+- 新 6 プロファイルの `GET /api/vllm/params` と `GET /api/vllm/log` がすべて 200
+  （`ripplead` は 32 引数で `editable` なし = `--context-length` 系は `EDITABLE_FLAGS` 対象外なので従来仕様、
+  `qwen3codernext_nvfp4` は `--max-model-len` / `--max-num-seqs` / `--gpu-memory-utilization` /
+  `--max-num-batched-tokens` の 4 件が編集可能）
+- `~/.dgxsparkutil/last_active.json` は `qwen3codernext_exl3`、`GET /api/thermal` は
+  `groups: true / model_running: 1`（新モデルを常時監視対象として認識）
+
+`git push origin main`（`54a3dfe..908e227`）で push 済み。
 atom2 / Whitebear2026 には本機固有のモデル（当機 compose の 6 プロファイル）に関する
 テーブル追加のみなので反映は任意。
 
