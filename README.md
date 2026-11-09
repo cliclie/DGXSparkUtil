@@ -2823,7 +2823,7 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   `server.log` にエラーなし。詳細は末尾「サーマルガード表示の短縮 (2026-11-06)」節
 
 - **atom1 (WhitebearATOM1)**: 2026-11-09 に **Qwen3-Coder-Next / Ripple-65B Preview 追加 (6 プロファイル)
-  への追従**（本機。`api/vllm.py` の `CLINE_MODEL_TABLE` に 6 エントリ追加のみ）。一覧・切替・状態・
+  への追従**（本機 `3599547`。`api/vllm.py` の `CLINE_MODEL_TABLE` に 6 エントリ追加のみ）。一覧・切替・状態・
   ログ・パラメータ表示は `_load_profiles()` の compose 動的パースで自動追従しており、TabbyAPI 系 3 件
   （`qwen3codernext_exl3` / `rippleexl3` / `rippleexl3d`）は `command` にコンテキストフラグが無いため
   `/api/vllm/cline` が `context_recommended / context_max = null` を返していた（フロントの Cline 設定値が
@@ -4496,7 +4496,9 @@ TabbyAPI 系 3 件は `command` が `main.py --host 0.0.0.0 --port 5000` のみ�
 **反映**: `CLINE_MODEL_TABLE` は import 時に読まれるため `bash api/restart_service.sh`
 （`sudo systemctl restart dgx-spark-api`）が必要。**2026-11-09 時点では未実施**（当環境の sudo が
 パスワード要求のため運用者側で実施）。稼働中モデルは docker コンテナ側（dockerd の cgroup）なので
-API 再起動に巻き込まれない。
+API 再起動に巻き込まれない。`git push origin main`（`54a3dfe..07eaa38`）で push 済み。
+atom2 / Whitebear2026 には本機固有のモデル（当機 compose の 6 プロファイル）に関する
+テーブル追加のみなので反映は任意。
 
 **未修正の既知の staleness（今回変更せず）**: `glm53flash`（`vllm-glm53-flash-exl3`・8013）は
 `CLINE_MODEL_TABLE` 未登録で `context_max` が null（2026-10-07 節に記載済みの既知事項）。
