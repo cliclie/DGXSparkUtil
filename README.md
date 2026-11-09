@@ -2781,8 +2781,9 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 > **現況（2026-11-09）**: 3 機とも `origin/main` 最新まで同期済み。atom1 が自機の 2026-11-09
 > （新モデル 6 プロファイル追従 = `api/vllm.py` の `CLINE_MODEL_TABLE` のみ。当機の compose に
-> 存在するモデルの変更なので他機に実装上の影響なし）、atom2 が自機の 2026-11-07
-> （hipfire 対応と api venv 更新）、Whitebear2026 が 2026-11-06 反映 + 自機の 2026-11-08
+> 存在するモデルの変更なので他機に実装上の影響なし）、atom2 は自機の 2026-11-07（hipfire 対応と
+> api venv 更新）に加えて 2026-11-09 の 8 コミット（`f309f17` の GPU クロック 100% 基準 HW 上限統一
+> を含む）を反映 + `dgx-spark-api` 再起動済み、Whitebear2026 が 2026-11-06 反映 + 自機の 2026-11-08
 > （WSL 側フォルダ再編 `dc19be7` / `54a3dfe`）。
 > 以下の項は**時系列の記録**なので、途中にある「atom1 / atom2 / Whitebear2026 は未同期」の注記は
 > いずれも**その時点**のもので、現在は解消済み（各機の最新項が現在の状態）。
@@ -2831,6 +2832,30 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
   （`qwen3codernext_exl3` / `rippleexl3` / `rippleexl3d`）は `command` にコンテキストフラグが無いため
   `/api/vllm/cline` が `context_recommended / context_max = null` を返していた（フロントの Cline 設定値が
   「null (最大)」）。追加後の実測は末尾「Qwen3-Coder-Next と Ripple-65B Preview の追加 (2026-11-09)」節
+
+- **atom2 (WhitebearATOM2)**: 2026-11-09 に **GPU クロック 100% 基準の HW 上限統一 (`f309f17`) を含む
+  8 コミットを反映**（atom1 実装 + 自機の 2026-11-07 記録までの間）。
+  `git fetch --all --prune` + `git merge --ff-only origin/main`（`0442624` → `6aaf0c1`、fast-forward、
+  作業ツリー clean）。コード変更は `api/metrics.py` / `api/config.py` / `api/vllm.py` /
+  `api/wsl_modelctl_bridge.sh` / `front/index.html` の 5 ファイルなので **`dgx-spark-api` 再起動が必要**
+  （`sudo systemctl restart dgx-spark-api` を 10:48:58 に実施、10:50:28 に新 Invocation 起動）。
+  **本機の線グラフ基準は 2350 MHz（R9700 の HW 上限）へ** — `/api/metrics` は `gpu_vendor=amd` で
+  `_read_gpu_amd()` 経路のため `api/metrics.py` の nvidia 側変更（`clocks.max.sm` を末尾に移動 /
+  `power.limit` を `cols[7]` 化）は非該当だが、`discrete` で従来から返していた `gpu_clock_max_mhz =
+  2350.0` を `refreshMainChart()` が採用する（従来は `CHART_NORM` 固定基準）。ツールチップの
+  ラベル単位化（`TOOLTIP_RAW` / `chartRaw`）も全機共通で反映。`api/config.py` の `model_ctl` パスと
+  `api/wsl_modelctl_bridge.sh` は `wsl` プロファイル専用（本機は `backend=compose`）で無影響、
+  `api/vllm.py` の `CLINE_MODEL_TABLE` 6 エントリは atom1 の compose 固有モデルで本機の一覧には出ない。
+  実測（ポート **8080**）: `GET /` は `Cache-Control: no-cache` + `ETag` 付き 200、注入 `PAGE_ETAG` が
+  `/api/page-version` と一致（`d29a609b…`）、`__PAGE_ETAG__` リテラルは防御チェック 1 箇所のみ残存、
+  配信中 HTML（99,125 B）とリポジトリ `front/index.html`（99,098 B）は ETag 注入分のみ差分、
+  `/`・`/api/platform`・`/api/metrics`・`/api/vllm/{status,cline}`・`/api/thermal`・
+  `/api/rag/status`・`/api/page-version`・`/api/history` がすべて 200、アプリ側の error / traceback
+  0 件。稼働中モデル `hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続（01:37:13）、
+  `/api/vllm/status` の `active = hipfire` / `health=true` / `api_listening=true` のまま =
+  **API 再起動に巻き込まれて停止していない**。`thermal-guard` も `active` / `mode=power`（300 W cap）継続。
+  詳細は末尾「線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09)」節
+
 - **atom1 (WhitebearATOM1)**: 2026-11-06 に **サーマルガード表示を短縮**（本機。運用者依頼）。
   `front/index.html` のみ — 発動中のヘッダインジケータが長文で折り返し・レイアウトがずれるため
   (groups モード: `クロック制限 GPU 1000MHz / CPU 2400MHz (CPU 94℃)`)、短記法
@@ -4641,4 +4666,8 @@ DFlash2 draft 7.5 GiB + KV 17 GiB で `--mem-fraction-static 0.78`。**RAG embed
 - headless Chrome + CDP で 8080 の実ページを再検証し **12 ケース ALL PASS**（`apiMax: 3003` = API 経由で受領、線グラフ基準 3003 = ゲージ基準 3003、2398 MHz で 79.85%、ツールチップ `GPU MHz: 2398`、擬似発動時はゲージ 1665 / 線グラフ基準 3003 不変）
 
 atom2 (R9700 2350 MHz) / Whitebear2026 (WSL2 RTX 5090 3090 MHz) は `discrete` で既に `gpu_clock_max_mhz` を返しており、**線グラフが従来の固定/記録基準から実測 HW 上限基準へ揃う**。`clocks.max.sm` のクエリ位置（末尾）と `power.limit` の index 変更を追従させているので、**両機も API 再起動が必須**。
+
+**atom2 (WhitebearATOM2) 反映（2026-11-09）**: `git fetch --all --prune` + `git merge --ff-only origin/main`（`0442624` → `6aaf0c1`、8 コミット、作業ツリー clean）+ `sudo systemctl restart dgx-spark-api`（10:48:58 SIGTERM → 10:50:28 新 Invocation 起動）。本機は `gpu_backend=amdgpu`（`_read_gpu_amd()` 経路）なので `api/metrics.py` の nvidia 側 index 変更（`clocks.max.sm` 末尾移動 / `power.limit` を `cols[7]`）は**非該当**だが、`discrete` として従来から返していた `gpu_clock_max_mhz = 2350.0` を新 `refreshMainChart()` が採用するため、**線グラフの GPU MHz が R9700 の HW 上限 2350 MHz 基準へ揃った**（ツールチップは `GPU MHz: <実測>`、`tuneGauge()` は `lock || gpu_clock_max_mhz || max0`）。実測（8080）: 配信中 HTML（99,125 B）とリポジトリ `front/index.html`（99,098 B）の差分は ETag 注入分 27 B のみ、`/`・`/api/platform`・`/api/metrics`・`/api/vllm/{status,cline}`・`/api/thermal`・`/api/rag/status`・`/api/page-version`・`/api/history` すべて 200、アプリ側の error / traceback 0 件、稼働中 `hipfire-qwen38-27b` は `Up 2 hours (healthy)` / uptime 連続のまま（**API 再起動に巻き込まれて停止していない**）、`thermal-guard` も `active` / `mode=power`。
+
+- **反映時の注意（本機で実測）**: 本機の実 unit `/etc/systemd/system/dgx-spark-api.service` には `KillMode` 行が**無く**（既定 = `control-group`）、API が派生した `switch_models.sh <profile>` とその `docker logs --follow` が CGroup に残っている場合、stop が **`final-sigterm` で 90 秒停滞**して `State 'final-sigterm' timed out. Killing.` → `Failed with result 'timeout'` が出る（今回の 10:48:58 → 10:50:28 がこれ。モデルは docker コンテナなので実害なし）。`systemctl restart` を待つ側は 30 秒では足りないので、`restart_service.sh` の応答待ちやシェル側のタイムアウトに注意。`api/dgx-spark-api.service` の `__KILL_MODE__` プレースホルダ（`install_service.sh` が置換、Whitebear2026 は `process`）で `process` を指定すれば回避できるが、**本機は未設定**（再適用は今回行っていない）
 
