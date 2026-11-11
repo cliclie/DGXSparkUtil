@@ -3,6 +3,8 @@
 データ源:
 - CPU負荷: /proc/stat の idle 差分
 - CPU温度: /sys/class/thermal/thermal_zone* (acpitz 優先、x86_pkg_temp フォールバック、ミリ℃)
+  - WSL のみ: /sys/class/thermal が空のため、Windows ホスト側に常駐させた
+    LibreHardwareMonitor (config.LHM_URL の data.json) を優先して使う
 - メモリ: /proc/meminfo (DGX Spark は統合メモリ、atom2 は RAM。VRAM は GPU 側で取得)
 - GPU負荷/温度/電力/クロック: config.GPU_BACKEND に応じ nvidia-smi または amdgpu sysfs
 - ストレージ使用率: shutil.disk_usage
@@ -13,11 +15,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 
 import config
@@ -174,8 +178,124 @@ def net_gauge_max_mbps() -> int:
     return link_speed_mbps() or int(config.NET_MAX_MBPS)
 
 
+# ------------------------------------------------- LibreHardwareMonitor (WSL 専用)
+# data.json は {id, Text, Children:[...]} のツリーで、センサー葉が
+#   {"Text": "Core Max", "Value": "46.0 °C", "Type": "Temperature",
+#    "SensorId": "/intelcpu/0/temperature/0", ...}
+# という形。CPU 温度 (/intelcpu|/amdcpu|/cpu の temperature センサー) だけ拾う。
+# 1 回あたり 200KB 級なので TTL キャッシュで「実質 5 秒に 1 回」の取得に抑える
+# (collect() は履歴サンプリング 5 秒 + フロントのポーリングで呼ばれる)。
+
+_LHM_TTL_S = 5.0          # 成功時の再取得間隔
+_LHM_FAIL_TTL_S = 30.0    # 失敗時のリトライ間隔 (LHM 停止中の待ち時間を抑える)
+_LHM_TIMEOUT_S = 2.0
+_LHM_MAX_BYTES = 8_000_000
+_lhm_cache: dict = {"ts": 0.0, "temp": None}
+
+# 代表センサーの優先順位 (パッケージ/全体の実態に近いものから)。
+# どれも無い場合 (他 CPU の場合) は CPU 温度センサーの最高値を使う。
+_LHM_TEMP_PRIORITY = (
+    "core (tctl/tdie)",
+    "cpu package",
+    "core max",
+    "average cpu",
+    "cpu average",
+    "core average",
+    "cpu proximity",
+)
+
+
+def _lhm_value_c(text: object) -> float | None:
+    """'46.0 °C' のような文字列から摂氏の実数を取り出す (°F は換算、N/A は None)。"""
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not m:
+        return None
+    value = float(m.group(0))
+    if "F" in text and "C" not in text:
+        value = (value - 32.0) * 5.0 / 9.0
+    return value
+
+
+_LHM_CATEGORIES = {
+    "voltages", "currents", "powers", "clocks", "temperatures", "loads", "fans",
+    "controls", "data", "timings", "throughput", "levels", "factors", "smart",
+    "generic", "acpi", "super i/o", "nic", "gpus", "cpus", "motherboards", "battery",
+}
+# CPU ハードウェアノード名の目安 (SensorId が無い版 JSON 用の副経路)
+_LHM_CPU_NODE_RE = re.compile(r"cpu|processor|intel|amd|ryzen|threadripper|core|xeon", re.I)
+
+
+def _lhm_collect_cpu_temps(node: object, group: str, out: dict) -> None:
+    """ツリーを走査し CPU 温度センサーを {センサー名(小文字): 最高値} に集める。
+
+    group は直近のハードウェアノード名 (例: 'Intel Core Ultra 7 270K Plus')。
+    SensorId が CPU 系 (/intelcpu/0/temperature/N 等) のものを正とし、SensorId が
+    無い版の JSON に備えて「CPU 系ノード配下の Temperature」も副経路として拾う
+    (マザボの "CPU" 項目は group が Nuvoton 等なので混ざらない)。
+    """
+    if not isinstance(node, dict):
+        return
+    sid = str(node.get("SensorId") or "").lower()
+    name = str(node.get("Text") or "").strip()
+    lower = name.lower()
+    is_cpu = bool(re.match(r"^/[a-z]*cpu/\d+/temperature/\d+$", sid)) or (
+        node.get("Type") == "Temperature" and bool(_LHM_CPU_NODE_RE.search(group))
+    )
+    if is_cpu and lower:
+        value = _lhm_value_c(node.get("Value"))
+        # "P-Core #1 Distance to TJMax" は上限までの残り温度なので CPU 温度として使わない
+        if value is not None and "distance to" not in lower and value > out.get(lower, -1e9):
+            out[lower] = value
+    # 分類ノード (Temperatures 等) をまたいでもハードウェア名を保持する
+    child_group = group
+    if not node.get("SensorId") and lower and lower not in _LHM_CATEGORIES:
+        child_group = name
+    for child in node.get("Children") or []:
+        _lhm_collect_cpu_temps(child, child_group, out)
+
+
+def _lhm_cpu_temp_c() -> float | None:
+    """LibreHardwareMonitor の data.json から CPU 温度 (℃) を返す。取れなければ None。"""
+    now = time.monotonic()
+    ttl = _LHM_TTL_S if _lhm_cache["temp"] is not None else _LHM_FAIL_TTL_S
+    if now - _lhm_cache["ts"] < ttl:
+        return _lhm_cache["temp"]  # type: ignore[return-value]
+
+    data = None
+    try:
+        with urllib.request.urlopen(config.LHM_URL, timeout=_LHM_TIMEOUT_S) as r:
+            if getattr(r, "status", 200) == 200:
+                data = json.loads(r.read(_LHM_MAX_BYTES).decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        data = None
+
+    temp: float | None = None
+    if data is not None:
+        sensors: dict = {}
+        _lhm_collect_cpu_temps(data, "", sensors)
+        for want in _LHM_TEMP_PRIORITY:
+            if want in sensors:
+                temp = sensors[want]
+                break
+        if temp is None and sensors:
+            temp = max(sensors.values())
+    _lhm_cache.update(ts=now, temp=temp)
+    return temp
+
+
 def _read_cpu_temp_c() -> float | None:
-    """CPU温度(℃)。acpitz ゾーン全体の最高値、無ければ x86_pkg_temp にフォールバック。"""
+    """CPU温度(℃)。acpitz ゾーン全体の最高値、無ければ x86_pkg_temp にフォールバック。
+
+    WSL は /sys/class/thermal が空 (ホストの Windows がセンサーを持つ) ため、
+    config.LHM_URL が設定されているときだけ LibreHardwareMonitor 経路を先に試す。
+    dgx-spark / atom2 は LHM_URL が空なので従来どおり sysfs のみを読む。
+    """
+    if config.LHM_URL:
+        temp = _lhm_cpu_temp_c()
+        if temp is not None:
+            return temp
     for want in ("acpitz", "x86_pkg_temp"):
         temps = []
         for z in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):

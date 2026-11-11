@@ -108,6 +108,14 @@ PLATFORMS: dict[str, dict] = {
         # RTX 5090 の GPU サーマルスレッドホルド 95°C をゲージ上限の既定として使う。
         # (dgx-spark / atom2 ではこのキー未設定 → 従来どおりフロント側既定値 100/110)
         "gpu_temp_crit_c": 95.0,
+        # WSL は /sys/class/thermal が空で CPU 温度が取れないため、常駐させた
+        # LibreHardwareMonitor (Windows ホスト側) の JSON から取る。
+        # ネットワークモードが mirrored の WSL2 では Windows ホストのポートが
+        # 127.0.0.1 で共有されるため 127.0.0.1 を既定とする
+        # (LAN 上の別名 whitebear2026 は WSL 内 /etc/hosts が WSL 自身 127.0.1.1 に解決
+        #  して届かない)。環境変数 DGXUTIL_LHM_URL で上書き可、空にすれば無効化。
+        # (dgx-spark / atom2 ではこのキー未設定 → 空 = LHM 経路は一切使わない)
+        "lhm_url": "http://127.0.0.1:8085/data.json",
     },
 }
 
@@ -148,6 +156,13 @@ PARAMS_EDITABLE: bool = bool(_cfg("params_editable", True))
 # None のまま = 従来どおり metrics が実測上限 (amdgpu sysfs) を、無ければフロントの
 # 既定値 (unified 100 / discrete 110) を使う。
 GPU_TEMP_CRIT_C: float | None = _cfg("gpu_temp_crit_c", None)
+
+# LibreHardwareMonitor (Windows ホスト) の data.json URL。WSL 以外の環境では空文字 =
+# CPU 温度の LHM 経路は無効 (metrics._read_cpu_temp_c は従来どおり sysfs のみを見る)。
+# 環境変数 DGXUTIL_LHM_URL で上書き (未設定ならプラットフォーム既定値)。
+LHM_URL: str = (
+    os.environ.get("DGXUTIL_LHM_URL", "").strip() or str(_cfg("lhm_url", ""))
+).strip()
 
 # GPU サーマルガード (thermal-guard.service / root 特権はこの unit だけ) が書く
 # 状態ファイル。API は読むだけで、クロック (GB10) / 電力上限 (R9700) を書く権限は持たない。

@@ -74,6 +74,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [線グラフのツールチップをラベルに書かれた単位の値に (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフのツールチップをラベルに書かれた単位の値に-2026-11-09--本機--whitebearatom1)
 - [線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフの-gpu-クロック-100-基準を-hw-上限-clocksmaxsm-に統一-2026-11-09--本機--whitebearatom1)
 - [dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09 / 本機 = WhitebearATOM2)](#dgx-spark-api-再起動の-stop-停滞対策-timeoutstopsec-と-switch_modelssh-cleanup-ハング-2026-11-09--本機--whitebearatom2)
+- [WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 (2026-11-11 / 本機 = Whitebear2026-WSL)](#wsl-の-cpu-温度を-windows-ホストの-librehardwaremonitor-から取得-2026-11-11--本機--whitebear2026-wsl)
 
 ## 目的
 
@@ -4764,3 +4765,101 @@ cd ~/LLM/compose && cp -a switch_models.sh.bak-20261109 switch_models.sh
 
 **他機への示唆**: atom1 も compose 環境で `switch_models.sh` を使うため同じ残骸・停滞が起きうる（`KILL_MODE=control-group`）。本節の 2 対応はどちらも git 管理外（systemd の drop-in と `~/LLM/compose/`）なので、他機で踏む場合は同手順を適用する
 
+## WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 (2026-11-11 / 本機 = Whitebear2026-WSL)
+
+**背景**: WSL2 は `/sys/class/thermal/thermal_zone*` が空 (センサーの実体はホストの Windows 側)
+のため、これまで `cpu_temp_c` が常に `null` = ゲージ「CPU 温度」と 2 段目グラフの `CPU ℃` が
+**-** のままだった。ホスト側に **LibreHardwareMonitor** を常駐させ、内蔵 Web サーバー
+(`http://<host>:8085/data.json`) が生えたので、そこから CPU 温度を取る経路を追加した。
+
+**CPU 温度の追加自体は `api/config.py` と `api/metrics.py` の 2 ファイルのみ。フロント
+(`front/index.html`) は `m.cpu_temp_c` をそのまま表示しているだけなので変更なし。**
+（おまけ: 反映時に見つかった `api/restart_service.sh` の誤 FAIL 修正 → 「反映手順」節）
+
+### 1. `config.py`: `lhm_url` (wsl のみ)
+
+- `PLATFORMS["wsl"]` に `"lhm_url": "http://127.0.0.1:8085/data.json"` を追加
+  (**dgx-spark / atom2 にはキー自体を追加していない** → `_cfg("lhm_url", "")` が空文字を返す)
+- 公開値 `LHM_URL`（環境変数 `DGXUTIL_LHM_URL` で上書き可、**空文字で機能オフ**）
+- **なぜ `whitebear2026` ではなく `127.0.0.1` か**: WSL 内の `/etc/hosts` が `Whitebear2026` を
+  **WSL 自身 (127.0.1.1)** に解決するため、指定 URL は WSL 内で connection refused (curl exit 7)
+  になる。本機はネットワークモードが **mirrored** なので Windows ホストの待ち受けポートが
+  `127.0.0.1` で共有されており、`http://127.0.0.1:8085/data.json` がそのまま届く
+  (`ss -ltn` で WSL 側に 8085 の待ち受けが無いことを確認済み＝ホスト側の応答)。
+  NAT モードの機材では `DGXUTIL_LHM_URL=http://<Windows の LAN IP>:8085/data.json` で運用する
+
+### 2. `metrics.py`: `_lhm_cpu_temp_c()` ほか
+
+- `_read_cpu_temp_c()` の**先頭で `if config.LHM_URL:` のときだけ** LHM を試し、取れなければ
+  従来どおり sysfs (acpitz → x86_pkg_temp) に落ちる → **LHM_URL が空の 2 環境は処理経路が完全に従来と同一**
+- data.json は `{id, Text, Value, Type, SensorId, Children:[...]}` のツリー。葉を再帰走査して
+  **`SensorId` が `/intelcpu/N/temperature/M`（`/amdcpu/`・`/cpu/` も可）** のものだけを集める。
+  `SensorId` を持たない版の JSON に備え、副経路として「CPU 系ハードウェアノード
+  (`cpu|processor|intel|amd|ryzen|core|xeon`) 配下の `Type == "Temperature"`」も拾う
+  (`Temperatures` / `Load` などの分類ノード名では group を上書きしないので、マザボ
+  `Nuvoton NCT6701D` の "CPU" 項目やメモリ/SSD 温度は混ざらない)
+- 代表値の優先順位 `_LHM_TEMP_PRIORITY`:
+  `Core (Tctl/Tdie)` → `CPU Package` → `Core Max` → `Average CPU` → `CPU Average` →
+  `Core Average` → `CPU Proximity`、どれも無ければ CPU 温度センサーの**最高値**
+- `"P-Core #1 Distance to TJMax"` は**上限までの残り温度**なので除外（そのまま最高値に使うと 60〜70℃ 台の誤表示になる）
+- 値は `"46.0 °C"` 文字列から数値抽出（`°F` 表記は換算、`N/A` は None）
+- **TTL キャッシュ**: data.json は 1 回約 196KB、`collect()` は履歴サンプリング 5 秒 +
+  フロントのポーリングで呼ばれるため、成功時 5 秒 / **失敗時 30 秒**だけ結果を再利用
+  （LHM 停止中も 1 リクエストあたり最大 2 秒のタイムアウトしか払わない）
+
+### 検証 (2026-11-11 実機)
+
+- `venv/bin/python` で `DGXUTIL_PLATFORM=wsl` → `config.LHM_URL=http://127.0.0.1:8085/data.json`、
+  `_lhm_cpu_temp_c()` = **41.0 → 50.0 ℃**（実負荷で変動 = ライブ値）、`collect()["cpu_temp_c"]` に反映
+- 走査で拾えるセンサー 27 件（`core max` / `cpu package` / `p-core #N` / `e-core #N`、distance 系は除外済み）
+- `DGXUTIL_PLATFORM=dgx-spark` / `atom2` → `LHM_URL=''`（LHM 経路は呼ばれない）
+- 到達不能 URL (`http://127.0.0.1:1/data.json`) → 初回 2.00 秒で `None`、2 回目は 0.00 秒（失敗キャッシュ）
+  → CPU 温度が `-` になるだけで他のメトリクスへの影響なし
+
+### 反映手順（sudo が必要）
+
+```bash
+cd ~/DGXSparkUtil/api && ./restart_service.sh   # = sudo systemctl restart dgx-spark-api (port 8090)
+# 確認
+curl -s http://127.0.0.1:8090/api/metrics | python3 -c 'import json,sys; print(json.load(sys.stdin)["cpu_temp_c"])'
+```
+
+**注意**: 再起動は運用者が手で実行する（この環境では `sudo` がパスワード要求になるため未実施）。
+再起動前は `/api/metrics` の `cpu_temp_c` が `null` のまま。
+
+#### 2026-11-11 反映時: `restart_service.sh` の誤 FAIL（本変更とは別バグ、修正済み）
+
+実行すると `FAIL: 30 秒以内に API が応答しなかった` が出たが、**API は正常起動**
+（`curl http://127.0.0.1:8090/api/metrics` → `cpu_temp_c = 45.0`）。原因は
+`restart_service.sh` の `PORT=8080` ハードコードで、本機の unit は
+`install_service.env` の `PORT=8090`（Strata 系が 8080 を使用）で render されているため
+応答確認だけが空振りしていた。→ **unit の `ExecStart --port` を第一候補、`install_service.env`
+の `PORT` をフォールバック**（どちらも実機で `8090` を導出、`PORT=…` の明示指定は従来どおり優先）に修正。
+修正後の検証（`restart` 行だけスキップして実行）:
+
+```
+==> 確認先ポート: 8090
+==> 状態確認  active
+  /api/platform 200 / /api/vllm/status 200 / / (index.html) 200
+OK: dgx-spark-api 再起動完了
+```
+
+#### journal に出る `left-over process … remains running` は本機では正常
+
+`Found left-over process 496920 (python3) … Ignoring.` の 496920 は
+`python3 start.py --config config-swift40.yml` = **稼働中モデルサーバー**（RSS 約 3.9GB）。
+WSL は `KILL_MODE=process`（`install_service.env` のとおり、モデルサーバーがこの unit の
+CGroup 内で起動するため API 再起動に巻き込まない設計）なので、unit stop 後も子が残って
+見えるのは**想定どおり**。`control-group` に戻すと API 再起動でモデルが死ぬため触らない。
+
+**LHM 側の前提**: LibreHardwareMonitor は**管理者実行**（センサー読み取りのため）かつ
+Options → Remote Web Server (有効・ポート 8085)。**Windows ファイアウォール**で WSL 向けに
+ポート 8085 への受信（または mirrored モードでの loopback）を許可する。常駐が切れると
+CPU 温度ゲージだけ `-` に戻る（他項目は無影響）。
+
+### 反映後の実測 (2026-11-11 07:40 / 本機)
+
+- `/api/metrics` → `cpu_temp_c = 45.0 → 47.0`（`cpu_load_pct` 14.3% / `gpu_temp_c` 36.3℃ と同時）
+- レイテンシ: `metrics 200 0.035〜0.038 s`（**TTL キャッシュが効いて LHM 取得待ち 0 秒**、
+  data.json 取得は履歴サンプリングの 5 秒に 1 回だけ）
+- フロントは無変更で「CPU 温度」ゲージと 2 段目グラフの `CPU ℃` に実値が反映される

@@ -9,7 +9,15 @@
 # - front/ のみの変更は API 再起動が不要 (Cache-Control: no-cache で次回アクセスに自動反映)。
 set -euo pipefail
 SVC=dgx-spark-api
-PORT=8080
+# PORT は実 unit の ExecStart (--port NNNN) から取る。
+# install_service.sh は install_service.env の PORT (本機 WSL = 8090) で render するため、
+# ここをハードコード (旧 8080) だと応答確認が常に失敗して誤 FAIL になる。
+PORT="${PORT:-$(sed -n 's/.*--port[= ]\([0-9][0-9]*\).*/\1/p' "/etc/systemd/system/${SVC}.service" 2>/dev/null | tail -1)}"
+if [ -z "${PORT}" ]; then
+  PORT="$(grep -sE '^[[:space:]]*PORT=' "$(dirname "${BASH_SOURCE[0]}")/install_service.env" | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
+fi
+PORT="${PORT:-8080}"
+echo "==> 確認先ポート: ${PORT}"
 
 echo "==> ${SVC} を再起動"
 sudo systemctl restart "${SVC}"
