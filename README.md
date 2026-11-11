@@ -4734,7 +4734,7 @@ TimeoutStopSec=15
 
 ### 対応 2（根本策・本機固有）: `cleanup()` を有限待ち + SIGKILL
 
-`~/LLM/compose/switch_models.sh` の `cleanup()` を、SIGTERM 後に最大 2 秒 poll して死ななければ SIGKILL する形へ修正（`bash -n` 通過、差分は 10 行のみ）。**git 管理外**のためリポジトリ変更はなし。バックアップ: `switch_models.sh.bak-20261109`
+`~/LLM/compose/switch_models.sh` の `cleanup()` を、SIGTERM 後に最大 2 秒 poll して死ななければ SIGKILL する形へ修正（`bash -n` 通過、差分は 10 行のみ）。`~/LLM/compose/` は本リポジトリ (DGXSparkUtil) の管理外だが、バックアップ `switch_models.sh.bak-20261109` は **Atom2LLM リポジトリ側で追跡している**（コミット `c98f891`）ので、下記の復元手順はクローン直後から機能する
 
 ```bash
     kill "${DOCKER_LOG_PID}" 2>/dev/null || true
