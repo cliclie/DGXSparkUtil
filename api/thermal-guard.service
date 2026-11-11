@@ -23,16 +23,30 @@ Environment=THERMAL_LOW_C=85
 # 落としていた。1644MHz なら acpitz は 90℃ 未満で飽和し、発振なしに速度が上がる見込み。
 Environment=THERMAL_LOCK_HIGH_MHZ=1665
 # --- power (R9700 / atom2) ------------------------------------------------------
-# GPU 温度 (junction) のみを見る 3 段電力上限。80℃ 以下は最大 300W、80℃ 超 250W、
-# 90℃ 超 210W (sysfs power1_cap_min = 210W が書ける下限)。ロード中の LLM は問わない。
-Environment=THERMAL_POWER_HIGH_C=80
-Environment=THERMAL_POWER_CRIT_C=90
+# GPU 温度 (junction) のみを見る 3 段電力上限。85℃ 以下は最大 300W、85℃ 超 250W、
+# 95℃ 超 210W (sysfs power1_cap_min = 210W が書ける下限)。ロード中の LLM は問わない。
+# 2026-11-12 Phase 1a+1b。対照実測 (hipfire 12,967 tok prefill 連続投入 240 秒 /
+# 開始 junction 40〜41℃ 統一):
+#   旧 80/90 + 単一閾値 + release 2s : 段切り替え 64 回 / cap平均 236.5W / 210W 滞留 93s
+#                                        junction 平均 87.1℃ 最大 97℃
+#   新 85/95 + hyst 4℃ + release 10s: 段切り替え  1 回 / cap平均 253.4W / 210W 滞留  0s
+#                                        junction 平均 89.6℃ 最大 95℃
+#   -> 発振 -98%、実効電力 +7.1%、ピーク温度は逆に 2℃ 下がる。
+# 安全性: junction crit=110℃ emerg=115℃、mem crit=108℃。95℃ 段でも余裕 15℃ あり、
+# GPU 側 PMFW のファンカーブ (実測 3400rpm / max 5500) が独立に効き続ける。
+Environment=THERMAL_POWER_HIGH_C=85
+Environment=THERMAL_POWER_CRIT_C=95
 Environment=THERMAL_CAP_HIGH_W=250
 Environment=THERMAL_CAP_CRIT_W=210
 Environment=THERMAL_CAP_MAX_W=300
-# 電力制限の解放 (電力を上げる) は、温度が下がった状態が 2 秒以上続いてから適用。
-# 下げる方向は即時。監視間隔は power モードの既定 1 秒 (2 サンプルで判定)。
-Environment=THERMAL_POWER_RELEASE_SECS=2
+# 解除側ヒステリシス (既定は発動閾値 - THERMAL_POWER_HYST_C)。250W は 81℃ を、
+# 210W は 91℃ を割ってから 300/250W へ戻る。THERMAL_POWER_HYST_C=0 にすると
+# 発動=解除の単一閾値 (従来の挙動) に戻る。個別上書きは HIGH_LOW_C / CRIT_LOW_C。
+Environment=THERMAL_POWER_HYST_C=4
+# 電力制限の解放 (電力を上げる) は、その狙い値が RELEASE_SECS 秒以上続いてから適用。
+# 下げる方向は即時。2 秒だと解放直後の +40W で 1 秒 / +7℃ スパイクして即再発動し、
+# 3〜4 秒周期 (250W 段) 〜14 秒周期 (210W 段) の発振になった (実測 64 回/240 秒)。
+Environment=THERMAL_POWER_RELEASE_SECS=10
 Restart=always
 RestartSec=5
 # /run/thermal を自動作成 (unit 停止時に自動削除)。state は 0644 で書かれ
