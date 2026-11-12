@@ -75,6 +75,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフの-gpu-クロック-100-基準を-hw-上限-clocksmaxsm-に統一-2026-11-09--本機--whitebearatom1)
 - [dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09 / 本機 = WhitebearATOM2)](#dgx-spark-api-再起動の-stop-停滞対策-timeoutstopsec-と-switch_modelssh-cleanup-ハング-2026-11-09--本機--whitebearatom2)
 - [WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 (2026-11-11 / 本機 = Whitebear2026-WSL)](#wsl-の-cpu-温度を-windows-ホストの-librehardwaremonitor-から取得-2026-11-11--本機--whitebear2026-wsl)
+- [atom2 サーマルガードの段発振を解除側ヒステリシスで停止 (2026-11-12 / 本機 = WhitebearATOM2)](#atom2-サーマルガードの段発振を解除側ヒステリシスで停止-2026-11-12--本機--whitebearatom2)
 - [Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)](#maya-mayawsl2-の-prefilldecode-表示-エンジン種別表と-metrics-jsonbearer-必須-の追従-2026-11-12--本機--whitebear2026-wsl)
 
 ## 目的
@@ -4734,7 +4735,7 @@ TimeoutStopSec=15
 
 ### 対応 2（根本策・本機固有）: `cleanup()` を有限待ち + SIGKILL
 
-`~/LLM/compose/switch_models.sh` の `cleanup()` を、SIGTERM 後に最大 2 秒 poll して死ななければ SIGKILL する形へ修正（`bash -n` 通過、差分は 10 行のみ）。**git 管理外**のためリポジトリ変更はなし。バックアップ: `switch_models.sh.bak-20261109`
+`~/LLM/compose/switch_models.sh` の `cleanup()` を、SIGTERM 後に最大 2 秒 poll して死ななければ SIGKILL する形へ修正（`bash -n` 通過、差分は 10 行のみ）。`~/LLM/compose/` は本リポジトリ (DGXSparkUtil) の管理外だが、バックアップ `switch_models.sh.bak-20261109` は **Atom2LLM リポジトリ側で追跡している**（コミット `c98f891`）ので、下記の復元手順はクローン直後から機能する
 
 ```bash
     kill "${DOCKER_LOG_PID}" 2>/dev/null || true
@@ -4864,6 +4865,125 @@ CPU 温度ゲージだけ `-` に戻る（他項目は無影響）。
 - レイテンシ: `metrics 200 0.035〜0.038 s`（**TTL キャッシュが効いて LHM 取得待ち 0 秒**、
   data.json 取得は履歴サンプリングの 5 秒に 1 回だけ）
 - フロントは無変更で「CPU 温度」ゲージと 2 段目グラフの `CPU ℃` に実値が反映される
+
+## atom2 サーマルガードの段発振を解除側ヒステリシスで停止 (2026-11-12 / 本機 = WhitebearATOM2)
+
+**依頼**: 「thermal-guard が監視する温度がそろそろ発動しそうな状態になったら、PCファンの風量を先に増やしてガードの発動を回避/遅らせたい。lm-sensors / fancontrol / CoolerControl / LACT から適切なツールを調査してプランを立ててほしい」→ 調査・実測した結果、**風量では遅延できない**ことが分かり、代わりに**ガード自体の段発振**という本題より重大な問題が見つかったのでそちらを修正した。
+
+### 調査で分かったこと（風量案を捨てた理由）
+
+- ガードの監視対象は GPU junction 温度のみ（`hwmon5/temp2_input`, `label=junction`）。
+  `>80℃→250W` / `>90℃→210W` / それ以外 `300W`、監視 1 秒、解放抑止 2 秒
+- 負荷応答が速すぎる: hipfire の prefill 12,966 tok 連続投入で junction **28→77℃ を 20 秒（約 2.5℃/秒）**
+- ASUS ROG STRIX Z690-I の Super I/O **NCT6798D は `nct6775` で検出・制御可能**になった
+  （`sensors-detect --auto` が ISA 0x290 で confidence 9 により検出。既定モジュール未ロード）
+  が、`pwm1`（CPU ラジエータファン）を 100% にすると fan1 は 1152→1532rpm (+33%) 上がる一方
+  **junction は 87.9→85.1℃（−2.8℃）だけ**。2.5℃/秒なので**発動遅延は約 1 秒**。
+  しかも BIOS SmartFan(auto) も高温時に 1515rpm まで自動で上げており、手動 100% と実質同じだった
+- **GPU 自身のファンは OS から制御不能**（R9700 = RDNA4 / gfx1201）:
+  `pwm1` は権限 **0444（read-only）**、`fan1_target` 書き込みは **EIO**、`fan1_enable` は読取り EINVAL。
+  実回転 3454rpm / max 5500rpm と余力があるのに回せない。LACT でも RDNA3/4 は既知制限
+  （issue #524 / #881。開発者「RDNA4 では overclocking support が必要」）。
+  `amdgpu.ppfeaturemask=0xfff7bfff` だが、上流の `sw_fan_supported` は ASIC テーブル決定のため
+  再起動实验でも期待薄（**Phase 3 として未実施**。手順は `~/LLM/system/fan-preguard-plan.md`）
+- ツール判定: LACT は GPU 専用でケースファン不可 → **不採用**。CoolerControl は GPU 不可＋
+  マザー PWM しか扱えず機能過剰。fancontrol は 1 温度→1 PWM のカーブで「上昇率・ガード段との協調」
+  を表現できず、AIO ポンプ (`pwm2` = fan2 5252rpm / target 27000) を巻き込む危険がある
+- fan3〜fan7 は 0rpm（未接続ヘッダ）。GPU に直接当てるファンを増設すれば `pwm3/4/5` で制御可能（Phase 4）
+
+### 判明した本質: power1_cap の段発振
+
+負荷 240 秒の記録で `power1_cap` の**段切り替えが 64 回**発生した（300↔250 が 9 回、250↔210 が 55 回）。
+
+```
+t=25s 74℃ 300->250 | t=28s 82℃ 250->300 | t=29s 75℃ 300->250 | t=32s 83℃ 250->300 ...
+07:33:55 89C -> 250W (released after 10s) | 07:33:56 96C -> 210W (was 250W)   ← 解放 1 秒後に再発動
+```
+
+原因は `want_w()` が**発動も解除も同じ 1 本の閾値**を見ることで温度ヒステリシスが無く、
+解放抑止が `RELEASE_SECS=2` 秒しかなかったこと。250W に落とすと 2〜3 秒で 80℃ を割り 300W に戻る
+→ 1〜2 秒で再び 80℃ 超、の 3〜4 秒周期。解放（電力を上げる）直後は **+40W で 1 秒 / +7℃ のスパイク**が起きるため、時間抑止だけでは止められない。
+
+### 対応: `want_w()` に解除側ヒステリシス（power モードのみ。clock/GB10 は無変更）
+
+`thermal_guard.sh`:
+- `want_w()` に第 2 引数**現在の段**を追加。発動は従来どおり即時、**解放は「発動閾値 − HYST」を割るまで下段を維持**
+- **段階解放**: `CAP_CRIT` のとき `HIGH_LOW` を割るまでは `CAP_HIGH` を返す（210W→300W の直行を禁止）
+- 新環境変数 `THERMAL_POWER_HYST_C`(既定 4) / `THERMAL_POWER_HIGH_LOW_C` / `THERMAL_POWER_CRIT_LOW_C`。
+  **`HYST_C=0` にすると発動=解除の単一閾値（従来の挙動）を完全再現**できる（対照実験に使用）
+- `RELEASE_SECS` の既定 2 → **10 秒**。`/run/thermal/state` に `high_low_c` / `crit_low_c` を追加
+
+`thermal-guard.service`（unit）: `HIGH_C=80→85` / `CRIT_C=90→95` / `RELEASE_SECS=2→10`
+
+単体検証（3 段 × 6 温度。`sh -n` 通過）:
+```
+current   74C 78C 81C 85C 87C 91C
+300      300 300 250 250 250 210
+250      300 250 250 250 250 210
+210      300 250 250 250 210 210
+```
+
+### 対照実測（開始 junction を揃えた A/B、hipfire prefill 12,966 tok 逐次投入 240 秒）
+
+| 指標 | 旧 80/90 + 単一閾値 + rel 2s | 新 85/95 + hyst 4℃ + rel 10s | 差 |
+|---|---|---|---|
+| **段切り替え回数** | 64 回 | **1 回** | **−98%** |
+| 250W↔210W 往復 | 55 回 | **0 回** | 完全解消 |
+| **cap 平均（実効電力）** | 236.5 W | **253.4 W** | **+7.1%** |
+| 210W 滞留時間 | 93 s | **0 s** | 最深段に入らない |
+| junction 平均 / **最大** | 87.1 / **97** ℃ | 89.6 / **95** ℃ | +2.5 / **−2** ℃ |
+
+新設定の全段切り替えは `t=17s 300->250 (79℃)` の **1 回だけ**。
+
+### LLM 処理時間への影響（依頼の「発動回避」に代わって得られた実利）
+
+| 指標 | 旧 | 新 | 差 |
+|---|---|---|---|
+| リクエスト平均 | 3.056 s | **2.992 s** | **−2.1%** |
+| prefill 速度 | 4242 tok/s | **4333 tok/s** | **+2.1%** |
+| ばらつき (CV) | 6.4% | **4.8%** | −26% |
+
+10 リクエスト窓の平均（立上り → 後半）が **旧は 2.79→3.30 秒 (+18%) と劣化し続ける**のに対し、
+**新は 3.00 秒で平衡**。後半だけ切り出すと 旧 3.30 vs 新 3.00 で **新が 9% 速い**。
+平均が +2.1% に留まるのは立上り 30 秒（両者 300W）が同じため。prefill は VRAM 帯域律速の領域が
+あるため cap +2.9% に対して改善はやや減衰する。**利得の本質は「遅くなる時間帯が消える」こと**。
+
+- 注: 上記は新が不利な開始温度（旧 32℃ / 新 38℃）での結果。同一温度なら差は開く見込み
+- 未測: decode 速度（本次測は `max_tokens=4`）、10 分スケールの長時間連続負荷
+
+### 安全性
+
+junction `crit=110℃` / `emerg=115℃`、mem `crit=108℃`。95℃ 段でも**余裕 15℃** あり、実測ピークは
+95℃（旧設定の 97℃ より低い）。GPU 側 PMFW のファンカーブ（実測 3400rpm / max 5500rpm）は
+OS とは独立に効き続ける。上昇は 250W に落ちた後 約 0.14℃/秒 に鈍るので 1 秒監視で十分追従する。
+
+### 適用 / 解除
+
+```bash
+# 適用 (repo の unit を /etc へ反映。install_service.sh を再実行すると本機は
+#  install_service.env が無く thermal-guard が外れるリスクがあるので直接レンダリング)
+sudo sed -e 's|__API_DIR__|/home/cliclie/DGXSparkUtil/api|g' \
+  ~/DGXSparkUtil/api/thermal-guard.service | sudo tee /etc/systemd/system/thermal-guard.service >/dev/null
+sudo systemctl daemon-reload && sudo systemctl restart thermal-guard
+journalctl -u thermal-guard -n1 --no-pager   # release_at=81/91 ... release=10s を確認
+
+# 旧挙動へ戻す (発動=解除の単一閾値 / release 2 秒)
+sudo bash ~/LLM/compose/switch_guard.sh old
+```
+
+計測ハーネス（`~/LLM/compose/`・git 管理は LLM 側）:
+`switch_guard.sh old|new`（段設定の切替） / `measure_cap.sh <秒> <csv>`（1Hz 記録） /
+`analyze_cap.sh <csv>`（段切替回数と実効電力の要約） / `fan_load.py`（hipfire 負荷） /
+`fan_ab_test.sh`（ケースファン A/B/C。風量案の否定に使用）
+
+**他機への示唆**: atom1 (GB10) は **clock モード**で `want_w()` を通らないため本変更の影響なし。
+GB10 は acpitz 104℃ で本体が落ちるので、**同じ理屈で閾値を上げるのは不可**
+（atom1 は 2026-11-01 節の CPU 群 / GPU 群分割で既に 88/93℃ 運用）。
+R9700 を積む他機では、`power1_cap` の段が 1 本の閾値 + 時間抑止だけだと同じ発振が起きる。
+`THERMAL_POWER_HYST_C` / `RELEASE_SECS` は unit の Environment で調整可能。
+
+詳細な調査記録（風量制御の実測・ツール比較・未実施の Phase 3/4）: `~/LLM/system/fan-preguard-plan.md`
+
 ## Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)
 
 **症状**: システムタブ 1 段目のモデル速度パネルで `prefill` / `decode` が `-` のまま

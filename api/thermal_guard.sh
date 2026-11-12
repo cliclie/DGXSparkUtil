@@ -94,10 +94,18 @@ INTERVAL="${THERMAL_INTERVAL_S:-2}"
 # --- power (R9700 / sysfs power1_cap) -------------------------------------------
 PWR_HIGH="${THERMAL_POWER_HIGH_C:-80}"    # この温度を超えたら CAP_HIGH へ
 PWR_CRIT="${THERMAL_POWER_CRIT_C:-90}"    # この温度を超えたら CAP_CRIT へ
+# 解除側ヒステリシス (2026-11-12 Phase 1a)。発動と解除が同じ 1 本の閾値だと、
+# CAP_HIGH に落とした瞬間に温度が下がって 80℃ を割り CAP_MAX へ戻す -> 1〜2 秒で
+# 再び 80℃ 超、の 3〜4 秒周期発振になる。実測 (2026-11-12, hipfire 12,967 tok prefill
+# 連続投入 240 秒): power1_cap の段切り替え 28 回 = 300<->250 が 15 回、250<->210 が 12 回。
+# 解放は「発動閾値 - HYST」を下回ってから RELEASE_SECS 秒続いたときだけ適用する。
+PWR_HYST="${THERMAL_POWER_HYST_C:-4}"
+PWR_HIGH_LOW="${THERMAL_POWER_HIGH_LOW_C:-$((PWR_HIGH - PWR_HYST))}"  # CAP_HIGH -> CAP_MAX
+PWR_CRIT_LOW="${THERMAL_POWER_CRIT_LOW_C:-$((PWR_CRIT - PWR_HYST))}"  # CAP_CRIT -> CAP_HIGH
 CAP_HIGH="${THERMAL_CAP_HIGH_W:-250}"
 CAP_CRIT="${THERMAL_CAP_CRIT_W:-210}"
 CAP_MAX="${THERMAL_CAP_MAX_W:-300}"       # 80℃ 以下の上限。power1_cap_max でクランプ
-RELEASE_SECS="${THERMAL_POWER_RELEASE_SECS:-2}"
+RELEASE_SECS="${THERMAL_POWER_RELEASE_SECS:-10}"
 if [ "$MODE" = power ]; then
   INTERVAL="${THERMAL_INTERVAL_S:-1}"
 fi
@@ -268,10 +276,24 @@ gpu_temp_mc() {  # $1 = hwmon ディレクトリ。GPU 温度をミリ℃で返�
   echo "$best"
 }
 
-want_w() {  # $1 = GPU温度 (ミリ℃)。狙いの電力上限 W。
+want_w() {  # $1 = GPU温度 (ミリ℃)。$2 = 現在の段 W。狙いの電力上限 W を返す。
             # 「80℃ を超えたら」「90℃ を超えたら」なので境界値自体は上位段 (ミリ℃で比較)
+  # 1) 発動 (制限を強める方向) は閾値を超えたら即時
   [ "$1" -gt "$((PWR_CRIT * 1000))" ] && { echo "$CAP_CRIT"; return; }
+  # 2) 既に CAP_CRIT のとき: CRIT_LOW を割るまで 210W を維持。
+  #    ここを通さないと 87℃ で「90℃ 以下 = CAP_HIGH」と判定して 250W へ跳ね返り、
+  #    1 秒後にまた 90℃ 超 -> 210W の発振になる (250W 維持の判定より先に評価する)
+  if [ "$2" = "$CAP_CRIT" ]; then
+    [ "$1" -gt "$((PWR_CRIT_LOW * 1000))" ] && { echo "$CAP_CRIT"; return; }
+  fi
   [ "$1" -gt "$((PWR_HIGH * 1000))" ] && { echo "$CAP_HIGH"; return; }
+  # 3) 既に CAP_HIGH / CAP_CRIT のとき: HIGH_LOW を割るまで 1 段だけ戻す (段階解放)。
+  #    CAP_CRIT で 78℃ のときに CAP_MAX を返すと 210W -> 300W の直行になり、
+  #    1〜2 秒でまた 80℃ 超 -> 250W の発振が再燃する。必ず 250W を経由させる。
+  #    (本次実の発振主因は 250W <-> 300W の 11 回往復)
+  if [ "$2" = "$CAP_HIGH" ] || [ "$2" = "$CAP_CRIT" ]; then
+    [ "$1" -gt "$((PWR_HIGH_LOW * 1000))" ] && { echo "$CAP_HIGH"; return; }
+  fi
   echo "$CAP_MAX"
 }
 
@@ -432,13 +454,13 @@ loop_power() {
   pending=0
   pending_since=0
   hold_s=0
-  echo "thermal-guard start: mode=power high=${PWR_HIGH} crit=${PWR_CRIT} caps=${CAP_MAX}/${CAP_HIGH}/${CAP_CRIT}W release=${RELEASE_SECS}s interval=${INTERVAL}s cap=${CAPF}" >&2
+  echo "thermal-guard start: mode=power high=${PWR_HIGH} crit=${PWR_CRIT} release_at=${PWR_HIGH_LOW}/${PWR_CRIT_LOW} caps=${CAP_MAX}/${CAP_HIGH}/${CAP_CRIT}W release=${RELEASE_SECS}s interval=${INTERVAL}s cap=${CAPF}" >&2
 
   while :; do
     now="$(date +%s)"
     mt="$(gpu_temp_mc "$HWMON")"
     t=$((mt / 1000))
-    want="$(want_w "$mt")"
+    want="$(want_w "$mt" "$current")"
 
     if [ "$want" -eq "$current" ]; then
       pending=0
@@ -471,9 +493,10 @@ loop_power() {
     fi
 
     pw=$(( $(read_int "$HWMON/power1_average") / 1000000 ))
-    printf '{"ts":%s,"enabled":true,"mode":"power","temp_c":%d.%03d,"power_cap_w":%s,"power_max_w":%s,"power_min_w":%s,"power_avg_w":%s,"always_monitor":true,"hold_s":%s,"high_c":%s,"crit_c":%s,"cap_high_w":%s,"cap_crit_w":%s,"cap_max_w":%s,"release_secs":%s}\n' \
+    printf '{"ts":%s,"enabled":true,"mode":"power","temp_c":%d.%03d,"power_cap_w":%s,"power_max_w":%s,"power_min_w":%s,"power_avg_w":%s,"always_monitor":true,"hold_s":%s,"high_c":%s,"crit_c":%s,"high_low_c":%s,"crit_low_c":%s,"cap_high_w":%s,"cap_crit_w":%s,"cap_max_w":%s,"release_secs":%s}\n' \
       "$now" "$((mt / 1000))" "$((mt % 1000))" "$current" "$CAP_MAX" "$cap_min" \
-      "$pw" "$hold_s" "$PWR_HIGH" "$PWR_CRIT" "$CAP_HIGH" "$CAP_CRIT" "$CAP_MAX" \
+      "$pw" "$hold_s" "$PWR_HIGH" "$PWR_CRIT" "$PWR_HIGH_LOW" "$PWR_CRIT_LOW" \
+      "$CAP_HIGH" "$CAP_CRIT" "$CAP_MAX" \
       "$RELEASE_SECS" > "$STATE" 2>/dev/null
 
     sleep "$INTERVAL"
