@@ -77,6 +77,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 (2026-11-11 / 本機 = Whitebear2026-WSL)](#wsl-の-cpu-温度を-windows-ホストの-librehardwaremonitor-から取得-2026-11-11--本機--whitebear2026-wsl)
 - [atom2 サーマルガードの段発振を解除側ヒステリシスで停止 (2026-11-12 / 本機 = WhitebearATOM2)](#atom2-サーマルガードの段発振を解除側ヒステリシスで停止-2026-11-12--本機--whitebearatom2)
 - [Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)](#maya-mayawsl2-の-prefilldecode-表示-エンジン種別表と-metrics-jsonbearer-必須-の追従-2026-11-12--本機--whitebear2026-wsl)
+- [thermal-guard: WSL2 の nvidia-smi が返す小数温度で Illegal number (2026-11-12 / 本機 = Whitebear2026-WSL)](#thermal-guard-wsl2-の-nvidia-smi-が返す小数温度で-illegal-number-2026-11-12--本機--whitebear2026-wsl)
 
 ## 目的
 
@@ -5071,3 +5072,60 @@ curl -s localhost:8090/api/vllm/status | python3 -c \
 1. `model-ctl.sh` の `_MC_MODES`（＋必要なら `_mc_pattern` / port / dir / key のアクセサ）
 2. `wsl_modelctl_bridge.sh` の `_mc_engine_of()`（**ここを忘れると `unknown` 扱いで metrics 空**）
 3. `vllm.py` の `_modelctl_metrics()` にエンジン種別の分岐（新エンジンのときだけ）
+
+## thermal-guard: WSL2 の nvidia-smi が返す小数温度で Illegal number (2026-11-12 / 本機 = Whitebear2026-WSL)
+
+**症状**: `sudo systemctl restart thermal-guard` 後、journal に 2 秒間隔で
+```
+thermal_guard.sh: 398: [: Illegal number: 34.90
+```
+（再起動前は同じエラーが `376:` で出ていた。**2026-11-12 の段発振ヒステリシス修正で
+行番号がずれただけで、このバグ自体はそれ以前から WSL に入っていた**）
+
+**原因**: 本機 WSL2 (RTX 5090) の `nvidia-smi --query-gpu=temperature.gpu` は
+**小数付き文字列**を返す（実測 `34.80` / `36.00`。GB10 = atom1 は整数）。
+`thermal_guard.sh` は `#!/bin/sh`（= dash）で動くため、
+```sh
+g="$(gpu_query temperature.gpu)"     # "34.90"
+[ "$g" -gt "$t" ] && t="$g"           # dash: [: Illegal number: 34.90 で失敗
+```
+の比較が**エラーになって非成立**になる。`&&` の右が走らないので `t` は
+`acpitz_max_c()` の値のまま = **`max(acpitz, GPU)` が常に acpitz 側**。
+WSL2 は `/sys/class/thermal` が空で acpitz が無いので `t=0` 固定になる。
+
+**実害**（`/run/thermal/state` を実測）:
+```
+{"temp_c":0, "acpitz_c":0, "gpu_c":34.90, "clock_mhz":915, "locked_mhz":0, "model_running":0, ...}
+```
+- ガードの**判定温度が常に 0℃** → 本来なら GPU 温度で発動すべき `-lgc` が永久に発動しない
+  （本機は `THERMAL_CONTAINERS` が空 = 監視専ら運用なので、いまは実動作への差は出ていない。
+  ただし将来 clock 制御を有効にしたときに静かに効かない）
+- `/api/thermal` → フロントのヘッダインジケータは `temp_c` を使うため、発動時の表示が不正確
+- journal が 2 秒ごとに汚れる
+
+**修正** (`api/thermal_guard.sh` +16 / -4)
+
+- `gpu_query()` の直後に **`int_c()`** を追加（温度文字列 → 四捨五入した整数℃。
+  空文字・`N/A` などの非数値は 0 に正規化。dash の組込み `printf '%.0f'` を使用）
+- 小数になり得る唯一の読み取り元 2 箇所を `int_c` で包む
+  - `loop_clock()` の `g="$(int_c "$(gpu_query temperature.gpu)")"`
+  - `gpu_group_max_c()`（groups モードの GPU 側）の同じ箇所
+  - どちらも不要になった `[ -n "$g" ] || g=0` を削除（`int_c` が肩代わり）
+- amdgpu (atom2 / power モード) は `temp*_input` のミリ単位整数を `/1000` しているため
+  **小数は発生し得ない** → 無変更。GB10 (atom1) も整数なので挙動は従来と同一
+
+### 検証 (2026-11-12 実機)
+
+- `dash -n` / `bash -n` ともに OK
+- `int_c` の単体: `34.90→35` `34.40→34` `97.6→98` `85→85` `""→0` `N/A→0`
+- 実機 nvidia-smi を使った該当式の再現: `raw=[36.00] → int g=36 → t=36`（エラーなし）
+
+### 反映手順（sudo が必要・運用者が実行）
+
+```bash
+sudo systemctl restart thermal-guard
+journalctl -u thermal-guard -n 10 --no-pager        # Illegal number が出ないこと
+cat /run/thermal/state                              # temp_c が gpu_c と同じ値になること
+```
+**注意**: dash は実行中のスクリプトをバイトオフセットで読み進めるため、稼働中の
+`thermal_guard.sh` を編集したら**必ず再起動**する（しないとずれた位置から読み続ける）。

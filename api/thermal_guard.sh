@@ -155,6 +155,20 @@ gpu_query() {  # $1 = query field
   nvidia-smi "--query-gpu=$1" --format=csv,noheader,nounits 2>/dev/null | head -1
 }
 
+# 温度文字列を整数℃に丸める (空・"N/A" 等の非数値は 0)。
+# 本機 WSL2 (RTX 5090) の nvidia-smi は temperature.gpu を "34.90" のような**小数**で
+# 返す (GB10 / atom1 は整数)。本スクリプトは #!/bin/sh = dash で動くため
+# `[ "34.90" -gt 0 ]` が "Illegal number" で失敗し、比較演算自体が効かず
+# max(acpitz, GPU) が acpitz 側 (WSL では 0) のままになる (2026-11-12 実測:
+# /run/thermal/state が gpu_c=34.90 なのに temp_c=0、2 秒ごとに journal へエラー)。
+# → 読み取り直後に必ず整数化する。四捨五入なので閾値判定は最大 0.5℃ 厳し側に寄る。
+int_c() {  # $1 = 温度文字列
+  case "$1" in
+    ''|*[!0-9.]*) echo 0 ;;
+    *) printf '%.0f' "$1" ;;
+  esac
+}
+
 target_mhz() {  # $1 = 温度。0 は解除
   [ "$1" -ge "$CRIT" ] && { echo "$LOCK_CRIT"; return; }
   [ "$1" -ge "$HIGH" ] && { echo "$LOCK_HIGH"; return; }
@@ -198,8 +212,7 @@ acpitz_group_max_c() {  # $1 = zone 名リスト。1 つも一致しなければ
 
 gpu_group_max_c() {  # max(acpitz の TGPU, nvidia-smi temperature.gpu)
   a="$(acpitz_group_max_c "$GPU_ZONES")"
-  g="$(gpu_query temperature.gpu)"
-  [ -n "$g" ] || g=0
+  g="$(int_c "$(gpu_query temperature.gpu)")"
   [ "$g" -gt "$a" ] && echo "$g" || echo "$a"
 }
 
@@ -392,8 +405,7 @@ loop_clock() {
 
   while :; do
     a="$(acpitz_max_c)"
-    g="$(gpu_query temperature.gpu)"
-    [ -n "$g" ] || g=0
+    g="$(int_c "$(gpu_query temperature.gpu)")"
     t="$a"
     [ "$g" -gt "$t" ] && t="$g"
 
