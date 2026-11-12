@@ -762,6 +762,73 @@ def _hipfire_server_metrics(port: int) -> dict:
     return m
 
 
+def _maya_metrics(base: str, headers: list[str] | None) -> dict:
+    """Maya (Project Maya / GLM-5.3-Flash) の /metrics (Bearer 必須・JSON) をマッピングする。
+
+    Maya の /metrics は Prometheus 形式ではなく JSON (live / engine / requests / totals)。
+    生成中は live.tok_s と live.prefill_tok_s_mean の瞬時値、リクエスト直後は requests
+    の直近完了 (finish が stop/length) の decode_tok_s / prefill_tok_s を使う
+    （Strata の「直近値表示」と同じ体験）。Maya は全エンドポイントが Bearer 認証必須
+    （/metrics も /slots も 401）なので headers は必須。
+    - 出力スループット = live.tok_s → 直近完了の decode_tok_s → totals の累計平均
+    - 入力スループット = live.prefill_tok_s_mean → 直近完了の prefill_tok_s → 同上
+    - E2E = duration_s / TTFT = prompt_ms/1000 (Maya に TTFT 単独値は無い)
+    - KVCache 使用率 = (prompt+output) ÷ engine.max_context × 100 (Strata と同じ定義)
+    """
+    m = {
+        "requests_running": None,
+        "requests_waiting": None,
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": None,
+        "prompt_tokens_per_s": None,
+        "generation_tokens_per_s": None,
+    }
+    txt = _http_get(f"{base}/metrics", 5, headers)
+    if not txt:
+        return m
+    try:
+        d = json.loads(txt)
+    except ValueError:
+        return m
+    live = d.get("live") or {}
+    engine = d.get("engine") or {}
+    reqs = d.get("requests") or []  # 新しい順 (requests[0] が直近)
+    last: dict = {}
+    for r in reqs:
+        if isinstance(r, dict) and r.get("finish") in ("stop", "length"):
+            last = r
+            break
+    if not last and reqs and isinstance(reqs[0], dict):
+        last = reqs[0]
+    m["requests_running"] = live.get("active")
+    m["requests_waiting"] = live.get("queued")
+    if isinstance(last.get("duration_s"), (int, float)):
+        m["e2e_latency_s"] = last["duration_s"]
+    if isinstance(last.get("prompt_ms"), (int, float)):
+        m["ttft_s"] = last["prompt_ms"] / 1000.0
+    # 累計平均 (totals) を最終フォールバックにする (hipfire と同じ「idle でも 0 や - に
+    # 落ちない」方針)。prompt は実読込 token (prompt_tokens - reused) が正本で、
+    # Maya 自身の Prometheus 変換 (serve/server.py) と同じ数え方。
+    totals = d.get("totals") or {}
+    prompt_n = (totals.get("prompt_tokens") or 0) - (totals.get("reused") or 0)
+    prompt_s, decode_s = (totals.get("prompt_ms") or 0) / 1000.0, (totals.get("decode_ms") or 0) / 1000.0
+    cum_pre = prompt_n / prompt_s if prompt_n > 0 and prompt_s > 0 else None
+    cum_dec = (totals.get("output_tokens") or 0) / decode_s if decode_s > 0 else None
+    m["generation_tokens_per_s"] = live.get("tok_s") or last.get("decode_tok_s") or cum_dec
+    m["prompt_tokens_per_s"] = live.get("prefill_tok_s_mean") or last.get("prefill_tok_s") or cum_pre
+    # KVCache 使用率: 稼働中は live の prompt+generated、アイドルは 0 (Strata / hipfire と同じ)
+    ctx = engine.get("max_context") or engine.get("context")
+    if ctx and live.get("active"):
+        used = (live.get("prompt_tokens") or 0) + (live.get("generated") or 0)
+        if not used:
+            used = (last.get("prompt_tokens") or 0) + (last.get("output_tokens") or 0)
+        m["kv_cache_usage_pct"] = min(100.0, used / float(ctx) * 100.0)
+    elif not live.get("active"):
+        m["kv_cache_usage_pct"] = 0.0
+    return m
+
+
 # ---------------------------------------------------------------- 状態
 
 def _parse_vllm_metrics(text: str) -> dict:
@@ -1260,6 +1327,10 @@ def _modelctl_metrics(profile: str, info: dict, base: str) -> dict:
         _reset_token_state()
         _reset_tabby_state()
         return _exllama_metrics(base)
+    if engine == "maya":
+        _reset_token_state()
+        _reset_tabby_state()
+        return _maya_metrics(base, _modelctl_headers(profile))
     # llamacpp-docker / sglang-docker: HTTP は既存の /metrics 経路を流用
     mt = _http_get(f"{base}/metrics", timeout=5)
     pm = _parse_vllm_metrics(mt) if mt else {}

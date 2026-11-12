@@ -52,10 +52,11 @@ _mc_engine_of() {
     case "$1" in
         exl)                        printf 'exllama' ;;
         tabby|swift40|swift35|qwen9) printf 'tabbyapi' ;;
-        strata15|strataS4|strataU4|strataq3|strataC1) printf 'strata' ;;
+        strata15|strataS4|strataU4|strataq3|strataC1|strataD4) printf 'strata' ;;
         llmjp)                      printf 'llamacpp' ;;
         bonsai)                     printf 'llamacpp-docker' ;;
         swiftqwen38|mimo)           printf 'sglang-docker' ;;
+        maya)                       printf 'maya' ;;
         *)                          printf 'unknown' ;;
     esac
 }

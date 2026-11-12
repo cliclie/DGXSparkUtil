@@ -75,6 +75,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [線グラフの GPU クロック 100% 基準を HW 上限 (clocks.max.sm) に統一 (2026-11-09 / 本機 = WhitebearATOM1)](#線グラフの-gpu-クロック-100-基準を-hw-上限-clocksmaxsm-に統一-2026-11-09--本機--whitebearatom1)
 - [dgx-spark-api 再起動の stop 停滞対策: TimeoutStopSec と switch_models.sh の cleanup ハング (2026-11-09 / 本機 = WhitebearATOM2)](#dgx-spark-api-再起動の-stop-停滞対策-timeoutstopsec-と-switch_modelssh-cleanup-ハング-2026-11-09--本機--whitebearatom2)
 - [WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 (2026-11-11 / 本機 = Whitebear2026-WSL)](#wsl-の-cpu-温度を-windows-ホストの-librehardwaremonitor-から取得-2026-11-11--本機--whitebear2026-wsl)
+- [Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)](#maya-mayawsl2-の-prefilldecode-表示-エンジン種別表と-metrics-jsonbearer-必須-の追従-2026-11-12--本機--whitebear2026-wsl)
 
 ## 目的
 
@@ -4863,3 +4864,90 @@ CPU 温度ゲージだけ `-` に戻る（他項目は無影響）。
 - レイテンシ: `metrics 200 0.035〜0.038 s`（**TTL キャッシュが効いて LHM 取得待ち 0 秒**、
   data.json 取得は履歴サンプリングの 5 秒に 1 回だけ）
 - フロントは無変更で「CPU 温度」ゲージと 2 段目グラフの `CPU ℃` に実値が反映される
+## Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)
+
+**症状**: システムタブ 1 段目のモデル速度パネルで `prefill` / `decode` が `-` のまま
+（同じパネルの `KVCache` `E2E` `TTFT` `稼働/待機` も全部 `-`）。稼働モデルは `maya`
+（Project Maya / GLM-5.3-Flash · Maya-XS・port 8070・`model-ctl.sh` の 16 モード目）。
+
+**直接原因**: `GET /api/vllm/status` の `active.metrics` が `{}` だった（フロント
+`front/index.html` の `renderVllm()` は `mt.prompt_tokens_per_s` /
+`mt.generation_tokens_per_s` を読むだけなので、空なら全項目 `-`。**フロントは無変更**）。
+`{}` になるまでの取りこぼしが 2 段あった:
+
+1. `api/wsl_modelctl_bridge.sh` の `_mc_engine_of()` に `maya` の case が無く
+   `*) printf 'unknown'` に落ちていた（`_MC_MODES` には `maya` が入っているが
+   エンジン種別表が未更新）。→ `active.engine = "unknown"`
+2. `api/vllm.py` の `_modelctl_metrics()` に `maya` 分岐が無く末尾フォールバック
+   （`_http_get(f"{base}/metrics")` → `_parse_vllm_metrics` → `_sglang_get_load`）に落ち、
+   **Maya は `/metrics` `/v1/models` `/slots` がすべて Bearer 認証必須（実測 401）**
+   なので無認証のこれらのリクエストが全滅 → `metrics = {}`
+
+「新モデル追加時にエンジン種別表／メトリクス分岐を追記し忘れる」型の再発
+（同種: [SGLang → TabbyAPI 切替で prefill/decode が消えた（2026-11-01）](#sglang--tabbyapi-切替で-prefilldecode-が消えたエンジン種別キャッシュの-last-残留2026-11-01--本機調査)、
+[hipfire の早期 return（2026-11-07）](#hipfire-hipfireatom2-の-cline-設定値と-prefilldecode-表示2026-11-07--本機--whitebearatom2)）。
+
+### Maya の `/metrics` の形（`engine/serve/server.py` `metrics()`）
+
+**Prometheus 形式ではなく JSON**（`live` / `engine` / `requests` / `totals` / `tiers` …）。
+Prometheus テキストは別エンドポイント `/metrics/prometheus` で、`llamacpp:*` 名で出るが
+**起動からの累計平均**（直近実測より鈍い・E2E/TTFT 無し）なので使わなかった。
+
+| 使ったキー | 意味 |
+|---|---|
+| `live.state` / `live.active` / `live.queued` | 稼働 (in-flight) / 待機リクエスト数 |
+| `live.tok_s` / `live.prefill_tok_s_mean` | 生成中の瞬時 decode / prefill tok/s |
+| `requests[]`（新しい順・`finish` が `stop`/`length` を採用） | `prefill_tok_s` `decode_tok_s` `duration_s` `prompt_ms` |
+| `engine.max_context` | KV 使用率の分母 (262144) |
+| `totals`（`prompt_tokens` `reused` `prompt_ms` `output_tokens` `decode_ms`） | 最終フォールバックの累計平均 |
+
+### 修正 (`api/wsl_modelctl_bridge.sh` +2 / `api/vllm.py` +71)
+
+- **ブリッジ**: `_mc_engine_of()` に `maya) printf 'maya' ;;` を追加。
+  あわせて **`strataD4` が `unknown` になっていた**（strata 系 case が 5 种分の記載で
+  `MC_STRATA_MODES` の 6 番目が欠落）のも `strata` に修正
+- **`_maya_metrics(base, headers)`** を新設（`_hipfire_server_metrics` の直後、
+  `_strata_server_metrics` と同じ流儀）:
+  - prefill = `live.prefill_tok_s_mean` → 直近完了の `prefill_tok_s` → **`totals` 累計平均**
+  - decode = `live.tok_s` → 直近完了の `decode_tok_s` → **`totals` 累計平均**
+    （累計の prompt は実読込 `prompt_tokens - reused`。Maya 本体の Prometheus 変換と
+    同じ数え方で、キャッシュヒットを prefill 速度に混ぜない）
+  - E2E = `duration_s` / TTFT = `prompt_ms/1000`（Maya に TTFT 単独値は無い）
+  - KV = `(live.prompt_tokens + live.generated) ÷ engine.max_context × 100`、アイドル時 0
+  - **累計平均フォールバックを置いた理由**: Strata のように「アイドル 5 秒後は 0」だと、
+    ページを開いた瞬間がアイドルだと `heldMetrics` の保持値が無く `-` になる。
+    hipfire で採用した「0 や `-` に落ちない」方針に揃えた
+- **`_modelctl_metrics()`** に `if engine == "maya": … return _maya_metrics(base, _modelctl_headers(profile))`
+  を追加（`_modelctl_headers()` = `model-ctl.sh` の `_mc_mode_key` → `maya/.env` の
+  `MAYA_API_KEY`。**認証ヘッダを渡すのが本修正の要点**）
+
+### 検証 (2026-11-12 実機・再起動前後)
+
+| 状態 | 修正前 | 修正後 |
+|---|---|---|
+| アイドル（履歴あり） | `engine=unknown` `metrics={}` | `engine=maya` prefill **1308.3** / decode **22.1** / E2E 186.4s / TTFT 1.98s |
+| 生成中（600 tok） | — | running **1** / decode **29.4**（live 瞬時値）/ KV **0.198%** |
+| 生成直後 | — | prefill 56.3 / decode **29.8** / E2E 20.9s / TTFT 0.43s（直近リクエスト値） |
+
+- `py_compile` OK / `bash -n wsl_modelctl_bridge.sh` OK
+- `bridge list` の engine 列: `maya maya 1`（他モードは無変更）、`strataD4 strata`
+- 検証で発行した推論リクエストは完了済み（`usage: prompt 24 / completion 600`）
+
+### 反映手順（sudo が必要・運用者が実行）
+
+```bash
+bash ~/DGXSparkUtil/api/restart_service.sh     # = sudo systemctl restart dgx-spark-api (port 8090)
+# 確認
+curl -s localhost:8090/api/vllm/status | python3 -c \
+  'import json,sys; a=json.load(sys.stdin)["active"]; print(a["engine"], a["metrics"])'
+```
+フロント変更は無いため API 再起動のみで反映。稼働中の Maya は巻き込まれない
+（`KILL_MODE=process`）。
+
+### 今後の注意: モード追加時は 3 箇所
+
+`model-ctl.sh` にモードを足すだけでは WebUI のメトリクスは出ない。
+
+1. `model-ctl.sh` の `_MC_MODES`（＋必要なら `_mc_pattern` / port / dir / key のアクセサ）
+2. `wsl_modelctl_bridge.sh` の `_mc_engine_of()`（**ここを忘れると `unknown` 扱いで metrics 空**）
+3. `vllm.py` の `_modelctl_metrics()` にエンジン種別の分岐（新エンジンのときだけ）
