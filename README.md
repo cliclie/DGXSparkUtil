@@ -78,6 +78,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [atom2 サーマルガードの段発振を解除側ヒステリシスで停止 (2026-11-12 / 本機 = WhitebearATOM2)](#atom2-サーマルガードの段発振を解除側ヒステリシスで停止-2026-11-12--本機--whitebearatom2)
 - [Maya (maya・WSL2) の prefill/decode 表示: エンジン種別表と /metrics (JSON・Bearer 必須) の追従 (2026-11-12 / 本機 = Whitebear2026-WSL)](#maya-mayawsl2-の-prefilldecode-表示-エンジン種別表と-metrics-jsonbearer-必須-の追従-2026-11-12--本機--whitebear2026-wsl)
 - [thermal-guard: WSL2 の nvidia-smi が返す小数温度で Illegal number (2026-11-12 / 本機 = Whitebear2026-WSL)](#thermal-guard-wsl2-の-nvidia-smi-が返す小数温度で-illegal-number-2026-11-12--本機--whitebear2026-wsl)
+- [2026-11-12 更新の atom1 反映: int_c は GB10 で恒等・api 側の追加は wsl / maya 専用 (2026-11-12 / 本機 = WhitebearATOM1)](#2026-11-12-更新の-atom1-反映-int_c-は-gb10-で恒等api-側の追加は-wsl--maya-専用-2026-11-12--本機--whitebearatom1)
 
 ## 目的
 
@@ -2784,13 +2785,15 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 
 ### 5. 各機の同期状況
 
-> **現況（2026-11-09）**: 3 機とも `origin/main` 最新まで同期済み。atom1 が自機の 2026-11-09
-> （新モデル 6 プロファイル追従 = `api/vllm.py` の `CLINE_MODEL_TABLE` のみ。当機の compose に
-> 存在するモデルの変更なので他機に実装上の影響なし）、atom2 は自機の 2026-11-07（hipfire 対応と
+> **現況（2026-11-12）**: 3 機とも `origin/main` 最新（`7879623`）まで同期済み。**atom1 が 2026-11-12 に
+> 12 コミット（`6aaf0c1` → `7879623`）を反映**し、`thermal-guard`（13:39:41）と `dgx-spark-api`（13:39:46）を
+> **両方再起動**済み（コード変更は 7 ファイルあるが本機の GB10 / clock + groups / compose には実質無影響。
+> 詳細は末尾「2026-11-12 更新の atom1 反映」節）。atom2 は自機の 2026-11-07（hipfire 対応と
 > api venv 更新）に加えて 2026-11-09 の 8 コミット（`f309f17` の GPU クロック 100% 基準 HW 上限統一
-> を含む）を反映 + `dgx-spark-api` 再起動済み、Whitebear2026 が 2026-11-09 に 10 コミット
-> （`f309f17` の GPU クロック 100% 基準 HW 上限統一 + 新モデル 6 プロファイルを含む）を反映 +
-> `dgx-spark-api` 再起動済み。
+> を含む）を反映 + `dgx-spark-api` 再起動済みで、2026-11-12 の段発振ヒステリシス（`834e476`）は自機実装。
+> Whitebear2026 は 2026-11-09 に 10 コミット（`f309f17` の GPU クロック 100% 基準 HW 上限統一 + 新モデル
+> 6 プロファイルを含む）を反映 + `dgx-spark-api` 再起動済みで、2026-11-11 / 12 の 3 実装
+> （`4f23891` LHM CPU 温度 / `ec7d5b2` Maya metrics / `29a8d3b` `int_c`）は自機実装。
 > 以下の項は**時系列の記録**なので、途中にある「atom1 / atom2 / Whitebear2026 は未同期」の注記は
 > いずれも**その時点**のもので、現在は解消済み（各機の最新項が現在の状態）。
 
@@ -2799,6 +2802,23 @@ commit URL 直アクセス・PR / 通知キャッシュ・fork から即時に�
 | atom1 (WhitebearATOM1) | `06e5eda` を実装（自機）+ 記録 `925dd3e` | 不要（フロントのみ） | groups モード稼働中（2026-11-06 に `THERMAL_GROUPS=1` 反映済み） |
 | atom2 (WhitebearATOM2) | `06e5eda` + 自機の記録 | 不要（フロントのみ） | power モード（変更は clock/groups 分岐のみで無影響） |
 | Whitebear2026 (WSL2 / modelctl) | `06e5eda` を反映 + 自機の記録 | 不要（フロントのみ） | 監視専ら・従来モード（`groups` なし / `locked_mhz=0`） |
+- **atom1 (WhitebearATOM1)**: 2026-11-12 に **12 コミット（`6aaf0c1` → `7879623`）を反映**。
+  `git fetch --all --prune` + `git merge --ff-only origin/main`（13:09:11、fast-forward、作業ツリー clean、
+  ahead/behind なし）。コード変更は `api/thermal_guard.sh` / `api/thermal-guard.service` / `api/config.py` /
+  `api/metrics.py` / `api/vllm.py` / `api/wsl_modelctl_bridge.sh` / `api/restart_service.sh` の **7 ファイル**。
+  **本機は GB10（clock + groups モード / backend=compose）で、全変更が実質無影響** — `int_c()` は本機の
+  `nvidia-smi --query-gpu=temperature.gpu` が整数（実測 `38`）なので恒等変換、`want_w()` は clock モードが
+  通らない、`lhm_url` は `PLATFORMS["wsl"]` 専用（本機は `config.PLATFORM=dgx-spark` で `LHM_URL == ''` を実測
+  → sysfs のみ）、`_maya_metrics()` は `_modelctl_metrics()` 経由なので本機は到達しない。
+  稼働 unit は 10/17 のレンダリング版 + drop-in `groups.conf`（`THERMAL_GROUPS=1`）のまま。unit 差分は
+  power 用 Environment（`POWER_HIGH_C` 80→85 / `POWER_CRIT_C` 90→95 / `POWER_HYST_C=4` /
+  `POWER_RELEASE_SECS` 2→10）のみで本機は未使用 → **`install_service.sh` の再実行は不要**
+  （本機に `api/install_service.env` が無く、再実行は `DGXUTIL_THERMAL` 未指定で thermal-guard が外れるリスク）。
+  ただし **dash は実行中スクリプトをバイトオフセットで読む**ため `thermal-guard` の再起動が必須（旧 PID 10517 は
+  05:03 起動で、スクリプトは 13:09 に差し替え済み）、**`api/*.py` は import 時読み込み**のため
+  `dgx-spark-api` の再起動も必要 → 運用者が **13:39:41 に `thermal-guard`、13:39:46 に `dgx-spark-api` を
+  `sudo systemctl restart`**（stop 停滞なし・`NRestarts=0`）。実測は末尾
+  「2026-11-12 更新の atom1 反映」節
 - **Whitebear2026 (WSL2 / modelctl)**: 2026-11-06 に **サーマルガード表示の短縮を反映**（`06e5eda`。atom1 実装）。
   `git pull --ff-only origin main`（`6aa016e` → `06e5eda`、fast-forward、2 コミット、作業ツリー clean）。
   コード変更は `front/index.html` のみ（残 1 コミットは README）なので `dgx-spark-api` 再起動不要
@@ -5145,3 +5165,150 @@ sleep 5 && cat /run/thermal/state                          # temp_c が gpu_c �
 
 **注意**: dash は実行中のスクリプトをバイトオフセットで読み進めるため、稼働中の
 `thermal_guard.sh` を編集したら**必ず再起動**する（しないとずれた位置から読み続ける）。
+
+## 2026-11-12 更新の atom1 反映: int_c は GB10 で恒等・api 側の追加は wsl / maya 専用 (2026-11-12 / 本機 = WhitebearATOM1)
+
+Whitebear2026 (WSL2) と atom2 で入った 2026-11-11 / 12 の更新を本機 (atom1 / GB10) に反映した。
+**コード変更は 7 ファイルあるが、本機の構成（GB10 = clock + groups モード / `backend=compose`）には
+すべて実質無影響**と解析で確認し、稼働サービス 2 件の再起動のみが実作業だった。
+
+### 反映対象（`6aaf0c1` → `7879623` = 12 コミット）
+
+コード変更を伴うのは 4 コミット（残 8 は README のみ）。
+
+| コミット | 内容 | 実装機 |
+|---|---|---|
+| `4f23891` | WSL の CPU 温度を Windows ホストの LibreHardwareMonitor から取得 | Whitebear2026 |
+| `834e476` | 解除側ヒステリシスで段発振を停止（`want_w()` に現段引数 / `HYST_C` / `RELEASE_SECS` 10） | atom2 |
+| `ec7d5b2` | Maya の prefill/decode 空欄修正（`_maya_metrics()` 新設 / `wsl_modelctl_bridge.sh` の engine 表） | Whitebear2026 |
+| `29a8d3b` | `int_c()` 追加（`nvidia-smi` の小数温度で dash が `Illegal number`） | Whitebear2026 |
+
+### git 反映
+
+```bash
+cd ~/DGXSparkUtil
+git fetch --all --prune
+git merge --ff-only origin/main     # 6aaf0c1 → 7879623（13:09:11、fast-forward、12 コミット）
+git status -sb                      # ## main...origin/main（ahead/behind なし）
+```
+
+`front/index.html` は 2026-11-09 のまま（この期間フロント変更なし）。`api/requirements.txt` も変更なし
+なので **venv の依存更新は不要**。
+
+### 本機への影響解析（実測で裏取り）
+
+| 変更 | 本機 (GB10 / atom1) への影響 |
+|---|---|
+| `thermal_guard.sh` の `int_c()` | `nvidia-smi --query-gpu=temperature.gpu` は本機 **`38`（整数）** → 四捨五入は恒等変換で**挙動不変**。GB10 は小数を返さない（小数は RTX 5090 / WSL2 のみ） |
+| `thermal_guard.sh` の `want_w()` 第 2 引数・`HIGH_LOW_C` / `CRIT_LOW_C` | **clock モードは `want_w()` を通らない**（コミットメッセージ明記）→ 無影響。`THERMAL_POWER_*` は本機未使用 |
+| `thermal-guard.service` | 差分は power 用 Environment のみ（`POWER_HIGH_C` 80→85、`POWER_CRIT_C` 90→95、`POWER_HYST_C=4` 追加、`POWER_RELEASE_SECS` 2→10）。本機の稼働 unit は 10/17 レンダリング版 + drop-in `groups.conf`（`THERMAL_GROUPS=1`）で、`DropInPaths` はその 1 本 |
+| `config.py` / `metrics.py`（LHM） | `lhm_url` は `PLATFORMS["wsl"]` のキー。本機は `config.PLATFORM=dgx-spark` で **`config.LHM_URL == ''`** を実測 → `_read_cpu_temp_c()` は sysfs のみ（従来どおり） |
+| `vllm.py` の `_maya_metrics()` | `_modelctl_metrics()` の `engine == "maya"` 分岐から呼ばれる。本機は `backend=compose` で**到達しない**。`wsl_modelctl_bridge.sh` も `wsl` プロファイル専用 |
+| `restart_service.sh` の PORT 導出 | 実 unit の `ExecStart` は `--port 8080` で旧ハードコードと一致 → 挙動同じ（WSL の 8090 で誤 FAIL になっていた分の改善） |
+
+**`install_service.sh` の再実行は行わない** — 本機に `api/install_service.env` が無いため、再実行すると
+`DGXUTIL_THERMAL` 未指定扱いで **thermal-guard が unit から外れる**（atom2 節 4724 と同じ理由）。
+unit の差分は本機が読まない Environment だけなので drift は実害なし。
+
+### 反映操作（sudo・運用者が実行）
+
+```bash
+sudo systemctl restart thermal-guard     # 13:39:41
+sudo systemctl restart dgx-spark-api     # 13:39:46
+```
+
+**両方必須**だった理由:
+
+- `thermal-guard` — 稼働中 PID 10517 は **05:03:51 起動**で、`thermal_guard.sh` は **13:09:11 に差し替え済み**。
+  dash は実行中スクリプトをバイトオフセットで読み進めるため、前節の注意どおり再起動が必須
+- `dgx-spark-api` — `api/config.py` / `metrics.py` / `vllm.py` は **import 時読み込み**。稼働中 PID 2265 は
+  05:03:34 起動（= 旧コード）だった
+
+**stop 停滞は発生しなかった**（atom2 で 90 秒停滞した事象）— 再起動前に `pgrep -aP 2265` が**空**で、
+`dgx-spark-api.service` の CGroup に `switch_models.sh` / `docker logs --follow` の残骸が**ゼロ**だったため。
+`TimeoutStopSec` は本機 **既定の 90 秒**（drop-in 未適用）のまま、stop は 13:39:46 で即完了した。
+
+### 検証 (2026-11-12 実機・反映後)
+
+**静的チェック（再起動前）**
+
+- `dash -n thermal_guard.sh` / `bash -n thermal_guard.sh` ともに OK
+- `int_c` の単体（本機 dash 相当）: `34.90→35` / `34.40→34` / `97.6→98` / `85→85` / `""→0` / `N/A→0` / `40→40`
+- `nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits` = **`38`**（小数なし）
+  → 本機では `int_c` が恒等変換であることを確認
+- `./venv/bin/python -c "import config,metrics,vllm"` = import OK、`config.PLATFORM=dgx-spark`、
+  **`config.LHM_URL == ''`**（LHM 経路は無効）
+
+**サービス状態（反映後 13:40:11 実測）**
+
+| 項目 | 実測 |
+|---|---|
+| `thermal-guard` | `active` / `MainPID=1094065`（旧 10517 は消滅）/ `ActiveEnterTimestamp=13:39:41` / `NRestarts=0` / `DropInPaths=…groups.conf` |
+| `dgx-spark-api` | `active` / `MainPID=1095358`（旧 2265 は消滅）/ `ActiveEnterTimestamp=13:39:46` / `NRestarts=0` |
+| `journalctl -u thermal-guard` | `Illegal number` **0 件**（13:39:00 以降）。`Terminated` → `Deactivated successfully` → `Started` のみ |
+| `journalctl -u dgx-spark-api` | error / traceback / exception **0 件** |
+
+**`/run/thermal/state`（`mode=clock` / `groups=true` 継続）**
+
+```
+{"ts":1794458410,"enabled":true,"mode":"clock","groups":true,"temp_c":40,"acpitz_c":40,"gpu_c":40,
+ "clock_mhz":2398,"locked_mhz":0,"cpu_locked_khz":0,"cpu_locked_small_khz":0,"model_running":1,
+ "low_count":15,"high_c":84,"crit_c":90,"low_c":78,"lock_high_mhz":1665,"lock_crit_mhz":1000,
+ "cpu_high_c":88,"cpu_crit_c":93,"cpu_low_c":82,"cpu_lock_high_khz":3200000,"cpu_lock_crit_khz":2400000,
+ "gpu_high_c":84,"gpu_crit_c":90,"gpu_low_c":78,"gpu_lock_high_mhz":1665,"gpu_lock_crit_mhz":1000}
+```
+
+- **`temp_c=40` が `acpitz_c=40` / `gpu_c=40` と一致**（WSL2 で壊れていた `max()` が本機でも正常）
+- `low_count` は再起動で 3 にリセットされ、13:40:11 に 15 まで増加 = **ループが 2 秒周期で回っている**
+- `/api/thermal` は state と**同じ値**を返す（API は state を読むだけ）
+- 本機の `state` に `high_low_c` / `crit_low_c` が**出ていない** = 2026-11-12 の追加は **power モード専用**
+  で clock/groups モードは書かない（`want_w()` 非経由の裏付け）
+
+**API エンドポイント（13:40:11・全 8 本）**
+
+```
+/                      200 0.001366s      /api/vllm/status    200 0.386314s
+/api/platform          200 0.000803s      /api/thermal        200 0.000700s
+/api/metrics           200 0.033493s      /api/rag/status     200 0.049896s
+/api/page-version      200 0.000835s      /api/history        200 0.000821s
+```
+
+**`/api/metrics` の温度・クロック（LHM 経路不使用の確認）**
+
+```
+{'cpu_temp_c': 40.7, 'gpu_clock_max_mhz': 3003.0, 'gpu_clock_mhz': 2398.0,
+ 'gpu_temp_c': 38.0, 'gpu_vendor': 'nvidia'}
+```
+
+`cpu_temp_c` は sysfs（`thermal_zone*` のミリ度 40800 → 40.7℃）由来。`gpu_clock_max_mhz=3003.0` は
+2026-11-09 の HW 上限基準（`clocks.max.sm`）のまま。
+
+**稼働モデルは巻き込まれていない**
+
+```
+active = qwen38flashnextexl3_4p05  running=True  health=True  api_listening=True
+uptime = 08:11:26   restart_count = 0
+docker ps: tabbyapi-flashnext-4p05   Up 8 hours
+```
+
+uptime が 05:03 起動から**連続**（13:39 の API 再起動をまたいで 8 時間 11 分）= モデルは無傷。
+`metrics` の `prompt_tokens_per_s=205,928` / `generation_tokens_per_s=50.3` / `kv_cache_usage_pct=15.02` も
+再起動前後で連続。
+
+**`curl` の `000` と `Expecting value` について（正常）**
+
+反映手順の検証コマンドを**再起動の直後に連続実行**すると、`/api/platform` が `000`（接続不可）、
+`/api/thermal | python3 -m json.tool` が `Expecting value: line 1 column 1`（空応答）になる。
+`dgx-spark-api` は 13:39:46 起動で、uvicorn の listen までに 1〜2 秒かかるため。**13:40:11 の再実行では
+全 endpoint が 200** で、`journalctl` にも error が無く、サービス自体は正常。`state` の
+`No such file` と同じ「起動直後の窓」なので、検証は**起動から 20 秒以上置いてから**実行する。
+
+### 恒久対策は未適用（本機は今回未踏のため見送り）
+
+- `TimeoutStopSec` の drop-in（atom2 は `10-timeout-stop.conf` で 15 秒）**未適用** = 本機は既定 90 秒
+- `~/llm/compose/switch_models.sh` の `cleanup()` は**無制限 `wait` の旧版**（305-317 行）、
+  バックアップ `switch_models.sh.bak-20261109` は本機に**存在しない**（Atom2LLM 側追跡）
+
+README 4769 行の「他機への示唆」どおり本機でも同じ残骸・停滞が起きうるが、**今回の CGroup は空で
+stop は即完了**したため発症していない。発症時に atom2 節の 2 対応を適用する（どちらも git 管理外）。
+
