@@ -5124,8 +5124,24 @@ WSL2 は `/sys/class/thermal` が空で acpitz が無いので `t=0` 固定に�
 
 ```bash
 sudo systemctl restart thermal-guard
-journalctl -u thermal-guard -n 10 --no-pager        # Illegal number が出ないこと
-cat /run/thermal/state                              # temp_c が gpu_c と同じ値になること
+journalctl -u thermal-guard --since '-30 sec' --no-pager   # Illegal number が出ないこと
+sleep 5 && cat /run/thermal/state                          # temp_c が gpu_c と同じ整数値になること
 ```
+**`cat: /run/thermal/state: No such file or directory` について（正常）**: unit に
+`RuntimeDirectory=thermal`（`RuntimeDirectoryMode=0755`）が付いているため **stop のたびに
+`/run/thermal` が削除**され、起動後の最初のループ（`nvidia-smi -rgc` → 温度取得 → printf、
+最大 2〜3 秒）が走るまで state は存在しない。再起動直後に `cat` するとこのエラーになる
+（2026-11-12 実測: 13:02:48 起動 → 13:02:48 の `cat` は失敗、13:03 には書かれていた）。
+少し待ってから再実行するか、`journalctl` に起動行 1 本とエラー 0 件が出ているかで判断する。
+
+**修正後の実測 (2026-11-12 13:03 / 本機)**
+```
+{"ts":1794456206,"enabled":true,"temp_c":34,"acpitz_c":0,"gpu_c":34,"clock_mhz":1380,
+ "locked_mhz":0,"model_running":0,"high_c":90,"crit_c":98,"low_c":85, ...}
+```
+- 修正前は `gpu_c: 34.90` / **`temp_c: 0`** だった（`max()` が比較エラーで効いていなかった）
+- 再起動後（13:02:48〜）の `Illegal number` は **0 件**、`/api/thermal` も同じ値を返す
+  （API は state を読むだけなので `dgx-spark-api` の再起動は不要）
+
 **注意**: dash は実行中のスクリプトをバイトオフセットで読み進めるため、稼働中の
 `thermal_guard.sh` を編集したら**必ず再起動**する（しないとずれた位置から読み続ける）。
