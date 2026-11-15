@@ -78,7 +78,8 @@ section > h2 {
   color: var(--muted);
 }
 .tabs button:hover { color: var(--text); border-bottom-color: var(--border); }
-.tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--green); }
+.tabs button[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--green); }
+.tabs button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 /* ---- ヘッダ行のモデル選択 (プルダウン) と切替/停止ボタン: モデルタブの直横 ---- */
 .hdr-model {
   margin-left: 14px;
@@ -110,8 +111,9 @@ section > h2 {
 #hdr-switch-btn { padding: 4px 8px; font-size: 12px; min-width: calc(4em + 18px); text-align: center; white-space: nowrap; }
 #hdr-switch-btn.stop { background: #33161a; border-color: #5c2b30; color: #e5534b; }
 #hdr-switch-btn.stop:hover { border-color: var(--red); }
-.tab-panel { display: none; }
-.tab-panel.active { display: block; }
+/* 非選択の panel は hidden="until-found" で隠す (find-in-page からも消さない)。
+   UA 既定の display:none は作者スタイルに負けるため明示する */
+.tab-panel[hidden] { display: none; }
 /* ---- 現在値: vLLM 情報テキストカード (ゲージ描画なし・文字のみ) ---- */
 .gauge.vinfo-card { text-align: left; overflow: hidden; }
 .gauge.vinfo-card .vi-row {
@@ -210,6 +212,10 @@ section > h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px 6px;
+  /* オフスクリーン時の描画をスキップする (efficient-background-processing)。
+     contain-intrinsic-size は初期レイアウト用の代替高さ。実測 246px = cwrap 232 + padding */
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 246px;
 }
 .chart-card .cwrap { position: relative; height: 232px; } /* 288px → 80% (4の倍数) */
 /* ---- Tier 3 ---- */
@@ -271,29 +277,30 @@ button.primary { background: #1f6feb; border-color: #1f6feb; }
 #btn-stop { background: #33161a; border-color: #5c2b30; color: #e5534b; }
 #btn-stop:hover { border-color: var(--red); }
 button:disabled { opacity: .5; cursor: not-allowed; }
-/* ---- モーダル ---- */
+/* ---- モーダル: ネイティブ <dialog> ----
+   showModal() がトップレイヤー / focus 閉じ込め / Esc / 背後 inert を提供する。
+   role="dialog"・aria-modal・手動 focus trap・Esc ハンドラは不要なので追加しない。 */
 .modal {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
-}
-.modal.hidden { display: none; }
-.modal-box {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
+  color: var(--text);
   width: min(680px, 92vw);
   max-height: 84vh;
   overflow: auto;
   padding: 18px 20px;
 }
-.modal-box h3 { margin: 0 0 12px; font-size: 15px; }
+.modal::backdrop {
+  background: rgba(0,0,0,.6);
+  /* backdrop 上・内側のスクロールが背後のページへ伝わらないようにする */
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.modal:modal { overscroll-behavior: contain; }
+.modal h3 { margin: 0 0 12px; font-size: 15px; }
 .model-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .model-item {
+  /* .model-item は <button type="button">。div + onclick ではキーボードで選択できなかった */
   width: fit-content;
   max-width: 100%;
   display: flex;
@@ -302,7 +309,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 12px;
+  margin: 0;
   cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
 }
 .model-item.selected { border-color: var(--blue); background: rgba(88,166,255,.08); }
 .model-item .name { font-weight: 600; }
@@ -315,6 +326,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
    compose 環境 (atom1 / atom2) は containers に ready を出さないため
    このクラスは付与されず、表示は従来どおり。 */
 .model-item.not-ready { cursor: default; }
+.model-item:disabled { opacity: 1; cursor: default; } /* 灰色は .not-ready .name が担う。button:disabled の .5 は二重に暗い */
 .model-item.not-ready .name { color: var(--muted); }
 .job-log {
   background: #010409;
@@ -331,13 +343,23 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   display: none;
 }
 .job-log:empty::before { content: "ログ"; color: var(--muted); } /* 内容なし時のプレースホルダー */
+/* 表はキーボードでもスクロールできる region に包み、見出しを sticky にする */
+.table-wrap { container-type: inline-size; overflow: auto; max-height: 56vh; }
+.table-wrap:focus-visible { outline: 2px solid var(--blue); outline-offset: -1px; }
 table.params { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.params th, table.params td {
   border-bottom: 1px solid var(--border);
   padding: 6px 8px;
   text-align: left;
 }
-table.params th { color: var(--muted); font-weight: 500; font-size: 12px; }
+table.params th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  position: sticky;
+  top: 0;
+  background: var(--card);
+}
 table.params td input {
   width: 160px;
   background: #010409;
@@ -384,10 +406,11 @@ table.params td input[readonly] { color: var(--muted); }
 .cline-error { color: var(--red); padding: 10px 0; }
 .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 10px; }
 /* ---- モデル実行ログモーダル (三段構成) ---- */
-.log-box {
+/* dialog は [open] のときだけ flex にする (無条件の display 指定は閉じた状態を上書きする) */
+.log-box[open] {
   display: flex;
   flex-direction: column;
-  width: 100vw;
+  width: min(1100px, 96vw); /* 100vw だと縦スクロールバー分ではみ出す */
   max-height: 84vh;
   overflow: hidden;
   padding: 16px 18px;
@@ -436,9 +459,11 @@ table.params td input[readonly] { color: var(--muted); }
   <span id="pstate"></span>
   <span id="thermal"></span>
   <!-- タブ (システム / モデル) はヘッダ行内。モデルタブの横にモデル選択と切替/停止ボタンを置く -->
-  <div class="tabs">
-    <button class="active" data-tab="system">システム</button>
-    <button data-tab="model">モデル</button>
+  <div class="tabs" role="tablist" aria-label="表示パネルの切り替え">
+    <!-- 初期状態を HTML に反映 (スクリプト実行前に全 panel が表示されるのを防ぐ)。
+         aria-controls は付けない: ガイド「no screen reader uses it」 -->
+    <button type="button" role="tab" id="tab-btn-system" aria-selected="true" data-tab="system">システム</button>
+    <button type="button" role="tab" id="tab-btn-model" aria-selected="false" tabindex="-1" data-tab="model">モデル</button>
   </div>
   <div class="hdr-model">
     <select id="hdr-model-select"></select>
@@ -447,7 +472,7 @@ table.params td input[readonly] { color: var(--muted); }
 </header>
 <main>
   <!-- タブ 1: システム (現在値 + 時系列) -->
-  <div class="tab-panel active" id="tab-system">
+  <div class="tab-panel" id="tab-system" role="tabpanel" aria-labelledby="tab-btn-system">
   <!-- Tier 1: 現在値カード -->
   <section>
     <h2>現在値 (ホスト)</h2>
@@ -471,7 +496,7 @@ table.params td input[readonly] { color: var(--muted); }
   </div>
 
   <!-- タブ 2: モデル (vLLM / モデル + RAG) -->
-  <div class="tab-panel" id="tab-model">
+  <div class="tab-panel" id="tab-model" role="tabpanel" aria-labelledby="tab-btn-model" hidden="until-found">
   <!-- Tier 3: vLLM -->
   <section id="sec-model">
     <h2 id="h2-model">vLLM / モデル</h2>
@@ -519,80 +544,73 @@ table.params td input[readonly] { color: var(--muted); }
 </main>
 
 <!-- モーダル: パラメータ表示・編集 -->
-<div class="modal hidden" id="modal-params">
-  <div class="modal-box">
-    <h3 id="params-title">パラメータ表示・編集</h3>
+<dialog class="modal" id="modal-params" closedby="any" aria-labelledby="params-title">
+  <h3 id="params-title">パラメータ表示・編集</h3>
+  <!-- キーボードでもスクロールできる region に包む。見出しは sticky -->
+  <div class="table-wrap" tabindex="0" role="region" aria-labelledby="params-title">
     <table class="params">
-      <thead><tr><th>引数</th><th>値</th></tr></thead>
+      <thead><tr><th scope="col">引数</th><th scope="col">値</th></tr></thead>
       <tbody id="params-body"></tbody>
     </table>
-    <div class="job-log" id="recreate-log"></div>
-    <div class="modal-actions">
-      <button id="params-close">閉じる</button>
-      <button class="primary" id="params-save">保存してコンテナを再作成</button>
-    </div>
   </div>
-</div>
+  <div class="job-log" id="recreate-log"></div>
+  <div class="modal-actions">
+    <button type="button" id="params-close">閉じる</button>
+    <button type="button" class="primary" id="params-save">保存してコンテナを再作成</button>
+  </div>
+</dialog>
 
 <!-- モーダル: Cline設定値 -->
-<div class="modal hidden" id="modal-cline">
-  <div class="modal-box">
-    <h3>Cline設定値</h3>
-    <div id="cline-content"></div>
-    <div class="modal-actions">
-      <button id="cline-copy-all">すべてコピー</button>
-      <button id="cline-close">閉じる</button>
-    </div>
+<dialog class="modal" id="modal-cline" closedby="any" aria-labelledby="cline-title">
+  <h3 id="cline-title">Cline設定値</h3>
+  <div id="cline-content"></div>
+  <div class="modal-actions">
+    <button type="button" id="cline-copy-all">すべてコピー</button>
+    <button type="button" id="cline-close">閉じる</button>
   </div>
-</div>
+</dialog>
 
 <!-- モーダル: モデル停止 -->
-<div class="modal hidden" id="modal-stop">
-  <div class="modal-box">
-    <h3>モデル停止</h3>
-    <p id="stop-msg"></p>
-    <div class="job-log" id="stop-log"></div>
-    <div class="modal-actions">
-      <button id="stop-cancel">キャンセル</button>
-      <button class="primary" id="stop-go">停止する</button>
-    </div>
+<dialog class="modal" id="modal-stop" closedby="any" aria-labelledby="stop-title">
+  <h3 id="stop-title">モデル停止</h3>
+  <p id="stop-msg"></p>
+  <div class="job-log" id="stop-log"></div>
+  <div class="modal-actions">
+    <button type="button" id="stop-cancel">キャンセル</button>
+    <button type="button" class="primary" id="stop-go">停止する</button>
   </div>
-</div>
+</dialog>
 
 <!-- モーダル: RAG 起動/停止 -->
-<div class="modal hidden" id="modal-rag">
-  <div class="modal-box">
-    <h3 id="rag-modal-title">RAG 起動/停止</h3>
-    <p id="rag-msg" style="white-space:pre-line;"></p>
-    <div class="job-log" id="rag-log"></div>
-    <div class="modal-actions">
-      <button id="rag-cancel">キャンセル</button>
-      <button class="primary" id="rag-go">実行</button>
-    </div>
+<dialog class="modal" id="modal-rag" closedby="any" aria-labelledby="rag-modal-title">
+  <h3 id="rag-modal-title">RAG 起動/停止</h3>
+  <p id="rag-msg" style="white-space:pre-line;"></p>
+  <div class="job-log" id="rag-log"></div>
+  <div class="modal-actions">
+    <button type="button" id="rag-cancel">キャンセル</button>
+    <button type="button" class="primary" id="rag-go">実行</button>
   </div>
-</div>
+</dialog>
 
 <!-- モーダル: モデル実行ログ (三段構成) -->
-<div class="modal hidden" id="modal-log">
-  <div class="modal-box log-box">
-    <!-- 一段目: タイトル(左) / 検索・再読み込み・ダウンロード(右) -->
-    <div class="log-head">
-      <h3 id="log-title">実行ログ</h3>
-      <div class="log-head-actions">
-        <input id="log-search-input" type="text" placeholder="検索キーワード" class="log-search-input hidden">
-        <button id="log-search">検索</button>
-        <button id="log-refresh">再読み込み</button>
-        <button id="log-download">ダウンロード</button>
-      </div>
-    </div>
-    <!-- 二段目: ログ表示 (縦スクロール / 横折り返し / 初期表示は末尾) -->
-    <div class="log-content" id="log-content"></div>
-    <!-- 三段目: 閉じる (右) -->
-    <div class="modal-actions">
-      <button id="log-close">閉じる</button>
+<dialog class="modal log-box" id="modal-log" closedby="any" aria-labelledby="log-title">
+  <!-- 一段目: タイトル(左) / 検索・再読み込み・ダウンロード(右) -->
+  <div class="log-head">
+    <h3 id="log-title">実行ログ</h3>
+    <div class="log-head-actions">
+      <input id="log-search-input" type="text" placeholder="検索キーワード" class="log-search-input hidden">
+      <button type="button" id="log-search">検索</button>
+      <button type="button" id="log-refresh">再読み込み</button>
+      <button type="button" id="log-download">ダウンロード</button>
     </div>
   </div>
-</div>
+  <!-- 二段目: ログ表示 (縦スクロール / 横折り返し / 初期表示は末尾) -->
+  <div class="log-content" id="log-content"></div>
+  <!-- 三段目: 閉じる (右) -->
+  <div class="modal-actions">
+    <button type="button" id="log-close">閉じる</button>
+  </div>
+</dialog>
 
 <script>
 "use strict";
@@ -1133,14 +1151,48 @@ function redrawSystemTab() {
 }
 
 // タブ切替 (ヘッダ行のタブボタン / ヘッダの切替ボタンから呼ぶ)
+const tabBtns = Array.from(document.querySelectorAll(".tabs button[data-tab]"));
+const tabPanels = tabBtns.map((b) => document.getElementById("tab-" + b.dataset.tab));
+
 function showTab(key) {
-  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === key));
-  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + key));
+  for (const b of tabBtns) {
+    const selected = b.dataset.tab === key;
+    b.setAttribute("aria-selected", String(selected));
+    // roving tabindex: Tab キーで group に入ると選択中タブに止まる
+    b.tabIndex = selected ? 0 : -1;
+  }
+  for (const p of tabPanels) {
+    // hidden="until-found" にすると非表示でも find-in-page で検索できる
+    // (未対応ブラウザでは boolean の hidden として扱い単に非表示になる)
+    p.hidden = p.id === "tab-" + key ? false : "until-found";
+  }
   if (key === "system") redrawSystemTab();
 }
-document.querySelectorAll(".tabs button").forEach((btn) => {
+
+tabBtns.forEach((btn) => {
   btn.onclick = () => showTab(btn.dataset.tab);
 });
+
+// 矢印キーで移動 (selection follows focus が既定。パネル表示にコストが無いので activation 不要)
+document.querySelector(".tabs").addEventListener("keydown", (e) => {
+  const i = tabBtns.indexOf(document.activeElement);
+  if (i < 0) return;
+  const next = {
+    ArrowRight: (i + 1) % tabBtns.length,
+    ArrowLeft: (i - 1 + tabBtns.length) % tabBtns.length,
+    Home: 0,
+    End: tabBtns.length - 1,
+  }[e.key];
+  if (next === undefined) return;
+  e.preventDefault();
+  tabBtns[next].focus();
+  showTab(tabBtns[next].dataset.tab);
+});
+
+// find-in-page が非選択パネルの語にヒットしたら、そのタブを選択状態へ同期する
+for (const p of tabPanels) {
+  p.addEventListener("beforematch", () => showTab(p.id.replace("tab-", "")));
+}
 </script>
 <script>
 // ------------------------------------------------------------- Tier 3 (vLLM)
@@ -1302,6 +1354,17 @@ async function checkPageVersion() {
   }
 }
 
+// .chart-card がオフスクリーンなら canvas 更新をスキップする (efficient-background-processing)。
+// contentvisibilityautostatechange は bubble しない実装があるため要素へ直接付ける
+let chartSkipped = false;
+document.querySelector(".chart-card").addEventListener("contentvisibilityautostatechange", (e) => {
+  chartSkipped = e.skipped;
+  if (!e.skipped && lastMetrics) {
+    if (mainChart) mainChart.resize();
+    refreshMainChart();
+  }
+});
+
 async function poll() {
   // 4 エンドポイントを並列に引き、それぞれに期限を付ける。長文推論中は
   // /api/vllm/status が数秒かかるので、直列 + 期限なしだとゲージもサーマル表示も
@@ -1316,7 +1379,7 @@ async function poll() {
     lastMetrics = pm.value;
     pushPoint(pm.value.timestamp, pm.value);
     renderGauges(pm.value);
-    refreshMainChart();
+    if (!chartSkipped) refreshMainChart(); // オフスクリーン間は canvas 更新を止める
     renderPstate(pm.value);
   } else {
     console.error("metrics poll failed", pm.reason);
@@ -1343,6 +1406,11 @@ async function poll() {
   pollJob();
   checkPageVersion();
 }
+
+// polling を停止可能にする (裏タブではサーバーを叩かない)
+let pollTimer = null;
+function startPolling() { if (pollTimer === null) pollTimer = setInterval(poll, POLL_MS); }
+function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
 
 let currentStatus = null;
 // 直近の /api/rag/status レスポンス (ヘッダのモデル選択で RAG がロード済みかを見る)
@@ -1382,8 +1450,31 @@ function syncHdrModelSelection() {
   }
 }
 
-function openModal(id) { document.getElementById(id).classList.remove("hidden"); }
-function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+// ネイティブ <dialog> を使う (showModal がトップレイヤー / focus 閉じ込め / Esc / 背後 inert を提供する)
+function openModal(id) { document.getElementById(id).showModal(); }
+function closeModal(id) {
+  const dlg = document.getElementById(id);
+  if (dlg.open) dlg.close();
+}
+
+// ジョブ実行中は Esc / backdrop で閉じられないようにする (完了・失敗時に "any" へ戻す)。
+// closedby 未対応ブラウザでは Esc が常に有効になる (guide: graceful degradation)
+function setModalDismiss(id, allowed) {
+  document.getElementById(id).setAttribute("closedby", allowed ? "any" : "none");
+}
+
+// closedby 未対応ブラウザ (Safari) 向けの light-dismiss フォールバック。feature detect 済み
+if (typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
+  const outside = (e, dialog) => {
+    const r = dialog.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  for (const dialog of document.querySelectorAll("dialog[closedby]")) {
+    let pressedOutside = false;
+    dialog.addEventListener("pointerdown", (e) => { pressedOutside = outside(e, dialog); });
+    dialog.addEventListener("pointerup", (e) => { if (pressedOutside && outside(e, dialog)) dialog.close(); });
+  }
+}
 
 // 1 件のコンテナ情報を .model-item 要素にする (モーダル一覧とパネル常設一覧で共通)
 function makeModelItem(c, st, sw) {
@@ -1409,17 +1500,26 @@ function makeModelItem(c, st, sw) {
   // modelctl (WSL): 重み未導入のモードは切替不可 (bridge が DL を走らせない)
   const notReady = c.ready === false;
   if (notReady && !isTarget) meta = (meta ? meta + "・" : "") + "重み未導入";
-  const div = document.createElement("div");
-  div.className = "model-item" + (cls ? " " + cls : "") + (notReady ? " not-ready" : "") +
+  // div + onclick ではなく <button type="button">。キーボードでも選択できるようにする
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "model-item" + (cls ? " " + cls : "") + (notReady ? " not-ready" : "") +
     (c.profile === selectedProfile ? " selected" : "");
-  div.innerHTML = `<span class="name">${c.profile}</span><span class="meta">${meta}</span>`;
-  div.onclick = () => {
-    if (notReady) return;
+  // profile 名 / meta は API 由来の文字列。innerHTML に埋め込まず textContent で入れる
+  const nameEl = document.createElement("span");
+  nameEl.className = "name";
+  nameEl.textContent = c.profile;
+  const metaEl = document.createElement("span");
+  metaEl.className = "meta";
+  metaEl.textContent = meta;
+  item.append(nameEl, metaEl);
+  if (notReady) item.disabled = true; // 重み未導入は選択不可 (disabled なので click は発火しない)
+  item.onclick = () => {
     selectedProfile = c.profile;
     markHdrManual();
     renderModelList();
   };
-  return div;
+  return item;
 }
 
 // パネル常設の「切り替え実行」ボタン: ジョブ実行中 / 未選択 / すでに稼働中のモデル は不可
@@ -1600,6 +1700,7 @@ function openStopModal() {
   document.getElementById("stop-msg").textContent = `${a.profile} を停止しますか?`;
   document.getElementById("stop-cancel").style.display = "";
   document.getElementById("stop-go").disabled = false;
+  setModalDismiss("modal-stop", true);
   openModal("modal-stop");
 }
 
@@ -1615,6 +1716,7 @@ document.getElementById("stop-go").onclick = async () => {
   let failed = false;
   btn.disabled = true;
   document.getElementById("stop-cancel").style.display = "none";
+  setModalDismiss("modal-stop", false); // 実行中の Esc / backdrop 閉じを防ぐ
   document.getElementById("stop-msg").textContent = "停止中です… (完了するとこのダイアログは自動で閉じます)";
   try {
     const r = await fetch(API + "/api/vllm/stop", {
@@ -1640,6 +1742,7 @@ document.getElementById("stop-go").onclick = async () => {
   if (failed) {
     btn.disabled = false;
     document.getElementById("stop-cancel").style.display = "";
+    setModalDismiss("modal-stop", true);
   }
 };
 </script>
@@ -1691,6 +1794,7 @@ function openRagModal(action) {
   document.getElementById("rag-cancel").style.display = "";
   document.getElementById("rag-go").textContent = action === "start" ? "起動する" : "停止する";
   document.getElementById("rag-go").disabled = false;
+  setModalDismiss("modal-rag", true);
   openModal("modal-rag");
 }
 
@@ -1706,6 +1810,7 @@ document.getElementById("rag-go").onclick = async () => {
   let failed = false;
   btn.disabled = true;
   document.getElementById("rag-cancel").style.display = "none";
+  setModalDismiss("modal-rag", false); // 実行中の Esc / backdrop 閉じを防ぐ
   document.getElementById("rag-msg").textContent = "実行中です… (完了するとこのダイアログは自動で閉じます)";
   try {
     const r = await fetch(API + "/api/rag/" + ragAction, { method: "POST" });
@@ -1728,6 +1833,7 @@ document.getElementById("rag-go").onclick = async () => {
   if (failed) {
     btn.disabled = false;
     document.getElementById("rag-cancel").style.display = "";
+    setModalDismiss("modal-rag", true);
   }
 };
 </script>
@@ -1753,6 +1859,16 @@ document.getElementById("btn-log").onclick = () => {
   openModal("modal-log");
 };
 
+// ログは「ユーザーが末尾付近にいるときだけ」追従させる。2 秒ごとの更新で
+// 遡って読んでいる人を末尾に引き戻さない (該当ガイドなし → 素の JS で実装)
+const BOTTOM_SLACK = 40;
+const atBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK;
+function appendLogText(el, text) {
+  const pinned = atBottom(el); // 更新前の位置で判定する
+  el.textContent = text;
+  if (pinned) el.scrollTop = el.scrollHeight;
+}
+
 async function loadLog() {
   if (!logProfile) return;
   const el = document.getElementById("log-content");
@@ -1774,8 +1890,7 @@ function renderLog() {
   if (logSearchTerm) {
     lines = logLines.filter((l) => l.toLowerCase().includes(logSearchTerm));
   }
-  el.textContent = lines.length ? lines.join("\n") : "(該当するログがありません)";
-  el.scrollTop = el.scrollHeight; // 初期表示・更新後は末尾までスクロール
+  appendLogText(el, lines.length ? lines.join("\n") : "(該当するログがありません)");
 }
 
 document.getElementById("log-refresh").onclick = () => loadLog();
@@ -1841,7 +1956,14 @@ document.getElementById("btn-params").onclick = async () => {
       body.appendChild(tr);
     }
   } catch (e) {
-    body.innerHTML = "<tr><td colspan='2'>読み込み失敗: " + e + "</td></tr>";
+    // 例外文言を HTML に埋め込まない (sanitize-untrusted-html)
+    body.innerHTML = "";
+    const trErr = document.createElement("tr");
+    const tdErr = document.createElement("td");
+    tdErr.colSpan = 2;
+    tdErr.textContent = "読み込み失敗: " + e;
+    trErr.appendChild(tdErr);
+    body.appendChild(trErr);
   }
 };
 
@@ -1901,7 +2023,12 @@ document.getElementById("btn-cline").onclick = async () => {
     renderCline();
   } catch (e) {
     clineData = null;
-    content.innerHTML = "<div class='cline-error'>取得失敗: " + e + "</div>";
+    // 例外文言を HTML に埋め込まない (sanitize-untrusted-html)
+    content.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "cline-error";
+    err.textContent = "取得失敗: " + e;
+    content.appendChild(err);
   }
 };
 
@@ -1978,36 +2105,45 @@ function renderCline() {
   }
 }
 
+// ガイド copy-button 準拠: Async Clipboard API を優先し、書き込みが失敗した場合のみ
+// 非推奨の execCommand にフォールバックする (HTTP/LAN IP 配信では clipboard が使えない)
+function legacyCopy(text) {
+  const field = Object.assign(document.createElement("textarea"), { value: text });
+  field.setAttribute("readonly", "");
+  field.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
+  document.body.append(field);
+  field.select();
+  try { return document.execCommand("copy"); } finally { field.remove(); }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      // 非セキュリティコンテキストなどでは reject する。そのまま legacy 経路へ落ちる
+    }
+  }
+  return legacyCopy(text);
+}
+
 function copyClineText(text, btn) {
   if (!btn.dataset.orig) btn.dataset.orig = btn.textContent;
   const restore = () => {
     btn.textContent = btn.dataset.orig;
     btn.classList.remove("copied");
   };
-  const onSuccess = () => {
-    btn.textContent = "コピー済み";
-    btn.classList.add("copied");
-    setTimeout(restore, 1500);
-  };
-  const onFail = () => {
-    prompt("コピーできませんでした。テキストをコピーしてください:", text);
-    restore();
-  };
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-    // セキュリティコンテキスト(HTTPS/localhost): 最新 Clipboard API
-    navigator.clipboard.writeText(text).then(onSuccess).catch(onFail);
-  } else {
-    // 非セキュリティコンテキスト(HTTP/LAN IP): legacy execCommand フォールバック
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "absolute";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand("copy") ? onSuccess() : onFail();
-    document.body.removeChild(ta);
-  }
+  copyText(text).then((ok) => {
+    if (ok) {
+      btn.textContent = "コピー済み";
+      btn.classList.add("copied");
+      setTimeout(restore, 1500);
+    } else {
+      prompt("コピーできませんでした。テキストをコピーしてください:", text);
+      restore();
+    }
+  });
 }
 
 document.getElementById("cline-copy-all").onclick = () => {
@@ -2060,8 +2196,7 @@ async function pollJob() {
       const text = `[${job.kind} ${job.profile}] ${job.elapsed_s}s 経過\n---\n${lines}\n`;
       for (const logEl of jobLogEls(job.kind)) {
         logEl.style.display = "block";
-        logEl.textContent = text;
-        logEl.scrollTop = logEl.scrollHeight;
+        appendLogText(logEl, text);
       }
     }
   }
@@ -2079,8 +2214,7 @@ async function pollJob() {
   const rlogEl = document.getElementById("rag-log");
   rlogEl.style.display = "block";
   const rlines = (rjob.log_tail || []).filter((l) => l.trim()).join("\n");
-  rlogEl.textContent = `[${rjob.kind}] ${rjob.elapsed_s}s 経過\n---\n${rlines}\n`;
-  rlogEl.scrollTop = rlogEl.scrollHeight;
+  appendLogText(rlogEl, `[${rjob.kind}] ${rjob.elapsed_s}s 経過\n---\n${rlines}\n`);
 }
 
 function onRagJobDone(job) {
@@ -2267,7 +2401,12 @@ function applyPlatform() {
   }
   refreshMainChart();
   poll();
-  setInterval(poll, POLL_MS);
+  startPolling();
+  // タブが裏にある間は polling を止める (efficient-background-processing)。復帰時に即時 1 回引く
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopPolling();
+    else { poll(); startPolling(); }
+  });
 })();
 </script>
 </body>

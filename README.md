@@ -80,6 +80,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [thermal-guard: WSL2 の nvidia-smi が返す小数温度で Illegal number (2026-11-12 / 本機 = Whitebear2026-WSL)](#thermal-guard-wsl2-の-nvidia-smi-が返す小数温度で-illegal-number-2026-11-12--本機--whitebear2026-wsl)
 - [2026-11-12 更新の atom1 反映: int_c は GB10 で恒等・api 側の追加は wsl / maya 専用 (2026-11-12 / 本機 = WhitebearATOM1)](#2026-11-12-更新の-atom1-反映-int_c-は-gb10-で恒等api-側の追加は-wsl--maya-専用-2026-11-12--本機--whitebearatom1)
 - [2026-11-12 更新の atom2 反映: int_c は power モードで未到達・maya / LHM 系は wsl 専用 (2026-11-12 / 本機 = WhitebearATOM2)](#2026-11-12-更新の-atom2-反映-int_c-は-power-モードで未到達・maya--lhm-系は-wsl-専用-2026-11-12--本機--whitebearatom2)
+- [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
 
 ## 目的
 
@@ -5480,3 +5481,132 @@ Prometheus 差分計算は `compose` 経路で無変更）。`/api/rag/status` �
 しておくこと自体に drift 解消の意味がある（将来 `THERMAL_MODE=clock` や groups へ切り替えたときに
 WSL2 と同じ壊れ方をしない）。
 
+## フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)
+
+[Modern Web Guidance](https://github.com/GoogleChrome/modern-web-guidance) のガイドで `front/index.html`
+(単一ファイル・約 2,300 行) を監査し、検出した 14 箇所を修正した。変更は `front/index.html` のみ
+(+264 / -125 行)。`api/` はバックエンドなので対象外 (SKILL.md が backend / infra を明示的に除外)。
+
+### 監査の前提: legacy-scan は 0 件だった (0 件 ≠ モダン)
+
+```
+$ modern-web-guidance legacy-scan front --json
+{ "totalFindings": 0, "activeRuleCount": 35, "activeGuideCount": 33 }
+```
+
+deterministic 規則 (約 2 割) は「**モダン要素を使いかけ残った部分**」しか見ない。実測で確認した境界:
+
+| 入力 | 結果 |
+|---|---|
+| `<dialog>` を使い backdrop クリックを JS で手動実装 | **1 件検出** (file / line / lineContent + `keepWhen`/`dropWhen` 付き) |
+| `div.modal` + `role="dialog"` + `aria-modal` + 手動 focus trap + `Esc` ハンドラの完全レガシー | **0 件** |
+| パスが demo / docs / example / test に該当 | 除外される (`--include-docs-and-tests` で含められる) |
+
+本フロントのモーダルは後者 (完全レガシー) だったので scan を素通りした。以下は `search` / `retrieve`
+による人手照合で検出している。
+
+### 変更内容 (14 箇所)
+
+| # | 領域 | ガイド ID | 変更 |
+|---|---|---|---|
+| 1 | 5 モーダル | `dialog` | `div.modal.hidden` + class 切替 → `<dialog closedby="any" aria-labelledby>`。`.modal-box` 階層を削除し `openModal()=showModal()` / `closeModal()=close()` |
+| 2 | 同上 | `dialog` | `::backdrop` と `:modal` に `overscroll-behavior: contain`。`display` は `[open]` スコープのみ (無条件指定は閉じた状態を上書きする) |
+| 3 | 停止 / RAG モーダル | `dialog` | `setModalDismiss(id, allowed)` でジョブ実行中だけ `closedby="none"` にし、完了・失敗で `"any"` へ復帰 (実行中の Esc / backdrop 閉じを防ぐ) |
+| 4 | Safari 等 | `dialog` | `if (!("closedBy" in HTMLDialogElement.prototype))` で feature detect し `pointerdown`/`pointerup` + 境界判定の light-dismiss を追加 |
+| 5 | `makeModelItem` | `sanitize-untrusted-html` | `div.innerHTML` のテンプレートリテラルに `c.profile` を埋め込んでいた → `createElement` + `textContent` に変更 (profile 名は API 由来) |
+| 6 | params / Cline の失敗表示 | 同上 | 例外オブジェクト `e` を HTML 文字列に連結していた 2 箇所を `textContent` に |
+| 7 | モデル一覧 | `accessibility` | `div` + `onclick` → `<button type="button">`。重み未導入は `disabled`。CSS に `font-family/color/text-align/margin` 補正と `:disabled{opacity:1}` (既存の灰色表現を維持) |
+| 8 | タブ | `tabs` | `role="tablist"`+`aria-label` / `role="tab"`+`aria-selected` / `role="tabpanel"`+`aria-labelledby`、初期状態を HTML に反映。**`aria-controls` は付けない** (ガイド: no screen reader uses it) |
+| 9 | タブ | `tabs` | `display:none` → `hidden="until-found"` (find-in-page からも消さない) + `beforematch` でタブ選択を同期。CSS は `.tab-panel[hidden]{display:none}` |
+| 10 | タブ / 表 | `accessibility` | 矢印 / Home / End の roving tabindex、`.tabs button:focus-visible` と `.table-wrap:focus-visible` に `outline` (従来ファイル全体で 0 件) |
+| 11 | params 表 | `responsive-table` | `<div class="table-wrap" tabindex="0" role="region" aria-labelledby>` で包み、`th` を `position: sticky` + `scope="col"`、`container-type: inline-size` |
+| 12 | 時系列グラフ | `efficient-background-processing` | `.chart-card` に `content-visibility: auto` + `contain-intrinsic-size: auto none auto 246px`、`contentvisibilityautostatechange` を**要素へ直接**登録して `chartSkipped` で `refreshMainChart()` を抑止し、復帰時に `resize()`+再描画 |
+| 13 | polling | 同上 | `startPolling()` / `stopPolling()` を導入し、`visibilitychange` で裏タブの `setInterval` を停止 (復帰時は即時 1 回引く) |
+| 14 | ログ追従 | 該当なし (素の JS) | `appendLogText()` が**更新前**の位置で末尾付近かを判定して追従可否を決める (3 箇所)。2 秒ごとの更新で遡って読んでいる人が末尾に引き戻されなくなる |
+
+### 意図的に外した推奨 (逸脱の記録)
+
+1. **`focusgroup="tablist"` は採用せず素の ARIA を実装** — ガイドの第一推奨だが Chrome 150 限定で、
+   polyfill (`@microsoft/focusgroup-polyfill`) は npm パッケージ追加が必要。本アプリはバンドラ無し・
+   静的ファイル 2 個のみで、LAN 内配信のため外部依存を増やさない判断にした。ガイドの MUST 項目
+   (`aria-selected` / `role=tabpanel` / `aria-labelledby` / `aria-controls` を付けない / 初期状態を HTML
+   に反映 / `hidden="until-found"` / `beforematch`) は全て満たしている。
+2. **表のスタック化 + `::before` ラベル注入はスキップ** — 2 列 (引数 / 値) で可読性が落ちないため過剰と
+   判断。`container-type: inline-size` は入れてあるので、必要になれば CSS だけで拡張できる。
+3. **静的文字列の `innerHTML` (「読み込み中...」等) は未変更** — 非信頼データを含まないため。
+4. **`alert()` / `prompt()` はそのまま** — ネイティブ UI でアクセシビリティ上の欠落がなくスコープ外。
+
+### 検証 (2026-11-16 実測 / 本機 = Whitebear2026-WSL)
+
+- **JS 構文**: インラインスクリプト 7 個を `vm.Script` でパース → **エラー 0**
+- **残存参照**: `modal-box` 0 / `modal hidden` 0 / `tab-panel active` 0。
+  `classList.toggle("active")` は 1 件残るが `#range-btns` の範囲選択ボタン用で
+  `.range-btns button.active` CSS も維持している (別機能なので意図的に未変更)
+
+**headless Chrome 156.0.8078.47 での実描画検証** (probe を `</body>` 直前に注入 → `--dump-dom`):
+
+```json
+{"dialogs":5,"closedby":["any","any","any","any","any"],
+ "ariaModalCount":0,"roleDialogCount":0,
+ "tabs":[{"role":"tab","sel":"true","ti":0},{"role":"tab","sel":"false","ti":-1}],
+ "tablistRole":"tablist",
+ "panels":[{"hidden":"false","role":"tabpanel"},{"hidden":"until-found","role":"tabpanel"}],
+ "opened":true,"isModal":true,"closedBySupported":true,"overscroll":"contain","closedAfter":false,
+ "stopClosedby":"none",
+ "afterSwitch":{"sysHidden":"until-found","modelHidden":"false","modelSel":"true","modelPanelVisible":"block"},
+ "itemTag":"BUTTON","itemType":"button","itemHasImgChild":0,
+ "itemNameText":"<img src=x onerror=\"alert(1)\">","notReadyDisabled":true,
+ "chartContentVisibility":"auto",
+ "tableWrap":{"ti":"0","role":"region","ct":"inline-size"},"stickyTh":"sticky"}
+```
+
+- `itemHasImgChild: 0` かつ `itemNameText` がエスケープ済みテキスト → #5 の XSS 経路が塞がった実証
+  (profile に `<img src=x onerror=...>` を渡して要素が作られないことを確認)
+- `ariaModalCount: 0` / `roleDialogCount: 0` → ガイド「DON'T add `role="dialog"` / `aria-modal` to a native modal」準拠
+- `opened:true` / `isModal:true` / `closedAfter:false` → `showModal()` と `close()` のネイティブ挙動を確認
+- `afterSwitch` → タブ切替で `hidden` と `aria-selected` が両側で反転し、表示側が `block` になること
+- **legacy-scan 再実行: 0 件** (#4 の fallback は `dropWhen` の「The listener is guarded by
+  `"closedBy" in HTMLDialogElement.prototype`」に該当するため)
+
+### 反映手順
+
+**`dgx-spark-api` の再起動は不要**。`main.py` の `index()` はリクエスト毎に `p.read_text()` するため
+編集が即反映される。ETag も変わるため、開いているブラウザは `PAGE_ETAG` 不一致を検知して自動リロードする。
+
+```bash
+curl -s http://127.0.0.1:8090/ | grep -c '<dialog'                 # 7 (要素 5 + コメント内 2)
+curl -s http://127.0.0.1:8090/ | grep -c 'closedby="any"'          # 5
+curl -s http://127.0.0.1:8090/ | grep -o 'const PAGE_ETAG = "[^"]*"'
+curl -s http://127.0.0.1:8090/api/page-version                     # 上の ETag と一致すること
+```
+
+`grep -c` は**行数**を数える点に注意。`'<dialog class="modal"'` で絞ると 4 になる (`modal-log` は
+`class="modal log-box"` なので閉じ引用符付きパターンに一致しない)。要素実数は
+`grep -o '<dialog' | wc -l` で、コメント 2 行を差し引く。
+
+ブラウザでの手動確認項目:
+
+- 各モーダルで `Esc` が効く / backdrop クリックで閉じる / 閉じた後フォーカスが起動ボタンに戻る
+- モデル停止の実行中に `Esc` で閉じれない (`closedby="none"`)
+- Tab キーでヘッダに入り、矢印キーでタブが切り替わる
+- `Ctrl+F` で「RAG」を検索するとモデルタブ (非選択) の内容がヒットし、タブが自動選択される
+- モデル一覧をキーボード (Tab + Enter) で選択できる。重み未導入は `disabled` で素通りする
+- ログモーダルで上にスクロールしたまま 2 秒待っても末尾に引き戻されない
+- 「Cline設定値」のコピーが LAN IP (HTTP = 非セキュリティコンテキスト) 配信でも動作する
+
+### 元に戻す
+
+```bash
+git revert <commit>                      # front + docs の 1 コミットなので revert 1 回で戻る
+git checkout 7879623 -- front/index.html # front だけ差し戻す場合
+```
+
+### 既知の未対応・注意
+
+- **Safari 未検証** — `closedby` 未対応は #4 の JS fallback でカバーする設計だが、本機に Safari がなく
+  実機確認していない。`hidden="until-found"` も Safari 未対応 (ガイドは「enhancement として扱い
+  polyfill しない」と明記 → 未対応環境では単に非表示になり find-in-page にも出ない)
+- `content-visibility: auto` は Chrome / Edge / Firefox 対応。未対応環境では効かないだけで害はない
+- `contain-intrinsic-size` の 246px は `.cwrap` 232px + padding の実測値。**グラフ高さを変えたら要更新**
+- 表は `container-type` 指定のみで、ブレークポイントの実際の分岐は未実装 (上記 2. の判断)
+- `legacy-scan` は約 2 割しか見ない。**0 件を「モダン」と解釈しない**こと (上記の実測表参照)
