@@ -594,6 +594,27 @@ def _hipfire_models_info(port: int) -> dict:
     return out
 
 
+def _clef_models_info(port: int) -> dict:
+    """Clef-Flash（decision モデル）の /v1/models から n_ctx / images / decisions を読む。
+
+    llama-server なので形式は hipfire ではなく llama.cpp と同じ（meta.n_ctx と
+    architecture.input_modalities / output_modalities を返す）。
+    output_modalities が ["decisions"] のとき生成不可＝/v1/systemone 専用。
+    """
+    txt = _http_get(f"http://localhost:{port}/v1/models", 5)
+    if not txt:
+        return {}
+    out: dict = {}
+    m = re.search(r'"n_ctx"\s*:\s*(\d+)', txt)
+    if m:
+        out["n_ctx"] = int(m.group(1))
+    if re.search(r'"input_modalities"\s*:\s*\[[^\]]*"image"', txt):
+        out["images"] = True
+    if re.search(r'"output_modalities"\s*:\s*\[[^\]]*"decisions"', txt):
+        out["decisions"] = True
+    return out
+
+
 def _strata_server_metrics(port: int) -> dict:
     """Strata の /metrics (Bearer 必須・JSON。Prometheus 形式ではない) をマッピングする。
 
@@ -974,6 +995,27 @@ def _llamacpp_metrics(pm: dict, base: str) -> dict:
         m["prompt_tokens_per_s"] = pm["llamacpp:prompt_tokens_seconds"]
     if "llamacpp:predicted_tokens_seconds" in pm:
         m["generation_tokens_per_s"] = pm["llamacpp:predicted_tokens_seconds"]
+    return m
+
+
+# ---------------------------------------------------------------- Clef-Flash (clef)
+# decision モデルは生成しないので predicted 系は常に 0 が正しい値。llama.cpp の
+# 瞬时ゲージ (llamacpp:prompt_tokens_seconds) は prefill 中しか立たず idle では 0 に
+# 落ちるため、累計 counter から算出した prefill 平均をフォールバックにする
+# （hipfire と同じ方針。README「hipfire の prefill/decode 表示」参照）。
+
+
+def _clef_metrics(pm: dict, base: str) -> dict:
+    """Clef-Flash のメトリクス。llamacpp マッピング + prefill 平均のフォールバック。"""
+    m = _llamacpp_metrics(pm, base)
+    pt = pm.get("llamacpp:prompt_tokens_total")
+    st = pm.get("llamacpp:prompt_seconds_total")
+    if pt and st:
+        avg = pt / st
+        if not m.get("prompt_tokens_per_s"):
+            m["prompt_tokens_per_s"] = avg
+    # decision モデルは出力トークンを持たない（usage.output_tokens は常に 0）
+    m["generation_tokens_per_s"] = 0.0
     return m
 
 
@@ -1650,7 +1692,11 @@ def get_status() -> dict:
         # llama.cpp。--metrics 有効なら pm、無効なら pm={} で /slots のみから取得
         _reset_token_state()
         _reset_tabby_state()
-        active["metrics"] = _llamacpp_metrics(pm, base)
+        # clef は decision モデル（生成しない）。idle でも prefill 平均を出す
+        if running_profile == "clef":
+            active["metrics"] = _clef_metrics(pm, base)
+        else:
+            active["metrics"] = _llamacpp_metrics(pm, base)
     elif kind == "tabby":
         # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析。
         # ログ解析なのでモデルの HTTP が塞がっているときも値が取れる (混雑時に強い)
@@ -2198,6 +2244,21 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 1.0,  # registry の recommended_settings（top_p 0.95 / top_k 20）
     },
+    # --- Clef-Flash (clef・atom2 / 2026-11-21 追加) ---------------------------
+    # **decision モデル（生成しない）**。/v1/chat/completions は仕様上 501 を返すため、
+    # Cline の chat 経路では使えない（get_cline_config が decision_only=true を返す）。
+    # context は /v1/models の n_ctx (262,144) ではなく **--ubatch-size が実効上限**:
+    # プロンプト全体を 1 バッチで評価する必要があるためで、実測 15,142 tok 成功 /
+    # 18,142 tok で 500（"increase the physical batch size (current batch size: 16384)"）。
+    # 公式 transformers レシピの encode_record(max_length=16384) と同じ値。
+    # 生成しないので max_output は 0、temperature も無意味（0.0 を返す）
+    "clef": {
+        "images": True,  # 動的: --mmproj / /v1/models の input_modalities
+        "context_max": 16384,  # 動的: compose の -ub（--ctx-size 262144 は実効外）
+        "max_output_recommended": 0,
+        "max_output_max": 0,
+        "temperature": 0.0,
+    },
 }
 
 
@@ -2360,6 +2421,22 @@ def get_cline_config() -> dict:
             context_max = hi["n_ctx"]
         if "images" in hi:
             images = hi["images"]
+    # Clef-Flash は decision モデル（生成しない）。compose の --ctx-size 262144 は張れるが、
+    # プロンプト全体を 1 バッチで評価するため **実効上限は --ubatch-size**。
+    # /v1/chat/completions は 501 なので decision_only を返し、front に注記を出す
+    decision_only = False
+    reasoning_options = ["None", "Low", "Medium", "High", "XHigh"]
+    if profile == "clef":
+        ci = _clef_models_info(port)
+        if "images" in ci:
+            images = ci["images"]
+        decision_only = bool(ci.get("decisions"))
+        ub = _command_flag_value(service, ["-ub", "--ubatch-size"])
+        if ub and ub.isdigit():
+            context_recommended = int(ub)
+            context_max = int(ub)
+        # 生成しないので reasoning 指定は存在しない（出力トークンは table の 0）
+        reasoning_options = ["None"]
     max_output_recommended = table.get("max_output_recommended", 8192)
     max_output_max = table.get("max_output_max", 32768)
     if temperature is None:
@@ -2376,5 +2453,8 @@ def get_cline_config() -> dict:
         "max_output_recommended": max_output_recommended,
         "max_output_max": max_output_max,
         "temperature": temperature,
-        "reasoning_effort_options": ["None", "Low", "Medium", "High", "XHigh"],
+        "reasoning_effort_options": reasoning_options,
+        # decision モデル（clef）は /v1/systemone 専用で chat/completions が 501。
+        # front は true のとき「Cline の chat には使えない」注記を出す
+        "decision_only": decision_only,
     }

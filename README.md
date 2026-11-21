@@ -81,6 +81,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-12 更新の atom1 反映: int_c は GB10 で恒等・api 側の追加は wsl / maya 専用 (2026-11-12 / 本機 = WhitebearATOM1)](#2026-11-12-更新の-atom1-反映-int_c-は-gb10-で恒等api-側の追加は-wsl--maya-専用-2026-11-12--本機--whitebearatom1)
 - [2026-11-12 更新の atom2 反映: int_c は power モードで未到達・maya / LHM 系は wsl 専用 (2026-11-12 / 本機 = WhitebearATOM2)](#2026-11-12-更新の-atom2-反映-int_c-は-power-モードで未到達・maya--lhm-系は-wsl-専用-2026-11-12--本機--whitebearatom2)
 - [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
+- [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
 
 ## 目的
 
@@ -534,6 +535,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 | 同上(Magnitude / magn) | `~/.magnitude/serving-usage.sqlite` (usage 表) + GPU 負荷から実行中を推定 (`/metrics` 無し、実装メモ 2026-10-06) |
 | 同上(Strata / strata・atom2 compose) | `GET /metrics` (**JSON 形式・Bearer key 必須**。Prometheus ではない) + `/health` (key 不要・Cline 設定の max_context/images 用)。実装メモ 2026-10-28 |
 | 同上(hipfire / hipfire・atom2 compose) | `GET /metrics` (**Prometheus 形式・key 不要**。`hipfire_*` 系列は瞬时値を持たずリクエスト単位の histogram `sum/count` 累計のみ → 前回ポーリングとの差分で直近平均を算出) + `/v1/models` の `meta.n_ctx` / `input_modalities` (Cline 設定用)。実装メモ 2026-11-07 |
+| 同上(Clef-Flash / clef・atom2 compose) | `GET /metrics` は llama.cpp と同じ `llamacpp:*` 系列（ただし `*_tokens_seconds` は瞬时値で idle では 0 → `prompt_tokens_total ÷ prompt_seconds_total` の prefill 平均へフォールバック。`tokens_predicted_total` は**常に 0**）。`/v1/models` の `output_modalities=["decisions"]` で decision 専用と判別し、Cline 設定の context は `--ctx-size` でなく **`-ub`（実効上限 16384）** を返す。実装メモ 2026-11-21 |
 | 同上(modelctl / WSL2) | TabbyAPI=起動ログ解析、Strata=`/metrics/prometheus`(`llamacpp:*` 同名系列)+`/slots`+`[strata] done:` ログ、llama.cpp=`/slots`+`print_timing` ログ、ExLlamaV3=`/health` のカウンタ差分 (実装メモ 2026-10-21) |
 | 直近ログ | `docker logs --tail` (Magnitude は `journalctl --user -u magn-headless.service`、modelctl は `logs/ctl-*.log` 等のログファイル末尾) |
 | ホストへの影響(統合メモリ・GPU負荷) | ホストメトリクス(調査結果参照) |
@@ -4545,6 +4547,70 @@ prefill 19828 で `max_tokens=242315` は OK / `242316` は 400 = 262144−19828
 （`None/Low/Medium/High/XHigh`）で、hipfire の Qwen3.8 が実際に受け付けるのは `low` /
 `medium` / `xhigh`（`High` は drop+warn）。hipfire の `/health` は `reasoning_efforts` を
 返すので、必要ならここも動的化できる（今回は未実施）
+
+## Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）
+
+**経緯**: 2026-11-21 に atom2 へ **Clef-Flash**（Cloudflare が Qwen3.5-9B を post-train した
+decision モデル。llama.cpp **b12180 Vulkan** + ggml-org 公式 GGUF **BF16**、compose
+プロファイル `clef`、ホストポート **8014**）を追加した（`~/LLM` 側）。一覧・切替・監視は
+`_load_profiles()` の compose 動的パースと `_is_llamacpp()`（`owned_by: "llamacpp"`）で
+**そのまま自動追従**したが、Cline 設定値が生成モデル前提のままだったため `api/vllm.py` を追加した。
+
+**clef が通常の llama.cpp と違う点（本機実測）**:
+
+| 項目 | 値 |
+|---|---|
+| `/v1/models` の `architecture.output_modalities` | **`["decisions"]`**（生成しない。`input_modalities` は `text/image/video`） |
+| `/v1/chat/completions` と `/v1/completions` | **501**（"This model is a decision model without text generation, use /v1/systemone"） |
+| 判定 API | `POST /v1/systemone`（state + questions → 各 option の確率。`usage.output_tokens` は常に 0） |
+| `meta.n_ctx` | 262,144（張れるが…） |
+| **実効の入力上限** | **`--ubatch-size` = 16,384 tok**（プロンプト全体を 1 バッチで評価するため。15,142 tok 成功 / 18,142 tok で 500） |
+| `/metrics` | llama.cpp と同じ `llamacpp:*`。ただし `prompt_tokens_seconds` / `predicted_tokens_seconds` は瞬时値で idle では 0、`tokens_predicted_total` は**常に 0** |
+
+**修正前の誤情報**（`GET /api/vllm/cline`）: `context_recommended / context_max = 262144`、
+`max_output_recommended = 8192` / `max_output_max = 32768`、`temperature = 0.6`、
+`reasoning_effort_options = None..XHigh` — いずれも decision モデルでは成立しない。
+とくに 262144 を設定どおりに使うと入力は 500 で拒否される。
+
+**実装**（`api/vllm.py` + `front/index.html` の注記 1 行）:
+
+- `_clef_models_info(port)`: `/v1/models` から `meta.n_ctx` / `input_modalities` の image /
+  **`output_modalities` の `decisions`** を読む（hipfire の `_hipfire_models_info()` と同じ流儀）
+- `CLINE_MODEL_TABLE["clef"]`: `images: true` / `context_max: 16384` / `max_output_*: 0` /
+  `temperature: 0.0`（静的フォールバック）
+- `get_cline_config()`: clef 分岐で **compose の `-ub`（`--ubatch-size`）を動的取得**して
+  `context_recommended` / `context_max` を上書き（`--ctx-size 262144` に優先させる）。
+  `decision_only: true` を返し、`reasoning_effort_options` は `["None"]` に縮退
+  （`decision_only` は新規キー。既存プロファイルは常に false で front 表示は不変）
+- `_clef_metrics(pm, base)`: `_llamacpp_metrics()` をラップし、瞬时ゲージが 0 のとき
+  累計 counter の `llamacpp:prompt_tokens_total ÷ llamacpp:prompt_seconds_total`（prefill 平均）を
+  フォールバックにする（hipfire と同じ方針）。`generation_tokens_per_s` は 0 固定（生成しない）
+- `get_status()`: `kind == "llamacpp"` の中で `running_profile == "clef"` のときだけ
+  `_clef_metrics()` を使う（**qwen38gguf の挙動は不変**）
+- `front/index.html`: `decision_only` が true のとき MODEL CONFIGURATION の先頭に
+  「decision（/v1/systemone 専用・生成しないため Cline の chat には使えない）」を 1 行追加し、
+  「すべてコピー」のテキストにも同じ注記を入れる
+
+**検証**（実 HTTP・clef 稼働中。`bash api/restart_service.sh` 相当で API 再起動後）:
+
+- `GET /api/vllm/cline` → `context_recommended=16384` / `context_max=16384` /
+  `max_output_recommended=0` / `max_output_max=0` / `temperature=0.0` /
+  `reasoning_effort_options=["None"]` / **`decision_only=true`** / `supports_images=true` /
+  `model_id=clef-flash` / `base_url=http://whitebearatom2.local:8014/v1/`
+- `GET /api/vllm/status`（idle）→ `prompt_tokens_per_s=1622.17`（counter 由来の prefill 平均で、
+  実測 15,142 tok ÷ 8.93 s = 1,696 T/s と整合。空欄にならない）/ `generation_tokens_per_s=0.0` /
+  `kv_cache_usage_pct=0.058`（`/slots` の `n_ctx` 262,144 基準。decision は KV をほぼ使わない）
+- `GET /api/vllm/params?profile=clef` → `--model` / `--mmproj` / `--ctx-size 262144` / `-b 16384` /
+  `-ub 16384` / `--parallel 1` / `--metrics` を全件表示（`EDITABLE_FLAGS` 外なので editable=false）
+- `containers` に `clef`（`llama-clef-flash`）が 9 番目として現れ、`last_active=clef` も追従。
+  `journalctl -u dgx-spark-api` に traceback 無し
+
+**未対応・留意**: `/api/vllm/params` の編集対象（`EDITABLE_FLAGS`）に `-ub` は含めない。
+ub を上げる＝実効入力上限の引き上げで VRAM と直結するため、compose を直接編集させる。
+判定を使いたい場合は `POST /v1/systemone` を直接叩く。**使い方の資料（リクエスト／
+レスポンス仕様・日本語運用の実測・エラー一覧）は `~/LLM/compose/CLEF-FLASH.md`、
+リクエスト例の実物は `~/LLM/compose/systemone_test.py` を参照**。
+
 ## Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)
 
 **背景**: `~/llm/compose` 側に 2026-11-07 の Qwen3-Coder-Next（EXL3 6.0bpw・8020 / NVFP4-GB10・8021）と
