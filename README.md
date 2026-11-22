@@ -4643,9 +4643,12 @@ ggml-org 公式 **BF16** 2 ファイル 19.09GB × `/v1/systemone` 専用・**po
   境界挙動も一致（chat→501、24,142 tok→500 "increase the physical batch size (current batch size: 16384)"）
 - VRAM 実測 23.9GB / 32.6GB（エンジン分 ≈21GB。atom2 の 20.6GB と整合）
 
-**未実施**: `dgx-spark-api` のサービス再起動（sudo パスワード要）。反映には `bash api/restart_service.sh`
-を手動実行すること（上記検証は同一コードを対話実行したもので、稼働中サービスは旧コードのまま）。
-WSL 側の詳細は `~/llm/clef/README.md`。
+**反映済み**（2026-11-22・ユーザーにより `bash api/restart_service.sh` 実行確認）:
+再起動後の実 HTTP で `/api/vllm/cline` → `decision_only true` / `context 16384/16384` /
+`max_output 0/0` / `temperature 0.0` / `reasoning ["None"]`、`/api/vllm/status` →
+`active=clef` / `prompt_tokens_per_s 1377.5`（steady-state）/ `generation_tokens_per_s 0` を確認。
+なお A/B ベンチ（WSL vs Atom2・精度 maxΔ 0.0009 / prefill 4.4〜5.5 倍）の記録は
+`~/llm/clef/bench/2026-11-22-ab-atom2/`。WSL 側の詳細は `~/llm/clef/README.md`。
 
 ## Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)
 
