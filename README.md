@@ -82,6 +82,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-12 更新の atom2 反映: int_c は power モードで未到達・maya / LHM 系は wsl 専用 (2026-11-12 / 本機 = WhitebearATOM2)](#2026-11-12-更新の-atom2-反映-int_c-は-power-モードで未到達・maya--lhm-系は-wsl-専用-2026-11-12--本機--whitebearatom2)
 - [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
 - [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
+- [Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）](#clef-flash-の-wsl-追加-clefmodelctl-への追従2026-11-22--本機--whitebear2026-wsl2)
 
 ## 目的
 
@@ -4610,6 +4611,41 @@ ub を上げる＝実効入力上限の引き上げで VRAM と直結するた�
 判定を使いたい場合は `POST /v1/systemone` を直接叩く。**使い方の資料（リクエスト／
 レスポンス仕様・日本語運用の実測・エラー一覧）は `~/LLM/compose/CLEF-FLASH.md`、
 リクエスト例の実物は `~/LLM/compose/systemone_test.py` を参照**。
+
+## Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）
+
+**背景**: 2026-11-22 に WSL 側 `~/llm` へ **clef モード**を追加した（llama.cpp **b12180 CUDA ビルド** ×
+ggml-org 公式 **BF16** 2 ファイル 19.09GB × `/v1/systemone` 専用・**port 8092**。
+8090/8091 は dgx-spark-api と mirrored networking の既定応答が占有しているため 8092）。
+構成・検証基準は atom2 の `clef_flash`（上の 2026-11-21 節）に準拠。
+一覧・切替・稼働判定は modelctl の動的取得で**自動追従**（`bridge list` に `clef 8092 llamacpp` 出現）。
+
+**DGXSparkUtil 側の追加実装（本節・計 3 箇所）**:
+
+- `api/wsl_modelctl_bridge.sh` `_mc_engine_of`: `clef) → llamacpp`（1 行。無いと engine=unknown でメトリクス経路が死ぬ）
+- `api/vllm.py` `_cline_config_modelctl()`: `profile == "clef"` 分岐で `decision_only`
+  （`/v1/models` の `output_modalities=["decisions"]` から実判別）+ `reasoning_effort_options=["None"]` を返す
+  （a2081c8 の compose 分岐の modelctl 版）。context は `~/llm` 側の `_mc_mode_ctx_conf clef` が
+  **kit/.env の UB（16384）** を返す設計のため、compose 版のような `-ub` パースは不要
+- `api/vllm.py` `_modelctl_metrics()`: engine=llamacpp は従来**ログ解析**（`_llamacpp_log_metrics`）で、
+  生成統計の出ない clef では prompt/generation が空になった。`profile == "clef"` のときだけ
+  `/metrics` を取って compose 版と同じ `_clef_metrics()`（counter 平均フォールバック + generation 0 固定）へ。
+  **llmjp のログ解析経路は不変**
+
+**検証**（2026-11-22・clef 稼働中に API と同一コードパスで実 HTTP）:
+
+- `get_cline_config()` → `context 16384/16384` / `max_output 0/0` / `temperature 0.0` /
+  `reasoning ["None"]` / `decision_only true` / `model_id clef-flash` / `base_url http://192.168.0.26:8092/v1/`
+- `get_status().active.metrics` → `prompt_tokens_per_s 534.5`（counter 平均・初回 cold 混在値）/
+  `generation_tokens_per_s 0.0` / `kv_cache_usage_pct` 追従
+- **CUDA vs Vulkan 経路の確率同等性**（Atom2 BF16 基準との突合）: France 0.9835（atom2 0.9836）/
+  billing 0.9770（0.9769）/ overdue 0.9729（0.9730）/ 合成請求書画像 invoice 0.9743（0.9640・別画像）。
+  境界挙動も一致（chat→501、24,142 tok→500 "increase the physical batch size (current batch size: 16384)"）
+- VRAM 実測 23.9GB / 32.6GB（エンジン分 ≈21GB。atom2 の 20.6GB と整合）
+
+**未実施**: `dgx-spark-api` のサービス再起動（sudo パスワード要）。反映には `bash api/restart_service.sh`
+を手動実行すること（上記検証は同一コードを対話実行したもので、稼働中サービスは旧コードのまま）。
+WSL 側の詳細は `~/llm/clef/README.md`。
 
 ## Qwen3-Coder-Next と Ripple-65B Preview の追加 (6 プロファイル) への追従 (2026-11-09 / 本機 = WhitebearATOM1)
 

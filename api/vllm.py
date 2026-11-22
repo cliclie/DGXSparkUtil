@@ -1364,6 +1364,13 @@ def _modelctl_metrics(profile: str, info: dict, base: str) -> dict:
     if engine == "llamacpp":
         _reset_token_state()
         _reset_tabby_state()
+        # clef は decision モデル（llama-server --metrics 起動）。ログ解析では
+        # 生成統計が出ないため、compose 版 get_status と同じ _clef_metrics
+        # （llamacpp マッピング + idle 時 prompt counter 平均フォールバック）を使う
+        if profile == "clef":
+            mt = _http_get(f"{base}/metrics", timeout=5)
+            pm = _parse_vllm_metrics(mt) if mt else {}
+            return _clef_metrics(pm, base)
         return _llamacpp_log_metrics(base, modelctl.read_log_text(log_path, 400))
     if engine == "exllama":
         _reset_token_state()
@@ -2313,6 +2320,15 @@ def _cline_config_modelctl(active: dict) -> dict:
     except ValueError:
         max_out = None
     table = CLINE_MODEL_TABLE.get(profile, {})
+    # Clef-Flash (clef・decision モデル): /v1/chat/completions は 501（生成しない）。
+    # compose 分岐と同じく /v1/models の output_modalities=["decisions"] で判別し
+    # decision_only を返す（front が注記を表示）。context は model-ctl.sh 側が
+    # kit/.env の UB（16,384＝実効入力上限）を返すため、追加パースは不要。
+    decision_only = False
+    reasoning_options = ["None", "Low", "Medium", "High", "XHigh"]
+    if profile == "clef":
+        decision_only = bool(_clef_models_info(port).get("decisions"))
+        reasoning_options = ["None"]
     return {
         "api_provider": "OpenAI Compatible",
         "base_url": f"http://{host}:{port}/v1/" if port else None,
@@ -2324,7 +2340,8 @@ def _cline_config_modelctl(active: dict) -> dict:
         "max_output_recommended": max_out or table.get("max_output_recommended", 8192),
         "max_output_max": table.get("max_output_max", 32768),
         "temperature": table.get("temperature", 0.6),
-        "reasoning_effort_options": ["None", "Low", "Medium", "High", "XHigh"],
+        "reasoning_effort_options": reasoning_options,
+        "decision_only": decision_only,
     }
 
 
