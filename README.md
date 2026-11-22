@@ -83,6 +83,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
 - [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
 - [Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）](#clef-flash-の-wsl-追加-clefmodelctl-への追従2026-11-22--本機--whitebear2026-wsl2)
+- [モデルタブの Cline設定値コピーが inert で無音失敗 (2026-11-23 / 本機 = WhitebearATOM2)](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
 
 ## 目的
 
@@ -610,6 +611,9 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
   Temperature / Reasoning Effort)
 - 各値をコピー可能(個別コピー + 「すべてコピー」)。推奨/最大値(Context Windows Size /
   Max Output Tokens)は数値を個別コピーでき、Reasoning Effort も各選択肢を個別コピーできる
+- コピーは LAN IP(平文 HTTP = 非セキュリティコンテキスト)配信でも動作する。`<dialog>` の
+  `showModal()` は背後を inert にするため、`execCommand` フォールバックの一時 textarea は
+  **モーダル内**に置く(body 直下だと空をコピーして成功扱いになる。実装メモ 2026-11-23)
 - データ源: 動的取得(モデル名・ポート・hostname・コンテキスト・温度・画像対応) +
   モデル別静的推奨値テーブル(`api/vllm.py` の `CLINE_MODEL_TABLE`)
 
@@ -1095,6 +1099,10 @@ cd /home/cliclie/DGXSparkUtil/api
   - 反映: ブラウザのリロードのみで反映(サーバ/モデル再起動不要)。
   - 検証: LAN PC から `http://192.168.0.110:8080` でCline設定値モーダルを開き、
     個別コピー・すべてコピーの両方でクリップボードに反映されることを確認済み。
+  - **※ 2026-11-16 の `<dialog>` 化 (`ecafc08`) でこのフォールバックは無効化されていた**（`showModal()` が
+    `document.body` 直下を inert にするため、一時 textarea がフォーカスも選択も受け付けず、
+    `execCommand('copy')` が**空をコピーして `true` を返す**＝画面だけ「コピー済み」になった）。
+    2026-11-23 に修正 → [モデルタブの Cline設定値コピーが inert で無音失敗](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
 
 ## 実装メモ(2026-09-25)
 
@@ -5698,6 +5706,10 @@ curl -s http://127.0.0.1:8090/api/page-version                     # 上の ETag
 - モデル一覧をキーボード (Tab + Enter) で選択できる。重み未導入は `disabled` で素通りする
 - ログモーダルで上にスクロールしたまま 2 秒待っても末尾に引き戻されない
 - 「Cline設定値」のコピーが LAN IP (HTTP = 非セキュリティコンテキスト) 配信でも動作する
+  → **このときは実測しておらず、実際には動いていなかった**。`showModal()` の背後 inert で
+  `document.body` の一時 textarea が選択されず、`execCommand('copy')` が空をコピーして `true` を
+  返していた（画面だけ「コピー済み」）。2026-11-23 に CDP で paste 検証のうえ修正
+  → [モデルタブの Cline設定値コピーが inert で無音失敗](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
 
 ### 元に戻す
 
@@ -5715,3 +5727,51 @@ git checkout 7879623 -- front/index.html # front だけ差し戻す場合
 - `contain-intrinsic-size` の 246px は `.cwrap` 232px + padding の実測値。**グラフ高さを変えたら要更新**
 - 表は `container-type` 指定のみで、ブレークポイントの実際の分岐は未実装 (上記 2. の判断)
 - `legacy-scan` は約 2 割しか見ない。**0 件を「モダン」と解釈しない**こと (上記の実測表参照)
+
+## モデルタブの Cline設定値コピーが inert で無音失敗 (2026-11-23 / 本機 = WhitebearATOM2)
+
+**症状** (2026-11-23 報告): atom2 のモデルタブ →「Cline設定値」モーダルでコピーボタンを押すと
+ボタンは「コピー済み」に変わるが、**クリップボードに何も入らない**。WSL 側 (Whitebear2026-WSL) では出来た。
+
+**原因**: 2026-11-16 のモダナイズ (`ecafc08`) で 5 モーダルが `<div class="modal hidden">` から
+ネイティブ `<dialog>` + `showModal()` になった。`showModal()` は**背後 (body 直下) を inert** にする
+ため、`legacyCopy()` が `document.body` に追加していた一時 textarea はフォーカスもテキスト選択も
+受け付けない。その状態で `document.execCommand('copy')` を呼ぶと **コピー対象が空なのに `true` が返る**
+ので、`copyClineText()` は成功と誤判定して「コピー済み」表示になっていた (2026-09-19 の
+非セキュリティコンテキスト対応は dialog 化で無効化されていた)。
+`legacyCopy` は `navigator.clipboard` が使えない**HTTP 配信だけの経路**なので、
+`http://localhost` で開いていた WSL 側は Clipboard API 側 (`writeText` 成功) を通り、症状が出なかった。
+
+**修正** (`front/index.html`): `legacyCopy(text, host)` / `copyText(text, host)` に host を追加し、
+`copyClineText()` が `btn.closest("dialog")` (= コピーボタンと同じモーダル内 = inert にならない側)
+を渡すようにした。あわせて
+
+- `field.focus()` を追加 (Safari 等で execCommand にフォーカスが必要)
+- `document.activeElement !== field` のとき (= まだ inert 内で選択が文書に反映されないとき) は
+  **execCommand を呼ばず `false` を返す** → 従来どおり `prompt()` でテキストを提示する
+- 一時要素除去後に `prev.focus()` で元のボタンへフォーカスを戻す (モーダルの focus 閉じ込めを維持)
+
+**検証 (2026-11-23 実測)** — headless Chrome 158 を CDP で実操作 (マウスクリック + `Ctrl+V`)。
+クリップボードの実体は「モーダル内に作った textarea に paste して値を読む」で確認した。
+CDP クライアントは websocket-client 未導入のため素の socket で実装 (`/tmp/cdp_copy_check.py`)。
+
+| URL | isSecureContext | navigator.clipboard | ボタン文言 | paste 結果 (修正前) | paste 結果 (修正後) |
+|---|---|---|---|---|---|
+| `http://192.168.0.37:8080/` (LAN IP) | false | なし → legacy 経路 | コピー済み | **空** (`execCommand` は `copy:true`) | `OpenAI Compatible` / すべてコピーは 12 行全文 |
+| `http://127.0.0.1:8080/` (localhost) | true | あり → Clipboard API | コピー済み | (修正対象外) | `OpenAI Compatible` / 全文 (回帰なし) |
+
+- 修正前の LAN IP 経路だけ `execResults:["copy:true","copy:true"]` なのに paste が空 → 原因と一致
+- `promptHits:0` (修正後は失敗時のフォールバックが不要)、モーダルは `open` / `:modal` のまま
+- 稼働モデルは `clef-flash` (`/api/vllm/cline` は `decision_only=true`・ctx 16384 を正常返却)
+
+**反映手順**: **`dgx-spark-api` の再起動は不要** (リクエスト毎に `front/index.html` を読む)。
+ブラウザは `PAGE_ETAG` 不一致で自動リロードされるが、表示中なら手動リロードでよい。
+
+```bash
+curl -s http://127.0.0.1:8080/ | grep -c 'closest("dialog")'   # 1
+```
+
+**WSL 側 (Whitebear2026-WSL) への注意**: 同じ `ecafc08` を反映済みなら、LAN IP (HTTP) で開いたときは
+**同じ症状になる** (localhost 配信では出ない)。本修正を同じコミットで反映すること。
+
+**元に戻す**: `git checkout a2081c8 -- front/index.html` (front のみ)。モーダル表示・API は無変更。

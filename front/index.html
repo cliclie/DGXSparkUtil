@@ -2112,16 +2112,31 @@ function renderCline() {
 
 // ガイド copy-button 準拠: Async Clipboard API を優先し、書き込みが失敗した場合のみ
 // 非推奨の execCommand にフォールバックする (HTTP/LAN IP 配信では clipboard が使えない)
-function legacyCopy(text) {
+//
+// host: 一時 textarea を追加する要素。**ネイティブ <dialog> が showModal() で開いている間、
+//   document.body 直下の要素は背後 inert になり、フォーカスもテキスト選択も受け付けない。
+//   そのまま execCommand('copy') を呼ぶと「コピー対象は空」なのに true が返り、
+//   画面だけ「コピー済み」になってクリップボードに何も入らない** (2026-11-16 の dialog 化で発生)。
+//   よって呼び出し側 (コピーボタンと同じモーダル内) を必ず渡す。
+function legacyCopy(text, host) {
   const field = Object.assign(document.createElement("textarea"), { value: text });
   field.setAttribute("readonly", "");
   field.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
-  document.body.append(field);
+  (host || document.body).append(field);
+  const prev = document.activeElement;
+  field.focus();
   field.select();
-  try { return document.execCommand("copy"); } finally { field.remove(); }
+  try {
+    // inert 内だと focus が当たらない (= 選択が文書に反映されない)。その場合は失敗を返す
+    if (document.activeElement !== field) return false;
+    return document.execCommand("copy");
+  } finally {
+    field.remove();
+    if (prev && typeof prev.focus === "function") prev.focus();
+  }
 }
 
-async function copyText(text) {
+async function copyText(text, host) {
   if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
     try {
       await navigator.clipboard.writeText(text);
@@ -2130,7 +2145,7 @@ async function copyText(text) {
       // 非セキュリティコンテキストなどでは reject する。そのまま legacy 経路へ落ちる
     }
   }
-  return legacyCopy(text);
+  return legacyCopy(text, host);
 }
 
 function copyClineText(text, btn) {
@@ -2139,7 +2154,8 @@ function copyClineText(text, btn) {
     btn.textContent = btn.dataset.orig;
     btn.classList.remove("copied");
   };
-  copyText(text).then((ok) => {
+  // 一時要素はコピーボタンと同じ <dialog> 内 (inert にならない側) に置く
+  copyText(text, btn.closest("dialog")).then((ok) => {
     if (ok) {
       btn.textContent = "コピー済み";
       btn.classList.add("copied");
