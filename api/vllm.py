@@ -2093,6 +2093,17 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
+    # Strata strataI2（WSL modelctl 専用モード・2026-11-23）: Inkling-2-Mini SQ-20。
+    # /health images: true（Inkling-2-Mini-Vision.strata 0.64GB を常備）。context は
+    # config 32768（recommended は params の context_length が優先）／ネイティブ上限 1M。
+    # 思考 effort は Strata 側 REASONING_EFFORTS=("none",)（HAS_THINKING=False）。
+    "strataI2": {
+        "images": True,
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
     "qwen38sglang": {
         "images": False,
         "context_max": 262144,
@@ -2328,6 +2339,9 @@ def _cline_config_modelctl(active: dict) -> dict:
     reasoning_options = ["None", "Low", "Medium", "High", "XHigh"]
     if profile == "clef":
         decision_only = bool(_clef_models_info(port).get("decisions"))
+        reasoning_options = ["None"]
+    if profile == "strataI2":
+        # Inkling-2-Mini: Strata 側が REASONING_EFFORTS=("none",)（思考トグルなし）
         reasoning_options = ["None"]
     return {
         "api_provider": "OpenAI Compatible",

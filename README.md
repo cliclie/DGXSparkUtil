@@ -5789,8 +5789,13 @@ WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machin
   `strataK4|strataN4|strataI2` を追加（それまで `unknown` に落ち、Strata メトリクス経路
   `_modelctl_metrics` が選ばれていなかった。K4/N4 は 11-23 の llm 側追加時の漏れ）
 - `front/index.html`: **変更不要**（モード一覧は `profiles()` 駆動でハードコードなし）
-- `api/vllm.py`: 変更不要（`/metrics/prometheus` は llamacpp: 系列で Strata 共通。inkling
-  サーバーでも同一形式を確認済み）
+- `api/vllm.py`: メトリクス経路は変更不要（`/metrics/prometheus` は llamacpp: 系列で Strata 共通。inkling
+  サーバーでも同一形式を確認済み）。ただし **Cline 設定値の `CLINE_MODEL_TABLE` に `strataI2` 行を
+  追加**（`images: true` / `context_max: 1048576`／config の 32768 は `context_recommended` 側へ）+
+  `_cline_config_modelctl` で strataI2 の `reasoning_effort_options` を `["None"]` に
+  （Strata 側 `REASONING_EFFORTS=("none",)`・`HAS_THINKING=False` 準拠）。
+  反映には API 再起動が必要（`Restart=always` の system unit・main pid を kill すれば 5 秒後自動起動、
+  `KillMode=process` なので稼働中モデルは停止しない）
 
 ### LAN 公開（Strata-8080）
 
@@ -5810,6 +5815,9 @@ WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machin
 - `bridge list`: `strataI2 | ready=1 | engine=strata`（重み SHA-256 検証済み・100% VRAM 常駐）
 - `bridge params strataI2`: `running=yes` / `lan_ip=192.168.0.26` / `context_length=32768` /
   `model_name=inkling-2-mini-sq-20`
+- `/api/vllm/cline`（API 再起動後・実測 ~11 s 応答）: `supports_images: true` /
+  `context_max: 1048576` / `reasoning_effort_options: ["None"]` /
+  `base_url: http://192.168.0.26:8080/v1/` — strataI2 行が反映されている
 - `ss -ltn`: `0.0.0.0:8080` LISTEN / `curl http://192.168.0.26:8080/health` → `loaded: true`
 - 生成確認: chat「1+1は？」→ `2` (finish=stop)・tool_calls `get_weather{"city":"東京"}` OK
 - 単体再測（2026-11-23・全モデル停止・~3.5K tok プロンプト・server timings 方式）:
