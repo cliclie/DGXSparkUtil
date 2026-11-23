@@ -5781,7 +5781,7 @@ curl -s http://127.0.0.1:8080/ | grep -c 'closest("dialog")'   # 1
 
 WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machines Inkling-2-Mini・
 `.strata` v1.1 SQ-20 無損失ビルド / 専用エンジン `strata-inkling` 0.1.66 / DSpark 内蔵 /
-26.4B-A3.4B looped MoE / ctx 32K・最大 1M / 画像対応 / port 8080）を追加した。
+26.4B-A3.4B looped MoE / ctx 262144（2026-11-23 に 32K→256K 再設定・上限 1M）/ 画像対応 / port 8080）を追加した。
 **モデルは全て排他切替**（8080 は 1 度に 1 モードのみ占有）— 本モードも例外ではない。
 
 ### 本リポジトリ (DGXSparkUtil) の変更
@@ -5814,7 +5814,7 @@ WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machin
 ### 検証 (2026-11-23 実測)
 
 - `bridge list`: `strataI2 | ready=1 | engine=strata`（重み SHA-256 検証済み・100% VRAM 常駐）
-- `bridge params strataI2`: `running=yes` / `lan_ip=192.168.0.26` / `context_length=32768` /
+- `bridge params strataI2`: `running=yes` / `lan_ip=192.168.0.26` / `context_length=32768`（**2026-11-23 導入時。同日 262144 へ再設定**）/
   `model_name=inkling-2-mini-sq-20`
 - `/api/vllm/cline`（API 再起動後・実測 ~11 s 応答）: `supports_images: true` /
   `context_max: 1048576` / `reasoning_effort_options: ["None"]` /

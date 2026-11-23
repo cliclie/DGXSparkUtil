@@ -2099,7 +2099,8 @@ CLINE_MODEL_TABLE = {
     },
     # Strata strataI2（WSL modelctl 専用モード・2026-11-23）: Inkling-2-Mini SQ-20。
     # /health images: true（Inkling-2-Mini-Vision.strata 0.64GB を常備）。context は
-    # config 32768（recommended は params の context_length が優先）／ネイティブ上限 1M。
+    # config 262144（2026-11-23 に 32768→262144 へ再設定・recommended は params の
+    # context_length が優先）／ネイティブ上限 1M。
     # 思考 effort は Strata 側 REASONING_EFFORTS=("none",)（HAS_THINKING=False）。
     "strataI2": {
         "images": True,
