@@ -23,7 +23,10 @@ import config
 BRIDGE = Path(__file__).resolve().parent / "wsl_modelctl_bridge.sh"
 
 # 2 秒ポーリングでも低コストに抑えるための短い TTL (list 実行は ~0.6 秒)
-_TTL_S = 1.5
+_TTL_S = 5.0   # status 1 回の組み立てが list ~3.5s を含むため 1.5s だと cache が切れて
+               # uptime_str / params が bridge list を再走 → 計 3 回 (~10s) で front の
+               # fetchJson(status, 9000ms) を超過していた (2026-11-23・strataI2 導入後顕在化)。
+               # front ポーリングは 5s 以上間隔 (2026-10-28 緩和) なので鮮度は保たれる。
 _cache: dict[str, dict] = {}
 _cache_ts: float = 0.0
 _cache_ok: bool = False

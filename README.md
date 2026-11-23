@@ -5825,3 +5825,29 @@ WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machin
   （初回報告の 129 tok/s は短文＋キャッシュヒット時の値。生データ
   `~/llm/strata-kit/bench/2026-11-23-inkling-sq20/`。`bench_strata.py` の TTFT 方式は
   inkling の SSE が delta.content を送らないため不可＝`bench_solo.py` 使用）
+
+## /api/vllm/status の 9 秒超過でヘッダ・モデルタブが空白化 (2026-11-23 修正)
+
+**症状**: strataI2 導入後、ダッシュボードのヘッダとモデルタブにモデル情報が
+表示されない（Shift+Ctrl+R でも改善しない＝キャッシュではなく API 側）。
+
+**原因**: front の `fetchJson(API+"/api/vllm/status", 9000)` は 9 秒で abort するが、
+`_get_status_modelctl` の実測が **10.6 秒** かかっていた。内訳は
+`modelctl._TTL_S = 1.5` に対し status 1 回の組み立て（bridge list ~3.4 s）が
+それを超過するため、`uptime_str`（containers ループ + active の 2 回）が
+`profiles()` 再取得で **bridge list を計 3 回**走らせていた（3.4×3 ≈ 10 s）。
+strata 系 9 モード化で list 自体も重くなっていた（モード毎に python3 サブプロセス）。
+
+**修正**（`api/modelctl.py` + `api/vllm.py`）:
+1. `_TTL_S` を 1.5 → **5.0 s** に延長（front ポーリングは 5 s 以上間隔・2026-10-28 緩和。
+   切替実行は bridge 側 model-ctl.sh の排他制御が正本なので鮮度リスクなし）
+2. `_get_status_modelctl` の active の `uptime_str` を containers ループの値に
+   **再利用**（bridge 往復 1 回分を恒久削除）
+
+**検証 (2026-11-23 実測)**: `status` 初回 **3.56 s**（旧 10.65 s）・2 回目 0.02 s、
+`cline` **3.35 s**（旧 ~11 s）・`platform` 0.002 s。いずれも front の 9 s 以内に収まり、
+ヘッダ・モデルタブの表示が復旧したことを API 応答で確認。
+
+**残課題（未対応・記録のみ）**: bridge list 単体 ~3.4 s の本体は
+`model-ctl.sh` のモード毎サブプロセス（strata の config JSON を読む `python3 -c` など）。
+20 モードに増えたため list 最適化（バッチ化・python 起動の集約）は別途の価値あり。

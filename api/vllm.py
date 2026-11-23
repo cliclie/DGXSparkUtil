@@ -1415,10 +1415,14 @@ def _get_status_modelctl() -> dict:
     out: dict = {"containers": [], "active": None}
     profiles = _load_profiles()
     running_profile = None
+    running_uptime = None
     for profile, info in profiles.items():
         running = bool(info.get("running"))
         if running:
             running_profile = profile
+        up = modelctl.uptime_str(profile) if running else None
+        if running:
+            running_uptime = up
         out["containers"].append(
             {
                 "profile": profile,
@@ -1426,7 +1430,7 @@ def _get_status_modelctl() -> dict:
                 "running": running,
                 "status": "running" if running else "exited",
                 "uptime_s": None,
-                "uptime_str": modelctl.uptime_str(profile) if running else None,
+                "uptime_str": up,
                 "restart_count": 0,
                 "ready": info.get("ready", False),
                 "engine": info.get("engine"),
@@ -1456,7 +1460,7 @@ def _get_status_modelctl() -> dict:
         "running": True,
         "status": "running",
         "uptime_s": None,
-        "uptime_str": modelctl.uptime_str(running_profile),
+        "uptime_str": running_uptime,
         "restart_count": 0,
         "health": False,
         "model_name": None,
