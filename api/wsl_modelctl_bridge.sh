@@ -52,7 +52,7 @@ _mc_engine_of() {
     case "$1" in
         exl)                        printf 'exllama' ;;
         tabby|swift40|swift35|qwen9) printf 'tabbyapi' ;;
-        strata15|strataS4|strataU4|strataq3|strataC1|strataD4) printf 'strata' ;;
+        strata15|strataS4|strataU4|strataq3|strataC1|strataD4|strataK4|strataN4|strataI2) printf 'strata' ;;
         llmjp)                      printf 'llamacpp' ;;
         clef)                       printf 'llamacpp' ;;   # llama-server（decision 専用・vllm.py の _clef_metrics 経路）
         bonsai)                     printf 'llamacpp-docker' ;;

@@ -81,6 +81,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-12 更新の atom1 反映: int_c は GB10 で恒等・api 側の追加は wsl / maya 専用 (2026-11-12 / 本機 = WhitebearATOM1)](#2026-11-12-更新の-atom1-反映-int_c-は-gb10-で恒等api-側の追加は-wsl--maya-専用-2026-11-12--本機--whitebearatom1)
 - [2026-11-12 更新の atom2 反映: int_c は power モードで未到達・maya / LHM 系は wsl 専用 (2026-11-12 / 本機 = WhitebearATOM2)](#2026-11-12-更新の-atom2-反映-int_c-は-power-モードで未到達・maya--lhm-系は-wsl-専用-2026-11-12--本機--whitebearatom2)
 - [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
+- [Strata strataI2 (Inkling-2-Mini SQ-20) 反映と Strata-8080 の LAN 公開 (2026-11-23)](#strata-stratai2-inkling-2-mini-sq-20-反映と-strata-8080-の-lan-公開-2026-11-23)
 - [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
 - [Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）](#clef-flash-の-wsl-追加-clefmodelctl-への追従2026-11-22--本機--whitebear2026-wsl2)
 - [モデルタブの Cline設定値コピーが inert で無音失敗 (2026-11-23 / 本機 = WhitebearATOM2)](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
@@ -5775,3 +5776,44 @@ curl -s http://127.0.0.1:8080/ | grep -c 'closest("dialog")'   # 1
 **同じ症状になる** (localhost 配信では出ない)。本修正を同じコミットで反映すること。
 
 **元に戻す**: `git checkout a2081c8 -- front/index.html` (front のみ)。モーダル表示・API は無変更。
+## Strata strataI2 (Inkling-2-Mini SQ-20) 反映と Strata-8080 の LAN 公開 (2026-11-23)
+
+WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machines Inkling-2-Mini・
+`.strata` v1.1 SQ-20 無損失ビルド / 専用エンジン `strata-inkling` 0.1.66 / DSpark 内蔵 /
+26.4B-A3.4B looped MoE / ctx 32K・最大 1M / 画像対応 / port 8080）を追加した。
+**モデルは全て排他切替**（8080 は 1 度に 1 モードのみ占有）— 本モードも例外ではない。
+
+### 本リポジトリ (DGXSparkUtil) の変更
+
+- `api/wsl_modelctl_bridge.sh` `_mc_engine_of`: strata 判定リストに
+  `strataK4|strataN4|strataI2` を追加（それまで `unknown` に落ち、Strata メトリクス経路
+  `_modelctl_metrics` が選ばれていなかった。K4/N4 は 11-23 の llm 側追加時の漏れ）
+- `front/index.html`: **変更不要**（モード一覧は `profiles()` 駆動でハードコードなし）
+- `api/vllm.py`: 変更不要（`/metrics/prometheus` は llamacpp: 系列で Strata 共通。inkling
+  サーバーでも同一形式を確認済み）
+
+### LAN 公開（Strata-8080）
+
+- WSL 側: `strataI2` の設定 JSON（terminal と `~/llm/strata-kit/configs/` 正本）に
+  `"host": "0.0.0.0"` を追加。mirrored モードのため LAN IP 直達
+  （`http://192.168.0.26:8080/v1`）
+- Windows 側: **`~/llm/strata-kit/add_firewall_strata_8080.ps1`**（新規・BOM 付き UTF-8 /
+  Hyper-V inbound TCP 8080 / `-RemoteAddress 192.168.0.0/24` / 冪等再作成）。
+  inkling は無認証 (`api_key: false`) のため**許可先を /24 に限定**する。実行は管理者 PowerShell:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu\home\cliclie\llm\strata-kit\add_firewall_strata_8080.ps1"`
+- 教訓踏襲: `-VMCreatorId`（`-VMId` は存在しない）/ WSL2 固定 GUID 直書き /
+  リテラル直書き（BOM なし UTF-8 の CP932 事故）・Windows 自機からの LAN IP 宛は
+  ループバック反射で FAIL → 別端末で確認
+
+### 検証 (2026-11-23 実測)
+
+- `bridge list`: `strataI2 | ready=1 | engine=strata`（重み SHA-256 検証済み・100% VRAM 常駐）
+- `bridge params strataI2`: `running=yes` / `lan_ip=192.168.0.26` / `context_length=32768` /
+  `model_name=inkling-2-mini-sq-20`
+- `ss -ltn`: `0.0.0.0:8080` LISTEN / `curl http://192.168.0.26:8080/health` → `loaded: true`
+- 生成確認: chat「1+1は？」→ `2` (finish=stop)・tool_calls `get_weather{"city":"東京"}` OK
+- 単体再測（2026-11-23・全モデル停止・~3.5K tok プロンプト・server timings 方式）:
+  **prefill 1,989 tok/s・decode 80.9 tok/s・DSpark 受理 40.1%・VRAM 23.5GB/32.6GB**
+  （初回報告の 129 tok/s は短文＋キャッシュヒット時の値。生データ
+  `~/llm/strata-kit/bench/2026-11-23-inkling-sq20/`。`bench_strata.py` の TTFT 方式は
+  inkling の SSE が delta.content を送らないため不可＝`bench_solo.py` 使用）
