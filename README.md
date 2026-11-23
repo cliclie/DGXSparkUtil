@@ -5816,7 +5816,8 @@ WSL 側 `~/llm` で Strata 9 番目のモード **`strataI2`**（Thinking Machin
 - `bridge list`: `strataI2 | ready=1 | engine=strata`（重み SHA-256 検証済み・100% VRAM 常駐）
 - `bridge params strataI2`: `running=yes` / `lan_ip=192.168.0.26` / `context_length=32768`（**2026-11-23 導入時。同日 262144 へ再設定**）/
   `model_name=inkling-2-mini-sq-20`
-- `/api/vllm/cline`（API 再起動後・実測 ~11 s 応答）: `supports_images: true` /
+- `/api/vllm/cline`（API 再起動後・実測 ~11 s 応答 → 同日「/api/vllm/status の 9 秒超過」
+  節の修正で **3.35 s**）: `supports_images: true` /
   `context_max: 1048576` / `reasoning_effort_options: ["None"]` /
   `base_url: http://192.168.0.26:8080/v1/` — strataI2 行が反映されている
 - `ss -ltn`: `0.0.0.0:8080` LISTEN / `curl http://192.168.0.26:8080/health` → `loaded: true`
