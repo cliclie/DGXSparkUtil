@@ -82,6 +82,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-12 更新の atom2 反映: int_c は power モードで未到達・maya / LHM 系は wsl 専用 (2026-11-12 / 本機 = WhitebearATOM2)](#2026-11-12-更新の-atom2-反映-int_c-は-power-モードで未到達・maya--lhm-系は-wsl-専用-2026-11-12--本機--whitebearatom2)
 - [フロントを Modern Web Guidance 準拠にモダナイズ (2026-11-16 / 本機 = Whitebear2026-WSL)](#フロントを-modern-web-guidance-準拠にモダナイズ-2026-11-16--本機--whitebear2026-wsl)
 - [Strata strataI2 (Inkling-2-Mini SQ-20) 反映と Strata-8080 の LAN 公開 (2026-11-23)](#strata-stratai2-inkling-2-mini-sq-20-反映と-strata-8080-の-lan-公開-2026-11-23)
+- [/api/vllm/status の 9 秒超過でヘッダ・モデルタブが空白化 (2026-11-23 修正)](#apivllmstatus-の-9-秒超過でヘッダモデルタブが空白化-2026-11-23-修正)
 - [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
 - [Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）](#clef-flash-の-wsl-追加-clefmodelctl-への追従2026-11-22--本機--whitebear2026-wsl2)
 - [モデルタブの Cline設定値コピーが inert で無音失敗 (2026-11-23 / 本機 = WhitebearATOM2)](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
