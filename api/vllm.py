@@ -158,6 +158,11 @@ _job: dict | None = None
 
 # /metrics のトークンカウンタ差分(スループット算出用: 入力/出力分離)
 _prev_metrics: dict = {"ts": None, "prompt": None, "generation": None}
+# tensorfold / hibana は専用の prev スロットを使う。他エンジン経路 (modelctl の
+# llamacpp/exllama など) が呼ぶ _reset_token_state() は "prompt"/"generation" しか
+# 初期化しないため、UI が両方の status を交互に引いても差分が消えない。
+for _k in ("ts_tf", "prompt_tf", "generation_tf", "ts_hb", "prompt_hb", "generation_hb"):
+    _prev_metrics.setdefault(_k, None)
 
 # Strata の直近スループットキャッシュ（idle/unloaded で 5s 以内は前回値を返す）
 _strata_last_metrics: dict = {}
@@ -166,14 +171,16 @@ _strata_last_metrics: dict = {}
 _hipfire_prev: dict = {}
 
 
-def _tps_of(key: str, metric: str, pm: dict, now: float) -> float | None:
+def _tps_of(key: str, metric: str, pm: dict, now: float, ts_key: str = "ts") -> float | None:
     """key に対応する系列の差分 tok/s を算出する。
 
     直前値が無い・系列が今回存在しない場合は None。前回値保持は front 側で行うため
     バックエンドは算出値(0/None を含む)をそのまま返す。
+    ts_key は時刻の保存先。エンジン固有のスロットを渡すと、他エンジン経路が
+    _reset_token_state() を呼んでも差分が飛ばない (tensorfold / hibana が使う)。
     """
     if _prev_metrics[key] is not None and metric in pm:
-        dt = max(now - _prev_metrics["ts"], 1e-9)
+        dt = max(now - _prev_metrics[ts_key], 1e-9)
         return max(0.0, (pm[metric] - _prev_metrics[key]) / dt)
     return None
 
@@ -1081,7 +1088,13 @@ def _tensorfold_metrics(pm: dict) -> dict:
     系列名は本機 v1.3.4 実測。`--metrics-open` を付けないと /metrics は空になるため、
     compose/tensorfold-qwen38/serve.sh は既定で付ける。
     kv_cache_usage_ratio はラベル {pool="0"} 付きだが _parse_vllm_metrics がラベルを落として
-    集約する。ttft 系列は無い(初手は /health の live に出るだけ)なので e2e のみ。
+    集約する。ttft は tensorfold:time_to_first_token_seconds の sum/count (2026-11-25 実測)。
+
+    prompt_tokens_total / generation_tokens_total は **完了したリクエスト分のみ**加算される
+    (本機実測: 4000 tok 生成の最中に両カウンタが終始 0)。そのままでは長い 1 リクエストの
+    最中にスループットが出ないので、decode はライブストリームが生成中の本数を数える
+    generation_tokens_running を足した累計生成量として扱う。prefill に対応するゲージは
+    無いので、完了単位 (短いリクエストが連続するとき) だけ値が出る。
     """
     kv = pm.get("tensorfold:kv_cache_usage_ratio")
     m = {
@@ -1089,15 +1102,19 @@ def _tensorfold_metrics(pm: dict) -> dict:
         "requests_waiting": pm.get("tensorfold:requests_waiting"),
         "kv_cache_usage_pct": kv * 100.0 if kv is not None else None,
         "e2e_latency_s": _hist_avg(pm, "tensorfold:request_latency_seconds"),
-        "ttft_s": None,
+        "ttft_s": _hist_avg(pm, "tensorfold:time_to_first_token_seconds"),
     }
     if "tensorfold:prompt_tokens_total" in pm or "tensorfold:generation_tokens_total" in pm:
+        gen, live = pm.get("tensorfold:generation_tokens_total"), pm.get("tensorfold:generation_tokens_running")
+        pm2 = dict(pm)
+        if gen is not None and live is not None:
+            pm2["tensorfold:generation_tokens_total"] = gen + live
         now = time.time()
-        m["prompt_tokens_per_s"] = _tps_of("prompt", "tensorfold:prompt_tokens_total", pm, now)
-        m["generation_tokens_per_s"] = _tps_of("generation", "tensorfold:generation_tokens_total", pm, now)
-        _prev_metrics["ts"] = now
-        _prev_metrics["prompt"] = pm.get("tensorfold:prompt_tokens_total", _prev_metrics["prompt"])
-        _prev_metrics["generation"] = pm.get("tensorfold:generation_tokens_total", _prev_metrics["generation"])
+        m["prompt_tokens_per_s"] = _tps_of("prompt_tf", "tensorfold:prompt_tokens_total", pm2, now, "ts_tf")
+        m["generation_tokens_per_s"] = _tps_of("generation_tf", "tensorfold:generation_tokens_total", pm2, now, "ts_tf")
+        _prev_metrics["ts_tf"] = now
+        _prev_metrics["prompt_tf"] = pm2.get("tensorfold:prompt_tokens_total", _prev_metrics["prompt_tf"])
+        _prev_metrics["generation_tf"] = pm2.get("tensorfold:generation_tokens_total", _prev_metrics["generation_tf"])
     return m
 
 
@@ -1123,11 +1140,11 @@ def _hibana_metrics(pm: dict) -> dict:
     }
     if "hibana_prefill_tokens" in pm or "hibana_decode_tokens" in pm:
         now = time.time()
-        m["prompt_tokens_per_s"] = _tps_of("prompt", "hibana_prefill_tokens", pm, now)
-        m["generation_tokens_per_s"] = _tps_of("generation", "hibana_decode_tokens", pm, now)
-        _prev_metrics["ts"] = now
-        _prev_metrics["prompt"] = pm.get("hibana_prefill_tokens", _prev_metrics["prompt"])
-        _prev_metrics["generation"] = pm.get("hibana_decode_tokens", _prev_metrics["generation"])
+        m["prompt_tokens_per_s"] = _tps_of("prompt_hb", "hibana_prefill_tokens", pm, now, "ts_hb")
+        m["generation_tokens_per_s"] = _tps_of("generation_hb", "hibana_decode_tokens", pm, now, "ts_hb")
+        _prev_metrics["ts_hb"] = now
+        _prev_metrics["prompt_hb"] = pm.get("hibana_prefill_tokens", _prev_metrics["prompt_hb"])
+        _prev_metrics["generation_hb"] = pm.get("hibana_decode_tokens", _prev_metrics["generation_hb"])
     return m
 
 
