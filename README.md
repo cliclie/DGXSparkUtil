@@ -312,9 +312,13 @@ docker で作動中の vLLM の状態を常時表示するセクション(「目
 RAG 環境(embedding vLLM)の状態を常時表示し、起動/停止を操作できるセクション。
 対象ディレクトリはプラットフォーム別(dgx-spark `/home/cliclie/llm/compose/sociax-rag/`、
 atom2 `/home/cliclie/RAG/compose/`、`api/config.py` 参照)。atom2 では VRAM のため
-LLM と RAG embedding が排他(実装メモ 2026-10-03 参照)。
+LLM と RAG embedding が排他(実装メモ 2026-10-03 参照)。**dgx-spark(atom1)も LLM と RAG は
+排他運用**で、embedding vLLM は約 20 GiB を使うため生成モデルと同じ窓では起動しない
+(既定は RAG 停止。動かすときは生成モデルを止める)。
 2026-10-31 の構成変更で Qdrant は SociaX 側(sociax.local)のコンテナへ移行済みであり、
 本セクションは embedding のみを監視・操作する。
+（2026-11-25 実測: atom1 の `sociax-rag-embedding-1` は停止中、`sociax-rag-qdrant-1` は
+Qdrant 移行前に残った旧構成のコンテナで、こちらも停止中）
 
 - 表示内容:
   - Embedding (8010) の状態
