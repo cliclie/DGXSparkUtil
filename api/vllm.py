@@ -1559,10 +1559,28 @@ _LLAMACPP_LOG_EVAL_RE = re.compile(
 _LLAMACPP_LOG_TOTAL_RE = re.compile(r"total time =\s*([\d.]+) ms /\s*([\d,]+) tokens")
 
 
+# strataq3 の /metrics/prometheus には llamacpp: 累计秒カウンタがある。瞬时ゲージ
+# (llamacpp:prompt_tokens_seconds) は idle 0 になるため、506fc84 の「割る量を dt に
+# しない」方式と同じく累计比でフォールバックする。cached_total は prompt_tokens_total
+# より大きく分子から引けないため clef 分岐と同じく減算しない。
+_STRATA_PRE_TOK = ("llamacpp:prompt_tokens_total",)
+_STRATA_PRE_SEC = ("llamacpp:prompt_seconds_total",)
+_STRATA_GEN_TOK = ("llamacpp:tokens_predicted_total",)
+_STRATA_GEN_SEC = ("llamacpp:tokens_predicted_seconds_total",)
+
+
 def _strata_metrics(base: str, log_text: str) -> dict:
     """Strata のメトリクス: /metrics/prometheus (llamacpp: 系列) + ログ補完。"""
     pm = _parse_vllm_metrics(_http_get(f"{base}/metrics/prometheus", timeout=5))
     m = _llamacpp_metrics(pm, base)
+    # 506fc84 の「割る量を dt にしない」方式を strataq3 の llamacpp: 累计秒カウンタに適用。
+    # 瞬时ゲージが idle 0 の窓は累计比にフォールバックし、どの poll 窓でも同じ値になる。
+    if not m.get("prompt_tokens_per_s"):
+        m["prompt_tokens_per_s"] = _tps_by_seconds(
+            pm, "strata_pre", _STRATA_PRE_TOK, _STRATA_PRE_SEC, ())
+    if not m.get("generation_tokens_per_s"):
+        m["generation_tokens_per_s"] = _tps_by_seconds(
+            pm, "strata_gen", _STRATA_GEN_TOK, _STRATA_GEN_SEC, ())
     running = 0
     for ln in reversed(log_text.splitlines()):
         mp = _STRATA_PROGRESS_RE.search(ln)

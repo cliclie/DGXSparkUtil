@@ -91,6 +91,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [atom1 / atom2 / WSL の三構成共有と modelctl の適用範囲 (2026-11-25 / 本機 = WhitebearATOM1)](#atom1--atom2--wsl-の三構成共有と-modelctl-の適用範囲-2026-11-25--本機--whitebearatom1)
 - [2026-11-25 更新の atom2 反映: prefill/decode「割る量を dt にしない」方式と hipfire 検証で一致 (2026-11-25 / 本機 = WhitebearATOM2)](#2026-11-25-更新の-atom2-反映-prefilldecode割る量を-dt-にしない方式と-hipfire-検証で一致-2026-11-25--本機--whitebearatom2)
 - [flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)](#flashnexthibana-の最大出力トークン-出力単独の上限は無く-262144--prompt-2026-11-25--本機--whitebearatom1)
+- [2026-11-25 更新の WSL 反映: prefill/decode 正確性向上を本機 Whitebear2026-WSL へ反映（strataq3 稼働中）](#2026-11-25-更新の-wsl-反映-prefilldecode-正確性向上を本機-whitebear2026-wsl-へ反映strataq3-稼働中)
 
 
 
@@ -6072,7 +6073,6 @@ thermal-guard 再起動ログは `mode=power high=85 crit=95 caps=300/250/210W r
 - 節の本体エンジン（TensorFold / Hibana / vLLM / SGLang）は本機で稼働中のコンテナがなく、実測できたのは hipfire のみ。hipfire 経路自体は従来どおり histogram 差分方式で、その値が真値と一致していることを確認した
 - `thermal_guard.sh` の既定コンテナリスト（hibana / tensorfold 追加）は atom1 の clock モード向け。本機の power モードではコンテナリストは発動判定に使われない（変更前から同じ）
 
-
 ## flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)
 
 - **受理条件は 1 本だけ**。`hibana/engine/executor.py:275` が
@@ -6097,4 +6097,82 @@ thermal-guard 再起動ログは `mode=power high=85 crit=95 caps=300/250/210W r
   **値を変える場合は `sudo systemctl restart dgx-spark-api` が必要**
 - 再現: `bash ~/llm/compose/maxtok_probe_hibana.sh`（`usage.prompt_tokens` から理論上限を出し、
   境界 2 点を POST して受理／拒否を確認する）
+
+## 2026-11-25 更新の WSL 反映: prefill/decode 正確性向上を本機 Whitebear2026-WSL へ反映（strataq3 稼働中）
+
+atom1 / atom2 側で入った prefill/decode 正確性向上（`51c4a2d` / `4eb5d0b` / `9399eb1` / `506fc84`）を
+本 WSL 環境（Whitebear2026-WSL）にも反映した。ff-merge は `50fc488 → 72bf944`（fast-forward、
+`README 220 / thermal_guard 6 / vllm 409` 行変更、作業ツリークリーン）。
+
+### WSL 環境への影響の切り分け
+
+- **506fc84「割る量を dt にしない」の直接対象は TensorFold / Hibana / vLLM / SGLang 分岐のみ**。
+  本機 strataq3（`engine=strata`）は 506fc84 の直接対象外。strata 経路は元から
+  `/metrics/prometheus` + ログ実測 T/s（`_STRATA_DONE_RE` / `_STRATA_PROGRESS_RE`）方式で、
+  5869 節の教訓どおり「割る量を dt にしない」方式の恩恵を既に受けている側のエンジン。
+- ただし 506fc84 の共有ユーティリティ（`_tps_by_seconds` / `_metrics_ts` / prev スロット分離）と
+  4eb5d0b / 9399eb1 の reset 除去・prev スロット分離は、modelctl 経由の llamacpp / exllama /
+  maya / sglang-docker 分岐と `_prev_metrics` / `_reset_token_state()` を共有する。WSL 環境で
+  これらのエンジンに切替えた際に従来バグ（完了バースト過大、reset による prev 消失）が再発しない。
+- **51c4a2d の thermal_guard.sh 既定リスト（hibana / tensorfold 追加）は WSL 環境では発動対象なし**。
+  実 unit が `Environment=THERMAL_CONTAINERS=`（空）で起動されており、既定値の変更は上書きされる。
+  したがって thermal-guard の再起動は不要（WSL 環境の既存運用は不変）。
+
+### 反映手順（sudo 対話パスワードを要さない MainPID kill 方式）
+
+`restart_service.sh` の `sudo systemctl restart` は対話パスワードを要求するが、
+`KillMode=process` + `Restart=always` / `RestartSec=5` により、MainPID kill だけで systemd が
+自動再起動する。cgroup 配下の Strata 子プロセス（172619 / 172662）は巻き込まれない。
+
+```bash
+systemctl show dgx-spark-api -p MainPID --value   # 347
+kill 347                                          # systemd が 5s 後に自動再起動
+```
+
+反映後 MainPID は `4121530` に変化。Strata 172619 / 172662 は etime 4:50 のまま生存。
+journalctl の `Found left-over process ... Ignoring` は `KillMode=process` による想定通知で、
+モデル停止・エラーではない。
+
+### 検証（2026-11-25 07:44 実測）
+
+- import 検証（`api/venv/bin/python -c "import vllm"`）: `_tps_by_seconds` / `_metrics_ts` /
+  `_PREFILL_SEC_KEYS` あり、`_prev_metrics` にエンジン別 prev スロット（tok_/sec_ 系 19 個）が
+  揃うことを確認。strataq3 には触れず import のみ。
+- API 応答: `/api/platform` 200、`/api/vllm/status` 200。
+- `engine=strata`、`metrics_keys` に 8 項目（`prompt_tokens_per_s` / `generation_tokens_per_s` /
+  `e2e_latency_s` / `ttft_s` / `kv_cache_usage_pct` / `requests_running` / `requests_waiting` /
+  `expert_cache_hit_pct`）が揃うことを確認。
+- strataq3 はロード中のため `model=None`（ロード完了後に値が流入する）。
+
+### strataq3 実測（chat 1 回）と strata 経路の累计秒カウンタ修正
+
+ff-merge 直後の probe では prefill が 0.0 継続だった。strata 分岐（`_strata_metrics` →
+`_llamacpp_metrics`）は瞬时ゲージ `llamacpp:prompt_tokens_seconds`（idle 0）のみ見ており、
+strataq3 の `/metrics/prometheus` に揃う累计秒カウンタ（`prompt_seconds_total` /
+`tokens_predicted_seconds_total`）を未使用だったため。506fc84 の「割る量を dt にしない」方式を
+strata 経路にも適用する修正を入れた（`_strata_metrics` 冒頭で累计比フォールバックを追加、
+clef 分岐と同じ方針。cached_total は prompt_tokens_total より大きく分子から引かない）。
+
+毎回違うランダム prompt（cached_tokens=0）の chat 1 回（prompt 5,883 tok / 64 tok 生成）で検証:
+
+| 項目 | API 表示 | 累计カウンタ増分からの逆算 | 判定 |
+|---|---|---|---|
+| prefill（窓直後 poll） | 722.96 T/s | 5,883 ÷ 8.137 = 722.96 T/s | 完全一致 |
+| decode | 64.3 T/s | 64 ÷ 0.959 = 66.72 T/s | ±3.6% |
+
+窓直後は窓差分（Δtok/Δsec）、chat 完了後は窓増分 0 により累计比（起動からの 1,415 T/s）へ
+フォールバックする。どちらも「dt で割らない」正しい値。修正前は prefill=0.0 継続だった。
+
+注: この strata 累计比フォールバック（`_strata_metrics` 内）は本 WSL 環境固有の修正で、
+リモート（atom1 / atom2）には存在しない。将来 pull 時に `_strata_metrics` 周辺が衝突しうる
+ため、その場合は累计比フォールバック側を残して解消する。
+
+### 教訓
+
+- WSL 環境での API 反映は `KillMode=process` + `Restart=always` により、sudo 対話パスワードを
+  要さない MainPID kill 方式が最短。strataq3 のような長時間ロード中モデルを巻き込まない。
+- 506fc84 の「割る量を dt にしない」は TensorFold / Hibana / vLLM / SGLang 分岐専用で、
+  strata / llama.cpp / clef / hipfire / TabbyAPI は元から瞬时ゲージ・秒カウンタ・ログ実測 T/s
+  方式のため対象外（5869 節の教訓と一致）。WSL 環境で直接効くのは maya / exllama /
+  sglang-docker / vllm 系へ切替えた際の再発防止、という位置づけ。
 
