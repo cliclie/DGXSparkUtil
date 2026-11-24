@@ -90,6 +90,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [Hibana (flashnexthibana / port 8033) の prefill/decode: 秒カウンタが皆無な場合の組み立て (2026-11-25 / 本機 = WhitebearATOM1)](#hibana-flashnexthibana--port-8033--の-prefilldecode-秒カウンタが皆無な場合の組み立て-2026-11-25--本機--whitebearatom1)
 - [atom1 / atom2 / WSL の三構成共有と modelctl の適用範囲 (2026-11-25 / 本機 = WhitebearATOM1)](#atom1--atom2--wsl-の三構成共有と-modelctl-の適用範囲-2026-11-25--本機--whitebearatom1)
 - [2026-11-25 更新の atom2 反映: prefill/decode「割る量を dt にしない」方式と hipfire 検証で一致 (2026-11-25 / 本機 = WhitebearATOM2)](#2026-11-25-更新の-atom2-反映-prefilldecode割る量を-dt-にしない方式と-hipfire-検証で一致-2026-11-25--本機--whitebearatom2)
+- [flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)](#flashnexthibana-の最大出力トークン-出力単独の上限は無く-262144--prompt-2026-11-25--本機--whitebearatom1)
 
 
 
@@ -6070,4 +6071,30 @@ thermal-guard 再起動ログは `mode=power high=85 crit=95 caps=300/250/210W r
 
 - 節の本体エンジン（TensorFold / Hibana / vLLM / SGLang）は本機で稼働中のコンテナがなく、実測できたのは hipfire のみ。hipfire 経路自体は従来どおり histogram 差分方式で、その値が真値と一致していることを確認した
 - `thermal_guard.sh` の既定コンテナリスト（hibana / tensorfold 追加）は atom1 の clock モード向け。本機の power モードではコンテナリストは発動判定に使われない（変更前から同じ）
+
+
+## flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)
+
+- **受理条件は 1 本だけ**。`hibana/engine/executor.py:275` が
+  `len(prompt_ids) + params.max_new_tokens > self.max_context` を弾く。`SamplingParams.validate()` は
+  `max_new_tokens >= 1` を見るだけで、**出力単独の上限はエンジン側に存在しない**
+- **第 2 条件は本機で非律速**。同 280 行の `prompt + max_new_tokens + spec k <= kv_pages − 1` は、
+  `/get_server_info` の `kv_pages: 1,157,096`（FP8 E4M3）が `max_context` 262,144 を大きく上回るため
+  効かない。vLLM 経路（`--max-model-len` と KV プールが近接）で踏んだ
+  「入力+max_tokens > KV プールで全拒否」とは挙動が違う
+- **実測**: `say OK` の chat template 展開 = **54 tok**（`usage.prompt_tokens`）。
+  `max_tokens` **262,090 → 200 受理**、**262,091 → 400** `prompt plus output budget exceeds context
+  limit 262144`。300,000 も 400。＝ 上限は **262,144 − prompt_tokens**
+- **262,144 は上げられない**。`config.json` の `text_config.max_position_embeddings` が native で、
+  `hibana/launch/settings.py:221` の `DEFAULT_CONTEXT = 262144` が `HIBANA_MAX_CONTEXT` の上限
+  （`_check(2 <= max_context <= DEFAULT_CONTEXT)` で exit）。YaRN は TensorFold 側の機能
+- **`CLINE_MODEL_TABLE["flashnexthibana"]` は値を変えていない**（`context_max 262144` /
+  `max_output_recommended 8192` / `max_output_max 32768` / `temperature 1.0`）。32768 は**実用上限**で
+  技術的上限 262,090 の 1/8。`max_tokens` は思考 + 本文の合計なので、2048 は 17/20・**8192 で 20/20**
+  （`compose/ja20_gate.py` 実測）が recommended 下限の根拠
+- **反映に再起動は不要**。稼働中の `/api/vllm/cline` はすでに `max_output_max: 32768` を返している
+  （`CLINE_MODEL_TABLE` は import 時に読まれるが、今回はコメントのみの追加で値が同一）。
+  **値を変える場合は `sudo systemctl restart dgx-spark-api` が必要**
+- 再現: `bash ~/llm/compose/maxtok_probe_hibana.sh`（`usage.prompt_tokens` から理論上限を出し、
+  境界 2 点を POST して受理／拒否を確認する）
 
