@@ -2382,11 +2382,13 @@ CLINE_MODEL_TABLE = {
     "qwen38tf": {
         # TensorFold native は Qwen3.8-27B でテキスト専用（/v1/models が pictures: false /
         # vision: false を返す実測）。サーバー側が sampling を temperature 1.0 / top_k 20 /
-        # top_p 0.95 で起動し、thinking は --thinking-budget 4096 で絞る
+        # top_p 0.95 で起動し、thinking は --thinking-budget 4096 で絞る。
+        # context は YaRN 4 で 1,048,576（compose の TF_ROPE_YARN / TF_CONTEXT、2026-11-25 実測）。
+        # max_output は serve.sh の --max-tokens 16384 がサーバー側の上限
         "images": False,
-        "context_max": 262144,
+        "context_max": 1048576,
         "max_output_recommended": 8192,
-        "max_output_max": 32768,
+        "max_output_max": 16384,
         "temperature": 1.0,
     },
     "flashnexthibana": {
