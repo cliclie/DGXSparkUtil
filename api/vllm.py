@@ -2413,6 +2413,8 @@ CLINE_MODEL_TABLE = {
         # qwen38tfm4 の MLX **8bit** 版（TensorFold/Qwen3.8-27B-MLX-8bit・~30 GiB）。
         # 同一イメージ・同一 serve.sh・同一 YaRN 1M / parallel 1 / FP8 KV。ポートは 8034。
         # 精度以外の sampling / thinking / context 設定は m4 と完全に揃えている。
+        # max_output_recommended 8192 は実測下限: max_tokens は思考+本文の合計で、2500 だと
+        # 短い依頼でも completion が全部 reasoning になり content が空になった（2026-11-25 実測）
         "images": False,
         "context_max": 1048576,
         "max_output_recommended": 8192,
