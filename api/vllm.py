@@ -290,6 +290,10 @@ def _engine_kind(base: str) -> tuple[str, str]:
         kind = "sglang"
     elif any(k.startswith("llamacpp:") for k in pm):
         kind = "llamacpp"
+    elif any(k.startswith("tensorfold:") for k in pm):
+        kind = "tensorfold"
+    elif any(k.startswith("hibana_") for k in pm):
+        kind = "hibana"
     elif c["last"]:
         # 混雑で /metrics が空 (TabbyAPI は平常時も 404 で空)。種別が既知なら
         # serviceinfo / /v1/models を叩かずに前回種別を返す (10 秒後に再試行)
@@ -299,6 +303,10 @@ def _engine_kind(base: str) -> tuple[str, str]:
         kind = "tabby"
     elif _is_llamacpp(base):
         kind = "llamacpp"
+    elif _is_tensorfold(base):
+        kind = "tensorfold"
+    elif _is_hibana(base):
+        kind = "hibana"
     if kind:
         # ts は「書き込み時刻」にする。判定自体に 8 秒かかるので、開始時刻を
         # 入れると TTL が実質 2 秒になり毎コール再判定になった (2026-10-28 プロファイル)
@@ -1045,6 +1053,84 @@ def _is_tabbyapi(base: str) -> bool:
     return "TabbyAPI" in _http_get(f"{base}/.well-known/serviceinfo", timeout=3)
 
 
+_OWNED_BY_TENSORFOLD_RE = re.compile(r'"owned_by"\s*:\s*"tensorfold"')
+_OWNED_BY_HIBANA_RE = re.compile(r'"owned_by"\s*:\s*"hibana"')
+
+
+def _is_tensorfold(base: str) -> bool:
+    """TensorFold native かどうかを判定する。
+
+    /metrics が空になるときの種別プロブ。/metrics が返るときは系列名 (tensorfold:) で
+    先に判定されるので、ここは /v1/models を 1 回叩くだけ。
+    TensorFold は /v1/models の owned_by に "tensorfold" を出す(v1.3.4 実測)。
+    """
+    return _OWNED_BY_TENSORFOLD_RE.search(_http_get(f"{base}/v1/models", timeout=3)) is not None
+
+
+def _is_hibana(base: str) -> bool:
+    """Hibana (sharar-project/hibana) かどうかを判定する。
+
+    /v1/models の owned_by は "hibana"、/get_server_info は engine: "hibana" を返す(実測)。
+    """
+    return _OWNED_BY_HIBANA_RE.search(_http_get(f"{base}/v1/models", timeout=3)) is not None
+
+
+def _tensorfold_metrics(pm: dict) -> dict:
+    """TensorFold native の /metrics を vLLM と同じ構造にマッピングする。
+
+    系列名は本機 v1.3.4 実測。`--metrics-open` を付けないと /metrics は空になるため、
+    compose/tensorfold-qwen38/serve.sh は既定で付ける。
+    kv_cache_usage_ratio はラベル {pool="0"} 付きだが _parse_vllm_metrics がラベルを落として
+    集約する。ttft 系列は無い(初手は /health の live に出るだけ)なので e2e のみ。
+    """
+    kv = pm.get("tensorfold:kv_cache_usage_ratio")
+    m = {
+        "requests_running": pm.get("tensorfold:requests_running"),
+        "requests_waiting": pm.get("tensorfold:requests_waiting"),
+        "kv_cache_usage_pct": kv * 100.0 if kv is not None else None,
+        "e2e_latency_s": _hist_avg(pm, "tensorfold:request_latency_seconds"),
+        "ttft_s": None,
+    }
+    if "tensorfold:prompt_tokens_total" in pm or "tensorfold:generation_tokens_total" in pm:
+        now = time.time()
+        m["prompt_tokens_per_s"] = _tps_of("prompt", "tensorfold:prompt_tokens_total", pm, now)
+        m["generation_tokens_per_s"] = _tps_of("generation", "tensorfold:generation_tokens_total", pm, now)
+        _prev_metrics["ts"] = now
+        _prev_metrics["prompt"] = pm.get("tensorfold:prompt_tokens_total", _prev_metrics["prompt"])
+        _prev_metrics["generation"] = pm.get("tensorfold:generation_tokens_total", _prev_metrics["generation"])
+    return m
+
+
+def _hibana_metrics(pm: dict) -> dict:
+    """Hibana の /metrics を vLLM と同じ構造にマッピングする。
+
+    Hibana の /metrics は HELP/TYPE 行の無い素の `name value` 形式で、接頭辞は `hibana_`
+    (vLLM / SGLang のコロン区切りと違う)。_parse_vllm_metrics は # 行を捨てるだけなので
+    そのまま読める。系列名は本機 d474b74 実測。
+
+    floor_holds は GB10 統合メモリ用の安全指標 (MemAvailable が host floor の半分を
+    下回って scheduler が新規受付を保留した回数)。本機は HIBANA_HOST_FLOOR_GIB=16 で
+    運用するので、動く=RAG 併走などでメモリが詰まり始めた合図になる。
+    """
+    m = {
+        "requests_running": pm.get("hibana_running"),
+        "requests_waiting": pm.get("hibana_queued"),
+        # Hibana は KV 使用率を /metrics に出さない (kv_pages と SSD tier は /get_server_info)
+        "kv_cache_usage_pct": None,
+        "e2e_latency_s": None,
+        "ttft_s": pm.get("hibana_ttft_p50"),
+        "floor_holds": pm.get("hibana_floor_holds"),
+    }
+    if "hibana_prefill_tokens" in pm or "hibana_decode_tokens" in pm:
+        now = time.time()
+        m["prompt_tokens_per_s"] = _tps_of("prompt", "hibana_prefill_tokens", pm, now)
+        m["generation_tokens_per_s"] = _tps_of("generation", "hibana_decode_tokens", pm, now)
+        _prev_metrics["ts"] = now
+        _prev_metrics["prompt"] = pm.get("hibana_prefill_tokens", _prev_metrics["prompt"])
+        _prev_metrics["generation"] = pm.get("hibana_decode_tokens", _prev_metrics["generation"])
+    return m
+
+
 _TABBY_ENTRY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d+ \w+:")
 # WSL (modelctl) はログファイルを読む。model-ctl.sh が起こす起動ログ (logs/ctl-*.log) は
 # docker logs と同じ "HH:MM:SS.mmm LEVEL:" 接頭辞だが、TabbyAPI 自身の loguru ファイル
@@ -1708,6 +1794,16 @@ def get_status() -> dict:
             active["metrics"] = _clef_metrics(pm, base)
         else:
             active["metrics"] = _llamacpp_metrics(pm, base)
+    elif kind == "tensorfold":
+        # TensorFold native (--metrics-open 時の /metrics)。系列マッピングは _tensorfold_metrics 参照
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _tensorfold_metrics(pm)
+    elif kind == "hibana":
+        # Hibana (sharar-project/hibana)。/metrics は HELP/TYPE 無し・hibana_ 接頭辞
+        _reset_token_state()
+        _reset_tabby_state()
+        active["metrics"] = _hibana_metrics(pm)
     elif kind == "tabby":
         # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析。
         # ログ解析なのでモデルの HTTP が塞がっているときも値が取れる (混雑時に強い)
@@ -2281,6 +2377,25 @@ CLINE_MODEL_TABLE = {
         "max_output_recommended": 0,
         "max_output_max": 0,
         "temperature": 0.0,
+    },
+    "qwen38tf": {
+        # TensorFold native は Qwen3.8-27B でテキスト専用（/v1/models が pictures: false /
+        # vision: false を返す実測）。サーバー側が sampling を temperature 1.0 / top_k 20 /
+        # top_p 0.95 で起動し、thinking は --thinking-budget 4096 で絞る
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,
+    },
+    "flashnexthibana": {
+        # Hibana の Flash-Next は vision tower を読み込まない（/get_server_info の
+        # vision: false を実測）。thinking は常時 on で reasoning_content に分離される
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,
     },
 }
 
