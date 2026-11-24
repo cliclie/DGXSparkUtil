@@ -1796,12 +1796,13 @@ def get_status() -> dict:
             active["metrics"] = _llamacpp_metrics(pm, base)
     elif kind == "tensorfold":
         # TensorFold native (--metrics-open 時の /metrics)。系列マッピングは _tensorfold_metrics 参照
-        _reset_token_state()
+        # 注意: ここでは _reset_token_state() を呼ばない。呼ぶと prev が毎回消えて
+        # _tps_of のカウンタ差分が永遠に None になる (vLLM 分岐と同じ扱い)
         _reset_tabby_state()
         active["metrics"] = _tensorfold_metrics(pm)
     elif kind == "hibana":
         # Hibana (sharar-project/hibana)。/metrics は HELP/TYPE 無し・hibana_ 接頭辞
-        _reset_token_state()
+        # 同上: prev を保つため _reset_token_state() は呼ばない
         _reset_tabby_state()
         active["metrics"] = _hibana_metrics(pm)
     elif kind == "tabby":
