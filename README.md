@@ -89,6 +89,8 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [prefill 速度が「完了バースト ÷ ポーリング間隔」で過大表示 (2026-11-25 / 本機 = WhitebearATOM1)](#prefill-速度が完了バースト--ポーリング間隔で過大表示-2026-11-25--本機--whitebearatom1)
 - [Hibana (flashnexthibana / port 8033) の prefill/decode: 秒カウンタが皆無な場合の組み立て (2026-11-25 / 本機 = WhitebearATOM1)](#hibana-flashnexthibana--port-8033--の-prefilldecode-秒カウンタが皆無な場合の組み立て-2026-11-25--本機--whitebearatom1)
 - [atom1 / atom2 / WSL の三構成共有と modelctl の適用範囲 (2026-11-25 / 本機 = WhitebearATOM1)](#atom1--atom2--wsl-の三構成共有と-modelctl-の適用範囲-2026-11-25--本機--whitebearatom1)
+- [2026-11-25 更新の atom2 反映: prefill/decode「割る量を dt にしない」方式と hipfire 検証で一致 (2026-11-25 / 本機 = WhitebearATOM2)](#2026-11-25-更新の-atom2-反映-prefilldecode割る量を-dt-にしない方式と-hipfire-検証で一致-2026-11-25--本機--whitebearatom2)
+
 
 
 
@@ -5865,6 +5867,8 @@ strata 系 9 モード化で list 自体も重くなっていた（モード毎�
 20 モードに増えたため list 最適化（バッチ化・python 起動の集約）は別途の価値あり。
 
 ## prefill 速度が「完了バースト ÷ ポーリング間隔」で過大表示 (2026-11-25 / 本機 = WhitebearATOM1)
+> **2026-11-25 に atom2 側にも反映済み**: 本機 WhitebearATOM2 にも反映し、hipfire 実測で新方式の値が真値と一致することを検証した（末尾「2026-11-25 更新の atom2 反映」節）。本節のエンジン（TensorFold / Hibana / vLLM / SGLang）は atom2 で稼働中コンテナなし。
+
 
 **症状**: qwen38tfm8 のダッシュボードで prefill が **5,678 tok/s** といった実在しない
 速度を示す（本機の真値 1,100 tok/s 前後）。decode は正常。値が正しく取れるときもあり、
@@ -6025,3 +6029,45 @@ DGXSparkUtil は atom1 / atom2 / WSL の三構成で共有される。`modelctl`
   allocated` → graph capture 群 → `warmup done` → `ssd tier: 9 stored prefixes` →
   `serving on http://0.0.0.0:8033` で終わり、**リクエスト統計は 1 行も出ない**）。
   `/opt/hibana` はコンテナ内パスなので本機シェルからは見えない
+
+
+## 2026-11-25 更新の atom2 反映: prefill/decode「割る量を dt にしない」方式と hipfire 検証で一致 (2026-11-25 / 本機 = WhitebearATOM2)
+
+atom1 (WhitebearATOM1) が出した 2026-11-25 の更新一式 (`75f761a` → `506fc84` = 14 コミット) を本機 (atom2 / R9700) に反映した。実作業は **稼働サービス 2 件の再起動のみ**で、hipfire の実測で新方式の値が真値と一致していることを確認した。
+
+### 反映対象（主要コード変更と本機への影響）
+
+| コミット | 内容 | 本機への影響 |
+|---|---|---|
+| `506fc84` | prefill/decode を「累計トークン ÷ 累計秒」方式へ（vLLM / SGLang / TensorFold / Hibana）。dt 基準は `/metrics` 本文取得時刻 (`_metrics_ts`)。キャッシュ命中トークンは分子から減算 | `vllm.py` 本体の一般ロジック。本機の compose 経路（vllm / sglang / hipfire）も同じコードを通る |
+| `51c4a2d` / `4eb5d0b` / `9399eb1` | TensorFold native / Hibana のエンジン判定・メトリクス・thermal 対象追加、prev 共有と 0.0 / null 修正 | atom1 固有コンテナ向け。エンジン判定部のみ compose 経路と共通 |
+| `7998d6a` / `6c05f17` / `f4c3cb6` / `4f2c97f` | CLINE_MODEL_TABLE（qwen38tfm4/m8、strataI2）と thermal 対象コンテナ名、ドキュメント | 表の atom1 モデルエントリは本機では無害（表示対象外） |
+| `9290c37` | `modelctl.py` の `_TTL_S` 1.5→5 s と active uptime 再利用（front 9 s abort でのヘッダ/モデルタブ空白化の修正） | WSL ブリッジ経路のみ。本機の compose には無影響 |
+| `5610976` / `40345e8` / `e21236a` | strataI2（wsl modelctl） | WSL 専用 |
+| `2762ed9` / `50fc488` | README のみ | — |
+
+`api/requirements.txt` / `requirements.lock` は変更なしで、venv 依存の更新は不要。
+
+### git 反映とサービス再起動
+
+```bash
+cd ~/DGXSparkUtil
+git fetch --all --prune
+git merge --ff-only origin/main   # 75f761a → 506fc84（fast-forward）
+git status -sb                    # ## main...origin/main（ahead/behind なし）
+sudo systemctl restart dgx-spark-api thermal-guard   # 07:13:44 両 active
+```
+
+thermal-guard 再起動ログは `mode=power high=85 crit=95 caps=300/250/210W release=10s` で既存運用から不変。
+
+### 検証（hipfire / qwen3.8:27b-mq4-xts、2026-11-25 07:15 実測）
+
+6,020 tok の prompt + 64 tok 生成の chat リクエストを送信（finish=length、wall 2.05 s、TTFT 1.253 s、E2E 2.045 s）。`/api/vllm/status` の表示は **prefill 4,843.8 T/s / decode 80.9 T/s** で 2 秒間隔 9 サンプル同一値。hipfire の histogram 平均（4,843.8 / 80.9）と、usage と wall から逆算した真値（prefill 6,020 ÷ 1.2535 = 4,802.7 / decode 64 ÷ 0.7915 = 80.9）に **±1% 以内**で一致した。旧方式だと 2 秒完了のリクエストは完了窓の dt 次第で数千〜1 万 T/s 超の過大表示になったところ。
+
+`api/server.log`（`StandardOutput=append`）に再起動後の例外 0 件（`grep -cE 'Traceback|ERROR'` = 0）。idle 時の振る舞いはエンジン経路ごとに異なるが誤値（dt 基準の過大値）は出ない: vLLM / SGLang 経路はリクエスト未完了（カウンタ 0）なら null、完了済みなら累計平均へフォールバック、hipfire は histogram 平均のため idle でも直近値が残る。
+
+### 補足
+
+- 節の本体エンジン（TensorFold / Hibana / vLLM / SGLang）は本機で稼働中のコンテナがなく、実測できたのは hipfire のみ。hipfire 経路自体は従来どおり histogram 差分方式で、その値が真値と一致していることを確認した
+- `thermal_guard.sh` の既定コンテナリスト（hibana / tensorfold 追加）は atom1 の clock モード向け。本機の power モードではコンテナリストは発動判定に使われない（変更前から同じ）
+
