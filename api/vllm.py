@@ -2396,12 +2396,23 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 0,
         "temperature": 0.0,
     },
-    "qwen38tf": {
+    "qwen38tfm4": {
         # TensorFold native は Qwen3.8-27B でテキスト専用（/v1/models が pictures: false /
         # vision: false を返す実測）。サーバー側が sampling を temperature 1.0 / top_k 20 /
         # top_p 0.95 で起動し、thinking は --thinking-budget 4096 で絞る。
         # context は YaRN 4 で 1,048,576（compose の TF_ROPE_YARN / TF_CONTEXT、2026-11-25 実測）。
         # max_output は serve.sh の --max-tokens 16384 がサーバー側の上限
+        # 量子化は MLX **4bit**（15.0 GiB・TensorFold 公称 quality 88%・decode 51.75 T/s 実測）
+        "images": False,
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 16384,
+        "temperature": 1.0,
+    },
+    "qwen38tfm8": {
+        # qwen38tfm4 の MLX **8bit** 版（TensorFold/Qwen3.8-27B-MLX-8bit・~30 GiB）。
+        # 同一イメージ・同一 serve.sh・同一 YaRN 1M / parallel 1 / FP8 KV。ポートは 8034。
+        # 精度以外の sampling / thinking / context 設定は m4 と完全に揃えている。
         "images": False,
         "context_max": 1048576,
         "max_output_recommended": 8192,
