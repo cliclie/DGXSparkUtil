@@ -161,14 +161,27 @@ _prev_metrics: dict = {"ts": None, "prompt": None, "generation": None}
 # tensorfold / hibana は専用の prev スロットを使う。他エンジン経路 (modelctl の
 # llamacpp/exllama など) が呼ぶ _reset_token_state() は "prompt"/"generation" しか
 # 初期化しないため、UI が両方の status を交互に引いても差分が消えない。
-for _k in ("ts_tf", "prompt_tf", "generation_tf", "ts_hb", "prompt_hb", "generation_hb"):
+for _k in ("ts_hb", "prompt_hb", "generation_hb",
+           "live_tf", "ts_tf_live",
+           "tok_tf_pre", "sec_tf_pre", "tok_tf_gen", "sec_tf_gen",
+           "tok_vllm_pre", "sec_vllm_pre", "tok_vllm_gen", "sec_vllm_gen",
+           "tok_sg_pre", "sec_sg_pre", "tok_sg_gen", "sec_sg_gen"):
     _prev_metrics.setdefault(_k, None)
+
+# /metrics 本文を取得した時刻。_engine_kind が本文を取りに行くのは status 組み立ての
+# 前半で、now = time.time() を取るのはメトリクス生成時 (status が混雑で数秒かかる)。
+# カウンタ差分を割る dt に後者を使うと実測窓より dt が長くなり速度が過小になるため、
+# 本文と組になるこの時刻を使う (2026-11-25 実測: status 組み立てが 1 s 弱ずれる)。
+_metrics_ts: float = 0.0
 
 # Strata の直近スループットキャッシュ（idle/unloaded で 5s 以内は前回値を返す）
 _strata_last_metrics: dict = {}
 # hipfire の /metrics はリクエスト単位の値を累計 histogram (sum/count) でしか出さないため、
 # 前回ポーリングとの差分を取る状態を保持する (_hipfire_server_metrics が使う)
 _hipfire_prev: dict = {}
+# Hibana の decode 秒は e2e 総和 − ttft 総和 (p50 近似) なので、実 TTFT のばらつきで分母が
+# 縮む窓がある。そこでは直近有効な値を短 TTL で返す (_hibana_metrics が使う)
+_hibana_last: dict = {}
 
 
 def _tps_of(key: str, metric: str, pm: dict, now: float, ts_key: str = "ts") -> float | None:
@@ -188,6 +201,95 @@ def _tps_of(key: str, metric: str, pm: dict, now: float, ts_key: str = "ts") -> 
 def _reset_token_state() -> None:
     """カウンタ差分を初期化(メトリクス無効/エンジン切替時)。"""
     _prev_metrics["ts"], _prev_metrics["prompt"], _prev_metrics["generation"] = None, None, None
+
+
+# ---------------------------------------------------------------- スループット算出
+# vLLM / SGLang / TensorFold / Hibana のトークンカウンタは **リクエスト完了時にのみ**
+# 増加する (vLLM は observe_one_finished_request、TensorFold は本機実測で
+# prompt_tokens_total が 4000 tok 生成の最中に終始 0)。それをポーリング間隔 dt で
+# 割ると「完了バースト ÷ dt」という過大値になる (2026-11-25 実測: 10,560 tok の
+# prefill は 9.38 s かけて完了した = 真値 1,126 T/s なのに、完了窓の dt 0.97 s で
+# 10,900 T/s と表示。5,060 tok では 3,626 T/s、2,660 tok では 2,216 T/s。
+# 過大倍率 ≒ prefill 所要時間 ÷ dt で、フロントの POLL_MS=2 s なら 11,356 tok 完了時
+# にちょうど 5,678 T/s が出る)。
+# 対策は「割る量を dt にしない」こと。エンジンが公開する **秒カウンタ**
+# (prefill / decode に費やした累計秒) で割れば、窓の切り分けに依存せず、
+# どのクライアントがいつ status を引いても同じ真値になる。
+# clef の llamacpp:prompt_tokens_total ÷ prompt_seconds_total (1026 行付近) と
+# hipfire の histogram 差分と同じ方針の一般化。
+
+_PREFILL_TOK_KEYS = (
+    "tensorfold:prompt_tokens_total",
+    "vllm:prompt_tokens_total",
+    "sglang:prompt_tokens_total",
+)
+_PREFILL_SEC_KEYS = (
+    # 完了済みリクエストの prefill 秒 (トークンカウンタと同じ「完了時に加算」起点なので
+    # 分子分母が整合する)。TensorFold の prefill_busy_seconds_total は使わない:
+    # idle unload (engine_parked) でリセットされ累計の起点が壊れ、キャッシュ命中分を
+    # 含まないので完了時 prompt_tokens_total と割ると過大になる (2026-11-25 実測 4,851 T/s)。
+    "tensorfold:request_prefill_seconds_sum",
+    "vllm:request_prefill_time_seconds_sum",
+    "sglang:request_prefill_time_seconds_sum",
+)
+# キャッシュ命中した prompt トークンは prefill の作業ではない。分子から引かないと
+# 分母 (実 prefill 秒) と整合せず過大になる (本機実測: 10,560 tok 中 8,192 tok が
+# キャッシュ命中で、実 prefill 2,368 tok ÷ 2.18 s = 1,088 T/s が真値)。
+_PREFILL_SUB_KEYS = ("tensorfold:prompt_tokens_cached_total", "vllm:prompt_tokens_cached_total")
+_DECODE_TOK_KEYS = (
+    "tensorfold:generation_tokens_total",
+    "vllm:generation_tokens_total",
+    "sglang:generation_tokens_total",
+)
+_DECODE_SEC_KEYS = (
+    "tensorfold:request_decode_seconds_sum",
+    "vllm:request_decode_time_seconds_sum",
+    "sglang:request_decode_time_seconds_sum",
+)
+
+
+def _first_key(pm: dict, keys: tuple[str, ...]) -> str | None:
+    """pm に実在する最初の系列名 (エンジンごとに系列名が違うため候補を順に見る)。"""
+    for k in keys:
+        if pm.get(k) is not None:
+            return k
+    return None
+
+
+def _tps_by_seconds(
+    pm: dict,
+    slot: str,
+    tok_keys: tuple[str, ...] = _PREFILL_TOK_KEYS,
+    sec_keys: tuple[str, ...] = _PREFILL_SEC_KEYS,
+    sub_keys: tuple[str, ...] = _PREFILL_SUB_KEYS,
+) -> float | None:
+    """累計トークン ÷ 累計秒。ポーリング間隔に依存しない prefill/decode 速度。
+
+    分子は sub_keys (キャッシュ命中トークンのように実作業ではない分) を減算する。
+    直近窓の差分比 (Δtok / Δsec) を優先し、その窓に増分が無いときはエンジン起動
+    からの累計比にフォールバックする。分母が「実際に prefill/decode に費やした秒」
+    なので、完了時にしか増えないカウンタでも過大にならない。
+    秒カウンタを持たないエンジン (ExLlamaV3 の /health など) は None を返すので、
+    呼び出し側は _tps_of にフォールバックする。
+    """
+    tk, sk = _first_key(pm, tok_keys), _first_key(pm, sec_keys)
+    if tk is None or sk is None:
+        return None
+    tok, sec = pm[tk], pm[sk]
+    for k in sub_keys:
+        v = pm.get(k)
+        if v is not None:
+            tok -= v
+    pk, sk_ = f"tok_{slot}", f"sec_{slot}"
+    prev_tok, prev_sec = _prev_metrics.get(pk), _prev_metrics.get(sk_)
+    _prev_metrics[pk], _prev_metrics[sk_] = tok, sec
+    if prev_tok is not None and prev_sec is not None:
+        d_sec, d_tok = sec - prev_sec, tok - prev_tok
+        if d_sec > 0 and d_tok > 0:
+            return d_tok / d_sec
+    if sec > 0 and tok > 0:
+        return tok / sec
+    return None
 
 
 # ---------------------------------------------------------------- 基本ユーティリティ
@@ -278,6 +380,7 @@ def _engine_kind(base: str) -> tuple[str, str]:
     (TabbyAPI は /metrics が 404) では last 採用が serviceinfo 判定を永久にスキップし、
     前機種の種別に固定される (2026-11-01: SGLang → TabbyAPI 切替で prefill/decode 消失)。
     """
+    global _metrics_ts
     now = time.time()
     c = _engine_cache
     if c["base"] != base:
@@ -287,8 +390,12 @@ def _engine_kind(base: str) -> tuple[str, str]:
         # tabby / unknown は /metrics 本文を使わない (ログ解析で取る) ので取りに行かない。
         # 混雑時に毎回 2 秒払わないため (2026-10-28)
         text = "" if c["kind"] in ("tabby", "unknown") else _http_get(f"{base}/metrics", timeout=2)
+        if text:
+            _metrics_ts = time.time()
         return c["kind"], text
     text = _http_get(f"{base}/metrics", timeout=2)
+    if text:
+        _metrics_ts = time.time()
     pm = _parse_vllm_metrics(text) if text else {}
     kind = None
     if any(k.startswith("vllm:") for k in pm):
@@ -923,12 +1030,19 @@ def _sglang_metrics(pm: dict) -> dict:
         "ttft_s": _hist_avg(pm, "sglang:time_to_first_token_seconds"),
     }
     if "sglang:prompt_tokens_total" in pm or "sglang:generation_tokens_total" in pm:
-        now = time.time()
-        m["prompt_tokens_per_s"] = _tps_of("prompt", "sglang:prompt_tokens_total", pm, now)
-        m["generation_tokens_per_s"] = _tps_of("generation", "sglang:generation_tokens_total", pm, now)
-        _prev_metrics["ts"] = now
-        _prev_metrics["prompt"] = pm.get("sglang:prompt_tokens_total", _prev_metrics["prompt"])
-        _prev_metrics["generation"] = pm.get("sglang:generation_tokens_total", _prev_metrics["generation"])
+        # 秒カウンタ (request_prefill/decode_time_seconds_sum) があればそれで割る。
+        # 無いビルドは従来の差分/dt にフォールバック (完了バーストで過大になる既知挙動)。
+        pre = _tps_by_seconds(pm, "sg_pre", ("sglang:prompt_tokens_total",), _PREFILL_SEC_KEYS)
+        gen = _tps_by_seconds(pm, "sg_gen", ("sglang:generation_tokens_total",), _DECODE_SEC_KEYS, ())
+        if pre is None and gen is None:
+            now = time.time()
+            pre = _tps_of("prompt", "sglang:prompt_tokens_total", pm, now)
+            gen = _tps_of("generation", "sglang:generation_tokens_total", pm, now)
+            _prev_metrics["ts"] = now
+            _prev_metrics["prompt"] = pm.get("sglang:prompt_tokens_total", _prev_metrics["prompt"])
+            _prev_metrics["generation"] = pm.get("sglang:generation_tokens_total", _prev_metrics["generation"])
+        m["prompt_tokens_per_s"] = pre
+        m["generation_tokens_per_s"] = gen
     return m
 
 
@@ -1091,10 +1205,15 @@ def _tensorfold_metrics(pm: dict) -> dict:
     集約する。ttft は tensorfold:time_to_first_token_seconds の sum/count (2026-11-25 実測)。
 
     prompt_tokens_total / generation_tokens_total は **完了したリクエスト分のみ**加算される
-    (本機実測: 4000 tok 生成の最中に両カウンタが終始 0)。そのままでは長い 1 リクエストの
-    最中にスループットが出ないので、decode はライブストリームが生成中の本数を数える
-    generation_tokens_running を足した累計生成量として扱う。prefill に対応するゲージは
-    無いので、完了単位 (短いリクエストが連続するとき) だけ値が出る。
+    (本機実測: 10,560 tok の prefill 中、9.38 秒間 prompt_tokens_total は 0 のまま。
+    filling_prompt_tokens_left だけが 4096 tok チャンクで減っていく)。それをポーリング
+    間隔で割ると完了瞬間に 10,900 T/s という過大値になる (真値 1,126 T/s)。
+    2026-11-25 の実測に基づく修正:
+    - prefill: 完了済み prompt トークン (キャッシュ命中を除く) ÷ 完了済み prefill 秒。
+      増分が無い窓 (プレフィル中・アイドル) は同じ起点の累計比を返すので、
+      「プレフィル中は 0 が続き、完了瞬間だけ飛び、その後 0 のまま」という挙動が消える
+    - decode: ライブ生成は generation_tokens_running の増分 ÷ /metrics 取得窓。
+      完了済み分は request_decode_seconds_sum で割る (ポーリング間隔で割らない)
     """
     kv = pm.get("tensorfold:kv_cache_usage_ratio")
     m = {
@@ -1104,21 +1223,63 @@ def _tensorfold_metrics(pm: dict) -> dict:
         "e2e_latency_s": _hist_avg(pm, "tensorfold:request_latency_seconds"),
         "ttft_s": _hist_avg(pm, "tensorfold:time_to_first_token_seconds"),
     }
-    if "tensorfold:prompt_tokens_total" in pm or "tensorfold:generation_tokens_total" in pm:
-        gen, live = pm.get("tensorfold:generation_tokens_total"), pm.get("tensorfold:generation_tokens_running")
-        pm2 = dict(pm)
-        if gen is not None and live is not None:
-            pm2["tensorfold:generation_tokens_total"] = gen + live
-        now = time.time()
-        m["prompt_tokens_per_s"] = _tps_of("prompt_tf", "tensorfold:prompt_tokens_total", pm2, now, "ts_tf")
-        m["generation_tokens_per_s"] = _tps_of("generation_tf", "tensorfold:generation_tokens_total", pm2, now, "ts_tf")
-        _prev_metrics["ts_tf"] = now
-        _prev_metrics["prompt_tf"] = pm2.get("tensorfold:prompt_tokens_total", _prev_metrics["prompt_tf"])
-        _prev_metrics["generation_tf"] = pm2.get("tensorfold:generation_tokens_total", _prev_metrics["generation_tf"])
+    # prefill: 完了済み prompt トークンからキャッシュ命中を引いた分 ÷ 完了済み prefill 秒。
+    # filling_prompt_tokens_left による瞬時値は採らない。prefill_busy_seconds_total が
+    # idle unload (engine_parked) でリセットされて窓の分母が壊れる上、filling が
+    # 4096 tok チャンク境界でしか減らないため窓が粗い (2026-11-25 実測で 4,851 T/s が出た)。
+    # prefill 速度はモデル固有でほぼ一定なので、直近完了リクエストの平均が実用値になる。
+    m["prompt_tokens_per_s"] = _tps_by_seconds(
+        pm, "tf_pre", ("tensorfold:prompt_tokens_total",),
+        ("tensorfold:request_prefill_seconds_sum",), _PREFILL_SUB_KEYS,
+    )
+
+    gen, live = pm.get("tensorfold:generation_tokens_total"), pm.get("tensorfold:generation_tokens_running")
+    pm2 = dict(pm)
+    if gen is not None and live is not None:
+        pm2["tensorfold:generation_tokens_total"] = gen + live
+    dec = None
+    prev_live, prev_ts = _prev_metrics.get("live_tf"), _prev_metrics.get("ts_tf_live")
+    ts_now = _metrics_ts or time.time()
+    if (live is not None and prev_live is not None and live > prev_live
+            and prev_ts is not None and ts_now > prev_ts):
+        dec = (live - prev_live) / (ts_now - prev_ts)
+    if dec is None:
+        dec = _tps_by_seconds(pm2, "tf_gen", _DECODE_TOK_KEYS, _DECODE_SEC_KEYS, ())
+    _prev_metrics["live_tf"], _prev_metrics["ts_tf_live"] = live, ts_now
+    m["generation_tokens_per_s"] = dec
     return m
 
+# /get_server_info の spec_stats を 15 秒キャッシュで読む (_hibana_metrics が使う)。
+# round_ms は decode ラウンド (1 ステップ) 平均 = TPOT 相当で、/metrics の avg_step_ms は
+# prefill を含む e2e 平均なので TPOT に使えない (2026-11-25 実測: round_ms 39.4 ms /
+# avg_step_ms 308.9 ms、rounds と decode_steps は常に同値)
+_HIBANA_GSI_TTL = 15.0
+_hibana_gsi: dict = {"ts": 0.0, "spec": {}}
 
-def _hibana_metrics(pm: dict) -> dict:
+
+def _hibana_spec_stats(base: str) -> dict:
+    """Hibana の /get_server_info から spec_stats を 15 秒キャッシュで返す。
+
+    目的は rounds / round_ms (decode ラウンド平均) のみ。取得失敗時は {} を返す。
+    """
+    now = time.time()
+    if _hibana_gsi["spec"] and now - _hibana_gsi["ts"] < _HIBANA_GSI_TTL:
+        return _hibana_gsi["spec"]
+    spec: dict = {}
+    body = _http_get(f"{base}/get_server_info", timeout=5)
+    try:
+        data = json.loads(body) if body else None
+        if isinstance(data, dict) and isinstance(data.get("spec_stats"), dict):
+            spec = data["spec_stats"]
+    except ValueError:
+        spec = {}
+    if spec:
+        _hibana_gsi.update({"ts": now, "spec": spec})
+    return spec
+
+
+
+def _hibana_metrics(pm: dict, base: str = "") -> dict:
     """Hibana の /metrics を vLLM と同じ構造にマッピングする。
 
     Hibana の /metrics は HELP/TYPE 行の無い素の `name value` 形式で、接頭辞は `hibana_`
@@ -1128,6 +1289,30 @@ def _hibana_metrics(pm: dict) -> dict:
     floor_holds は GB10 統合メモリ用の安全指標 (MemAvailable が host floor の半分を
     下回って scheduler が新規受付を保留した回数)。本機は HIBANA_HOST_FLOOR_GIB=16 で
     運用するので、動く=RAG 併走などでメモリが詰まり始めた合図になる。
+
+    スループット: 秒カウンタは存在しない (2026-11-25 実測の全系列は admitted /
+    finished / cancelled / retractions / rejected / prefill_chunks / prefill_tokens /
+    decode_steps / decode_tokens / steps / avg_step_ms / queued / prefilling / running /
+    floor_holds / ttft_p50 / ttft_p95 / ttft_window_count / ttft_window_capacity /
+    messages_server_tools_ignored)。prefill_tokens / decode_tokens は **完了時に一括
+    加算**される (本機実測: 4,893 tok の prefill 中も 1,557 のまま、完了と同時に 4,978)
+    ので、ポーリング間隔で割ると完了バーストになる。秒は合計値から組み立てる:
+    - e2e 秒の総和  = steps × avg_step_ms / 1000  (実測 17 × 477.3 ms = 8.11 s、
+      実 e2e 合計 7.62 s と 6% 差)
+    - ttft 秒の総和 = ttft_p50 × ttft_window_count (近似。2.4118 × 3 = 7.24 s、実 6.94 s)
+    - prefill = prefill_tokens ÷ ttft 総和  (4,978 ÷ 7.24 = 688 T/s。実測 622〜764 T/s。
+      prefill_tokens はキャッシュ命中を含まない: 4,893 tok 中 1,472 cached のとき +3,421)
+    - decode  は /get_server_info の spec_stats を使う。round_ms が decode ラウンド (1
+      ステップ) 平均 = TPOT 相当で、/metrics の avg_step_ms は prefill を含む e2e 平均なので
+      TPOT に使えない (実測: round_ms 39.4 ms / avg_step_ms 308.9 ms、rounds == decode_steps)。
+      decode = decode_tokens ÷ (rounds × round_ms / 1000)  (34 × 39.44 ms = 1.34 s で
+      172 tok → 128 T/s。実測 63〜111 T/s)
+    - spec_stats が取れないときだけ e2e 総和 − ttft 総和 (p50 近似) にフォールバックする
+      (83 ÷ 0.88 = 94 T/s)。ttft 総和は p50 近似なので、その差が e2e 総和の 5% 未満に
+      縮むと分母が発散する (実測: 差 0.029 s で 4,444 T/s)。その場合は従来の差分/dt へ
+    - prefill は p50 近似なので、キャッシュ命中で速いリクエスト (実測 2,245 T/s) は過小に
+      なる。オーダーが合い、0 に落ちず、呼び出し元で一致する値が出ることを優先した
+    累計同士の比なのでポーリング間隔と呼び出し元に依存せず、アイドルでも 0 に落ちない。
     """
     m = {
         "requests_running": pm.get("hibana_running"),
@@ -1139,12 +1324,50 @@ def _hibana_metrics(pm: dict) -> dict:
         "floor_holds": pm.get("hibana_floor_holds"),
     }
     if "hibana_prefill_tokens" in pm or "hibana_decode_tokens" in pm:
-        now = time.time()
-        m["prompt_tokens_per_s"] = _tps_of("prompt_hb", "hibana_prefill_tokens", pm, now, "ts_hb")
-        m["generation_tokens_per_s"] = _tps_of("generation_hb", "hibana_decode_tokens", pm, now, "ts_hb")
-        _prev_metrics["ts_hb"] = now
-        _prev_metrics["prompt_hb"] = pm.get("hibana_prefill_tokens", _prev_metrics["prompt_hb"])
-        _prev_metrics["generation_hb"] = pm.get("hibana_decode_tokens", _prev_metrics["generation_hb"])
+        steps, step_ms = pm.get("hibana_steps"), pm.get("hibana_avg_step_ms")
+        ttft, tcnt = pm.get("hibana_ttft_p50"), pm.get("hibana_ttft_window_count")
+        e2e_sum = steps * step_ms / 1000.0 if steps and step_ms else None
+        ttft_sum = ttft * tcnt if ttft and tcnt else None
+        pt, dt = pm.get("hibana_prefill_tokens"), pm.get("hibana_decode_tokens")
+        pre = pt / ttft_sum if pt and ttft_sum else None
+        dec = None
+        # decode 秒の最良材料は /get_server_info の spec_stats。round_ms は decode ラウンド
+        # 平均 (TPOT 相当) で、rounds は decode_steps と常に同値 (2026-11-25 実測 34/34)。
+        # 実測: rounds 34 × 39.44 ms = 1.34 s、decode_tokens 172 → 128 T/s (実測 63〜111)
+        ss = _hibana_spec_stats(base) if base else {}
+        rounds, rms = ss.get("rounds"), ss.get("round_ms")
+        if dt and rounds and rms and rms > 0:
+            dec = dt / (rounds * rms / 1000.0)
+        # spec_stats が取れない窓だけ e2e 総和 − ttft 総和 (p50 近似) にフォールバックする。
+        # ttft 総和は p50 近似なので、実 TTFT のばらつきが大きいと両者がほぼ等しくなり
+        # 分母が発散する (2026-11-25 実測: 差 0.029 s で 4,444 T/s)。
+        # 差が e2e 総和の 5% 以上のときだけ採用する。
+        if dec is None and dt and e2e_sum and ttft_sum:
+            d = e2e_sum - ttft_sum
+            if d >= 0.05 * e2e_sum:
+                dec = dt / d
+        # 有効な窓の値を 5 秒保持する (Strata の _strata_last_metrics と同じ方針)。
+        # 分母が縮んだ窓で 0 に落ちて front が古い値を無期限保持するのを防ぐ
+        if dec is not None:
+            _hibana_last.update({"ts": time.time(), "gen": dec})
+        elif _hibana_last.get("gen") is not None and time.time() - _hibana_last.get("ts", 0.0) <= 5.0:
+            dec = _hibana_last.get("gen")
+        # 組み立て不能な項目 (steps / ttft 未公開、分母が発散) だけ従来の差分/dt に
+        # フォールバックする (完了バーストで過大になる既知の挙動)
+        now = None
+        if pre is None:
+            now = time.time()
+            pre = _tps_of("prompt_hb", "hibana_prefill_tokens", pm, now, "ts_hb")
+            _prev_metrics["ts_hb"] = now
+            _prev_metrics["prompt_hb"] = pm.get("hibana_prefill_tokens", _prev_metrics["prompt_hb"])
+        if dec is None:
+            if now is None:
+                now = time.time()
+                _prev_metrics["ts_hb"] = now
+            dec = _tps_of("generation_hb", "hibana_decode_tokens", pm, now, "ts_hb")
+            _prev_metrics["generation_hb"] = pm.get("hibana_decode_tokens", _prev_metrics["generation_hb"])
+        m["prompt_tokens_per_s"] = pre
+        m["generation_tokens_per_s"] = dec
     return m
 
 
@@ -1789,15 +2012,23 @@ def get_status() -> dict:
             "num_preemptions": g("vllm:num_preemptions_total"),
         }
 
-        # トークンスループット(カウンター差分・入力/出力分離)。系列が存在する場合のみ算出
+        # トークンスループット(入力/出力分離)。系列が存在する場合のみ算出
         # (vLLM、または --enable-metrics 有効の SGLang)。
+        # 秒カウンタ (request_prefill/decode_time_seconds_sum) で割るのが正。
+        # vLLM のトークンカウンタはリクエスト完了時にのみ増えるため、ポーリング間隔で
+        # 割ると完了バースト ÷ dt の過大値になる (TensorFold で 2026-11-25 実測)。
         if "vllm:prompt_tokens_total" in pm or "vllm:generation_tokens_total" in pm:
-            now = time.time()
-            active["metrics"]["prompt_tokens_per_s"] = _tps_of("prompt", "vllm:prompt_tokens_total", pm, now)
-            active["metrics"]["generation_tokens_per_s"] = _tps_of("generation", "vllm:generation_tokens_total", pm, now)
-            _prev_metrics["ts"] = now
-            _prev_metrics["prompt"] = pm.get("vllm:prompt_tokens_total", _prev_metrics["prompt"])
-            _prev_metrics["generation"] = pm.get("vllm:generation_tokens_total", _prev_metrics["generation"])
+            pre = _tps_by_seconds(pm, "vllm_pre", ("vllm:prompt_tokens_total",), _PREFILL_SEC_KEYS)
+            gen = _tps_by_seconds(pm, "vllm_gen", ("vllm:generation_tokens_total",), _DECODE_SEC_KEYS, ())
+            if pre is None and gen is None:
+                now = time.time()
+                pre = _tps_of("prompt", "vllm:prompt_tokens_total", pm, now)
+                gen = _tps_of("generation", "vllm:generation_tokens_total", pm, now)
+                _prev_metrics["ts"] = now
+                _prev_metrics["prompt"] = pm.get("vllm:prompt_tokens_total", _prev_metrics["prompt"])
+                _prev_metrics["generation"] = pm.get("vllm:generation_tokens_total", _prev_metrics["generation"])
+            active["metrics"]["prompt_tokens_per_s"] = pre
+            active["metrics"]["generation_tokens_per_s"] = gen
     elif kind == "sglang":
         # SGLang (--enable-metrics 有効)。系列名マッピングは _sglang_metrics 参照
         _reset_tabby_state()
@@ -1813,15 +2044,15 @@ def get_status() -> dict:
             active["metrics"] = _llamacpp_metrics(pm, base)
     elif kind == "tensorfold":
         # TensorFold native (--metrics-open 時の /metrics)。系列マッピングは _tensorfold_metrics 参照
-        # 注意: ここでは _reset_token_state() を呼ばない。呼ぶと prev が毎回消えて
-        # _tps_of のカウンタ差分が永遠に None になる (vLLM 分岐と同じ扱い)
+        # 注意: ここでは _reset_token_state() を呼ばない。呼ばれると prev (累計トークン/秒) が
+        # 毎回消えて窓差分が永遠に取れなくなる (vLLM 分岐と同じ扱い)
         _reset_tabby_state()
         active["metrics"] = _tensorfold_metrics(pm)
     elif kind == "hibana":
         # Hibana (sharar-project/hibana)。/metrics は HELP/TYPE 無し・hibana_ 接頭辞
         # 同上: prev を保つため _reset_token_state() は呼ばない
         _reset_tabby_state()
-        active["metrics"] = _hibana_metrics(pm)
+        active["metrics"] = _hibana_metrics(pm, base)
     elif kind == "tabby":
         # TabbyAPI: /metrics が 404 → docker logs のリクエスト毎統計を解析。
         # ログ解析なのでモデルの HTTP が塞がっているときも値が取れる (混雑時に強い)

@@ -86,6 +86,12 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [Clef-Flash (clef・atom2) の Cline 設定値と decision-only 表示（2026-11-21 / 本機 = WhitebearATOM2）](#clef-flash-clefatom2-の-cline-設定値と-decision-only-表示2026-11-21--本機--whitebearatom2)
 - [Clef-Flash の WSL 追加 (clef・modelctl) への追従（2026-11-22 / 本機 = Whitebear2026 WSL2）](#clef-flash-の-wsl-追加-clefmodelctl-への追従2026-11-22--本機--whitebear2026-wsl2)
 - [モデルタブの Cline設定値コピーが inert で無音失敗 (2026-11-23 / 本機 = WhitebearATOM2)](#モデルタブの-cline設定値コピーが-inert-で無音失敗-2026-11-23--本機--whitebearatom2)
+- [prefill 速度が「完了バースト ÷ ポーリング間隔」で過大表示 (2026-11-25 / 本機 = WhitebearATOM1)](#prefill-速度が完了バースト--ポーリング間隔で過大表示-2026-11-25--本機--whitebearatom1)
+- [Hibana (flashnexthibana / port 8033) の prefill/decode: 秒カウンタが皆無な場合の組み立て (2026-11-25 / 本機 = WhitebearATOM1)](#hibana-flashnexthibana--port-8033--の-prefilldecode-秒カウンタが皆無な場合の組み立て-2026-11-25--本機--whitebearatom1)
+- [atom1 / atom2 / WSL の三構成共有と modelctl の適用範囲 (2026-11-25 / 本機 = WhitebearATOM1)](#atom1--atom2--wsl-の三構成共有と-modelctl-の適用範囲-2026-11-25--本機--whitebearatom1)
+
+
+
 
 ## 目的
 
@@ -5857,3 +5863,165 @@ strata 系 9 モード化で list 自体も重くなっていた（モード毎�
 **残課題（未対応・記録のみ）**: bridge list 単体 ~3.4 s の本体は
 `model-ctl.sh` のモード毎サブプロセス（strata の config JSON を読む `python3 -c` など）。
 20 モードに増えたため list 最適化（バッチ化・python 起動の集約）は別途の価値あり。
+
+## prefill 速度が「完了バースト ÷ ポーリング間隔」で過大表示 (2026-11-25 / 本機 = WhitebearATOM1)
+
+**症状**: qwen38tfm8 のダッシュボードで prefill が **5,678 tok/s** といった実在しない
+速度を示す（本機の真値 1,100 tok/s 前後）。decode は正常。値が正しく取れるときもあり、
+長い推論のあいだ 0 ではなく古い値が灰色 (stale) で残り続ける。
+
+**原因**（`api/vllm.py`、4 件）:
+
+1. **TensorFold の `prompt_tokens_total` は完了したリクエスト分のみ加算**される
+   （本機実測: 10,560 tok の prefill 中 9.38 秒のあいだカウンタは 0 のまま、
+   `filling_prompt_tokens_left` だけが 4096 tok チャンクで減少）。`_tensorfold_metrics()`
+   はそのカウンタ差分を **ポーリング間隔 dt で割っていた**ため「完了バースト ÷ dt」が
+   そのまま表示された。過大倍率 ≒ prefill 所要時間 ÷ dt で、front の `POLL_MS = 2000`
+   なら 11,356 tok 完了時にちょうど 5,678 T/s になる（スクショの値と一致）。
+   実測: 10,560 tok → **10,900 T/s**（真値 1,126）/ 5,060 tok → **3,626 T/s**（真値 1,130）
+   / 2,660 tok → 2,216 T/s（真値 1,180）
+2. **差分は先に status を引いたクライアントだけが 1 回貰える使い捨て値**。`_prev_metrics`
+   の prev を呼び出し元で共有するため、ブラウザ (2 s) と他クライアントが同時に引くと
+   片方だけ非ゼロ・他は 0（実測: 完了直後に 0.48 s 間隔で 10 連打 → 1 回目 3,626、2〜10 回目 0）
+3. **dt が `/metrics` 取得時刻でなく status 組み立て後の `time.time()`** で、混雑時に歪む
+4. front の `pickMetric()` が 0/null の間も最後の非ゼロ値を**無期限保持**するため、
+   プレフィル中は完了瞬間のスパイク値が画面に居座る
+
+**修正**（`api/vllm.py`）: 「割る量を dt にしない」を全エンジン共通化。
+
+- `_tps_by_seconds()` を追加（**累計トークン ÷ 累計秒**。`_PREFILL_TOK_KEYS` /
+  `_PREFILL_SEC_KEYS` / `_PREFILL_SUB_KEYS` でエンジン別系列名に対応）。直近窓の差分比を
+  優先し、増分が無い窓は同じ起点の累計比にフォールバックするので、
+  どのクライアントがいつ status を引いても同じ真値になる
+- 対象: TensorFold / Hibana / vLLM / SGLang（ExLlamaV3 の `/health` は秒カウンタが
+  無いため従来 `_tps_of` のまま）。llama.cpp / clef / hipfire / strata / TabbyAPI は
+  元から瞬时ゲージ・秒カウンタ・ログ実測 T/s を使っており対象外
+- 分子から `prompt_tokens_cached_total` を減算（キャッシュ命中は prefill 作業ではない。
+  本機実測: 10,560 tok 中 8,192 tok が命中、実 prefill 2,368 tok ÷ 2.18 s = 1,088 T/s）
+- TensorFold の `prefill_busy_seconds_total` は使わない: idle unload (`engine_parked`) で
+  リセットされ累計の起点が壊れ、キャッシュ命中を含まないため完了時カウンタと割ると過大
+  （実測 4,851 T/s）。`request_prefill_seconds_sum`（HELP 行が「合計をトークン数で割るのが
+  速度」と定義）を分母にする
+- decode: ライブ生成は `generation_tokens_running` の増分 ÷ `/metrics` 取得窓
+  （`_metrics_ts` を新設し status 組み立て時間を除外）、完了済みは `request_decode_seconds_sum`
+
+**検証 (2026-11-25 実測・qwen38tfm8 / port 8034)**:
+
+| 区間 | 修正前 | 修正後 |
+|---|---|---|
+| アイドル | 0.0（front が古いスパイク値を保持） | **941.7** = (42,263 − 8,192) ÷ 36.18 s |
+| prefill 中 2.9 s（3,214 tok） | 0.0 | **941.7 → 1,156.5**（= 3,214 ÷ 2.78 s、実測 1,190 T/s） |
+| 完了後 | 0.0 | **957.0**（累計比） |
+| decode | 完了瞬間だけ 8.3 | 生成中 16.6 / 52.1（running 増分）、完了後 **39.0** = 14,497 ÷ 372.0 s |
+
+`prompt_tokens_per_s` が 0 に落ちず真値域 (900〜1,200 T/s) に収まり続けることを
+採取 CSV（`/tmp/pf_probe*.csv`）で確認。API 反映は `MainPID` を kill して
+`Restart=always` による自動再起動（sudo 不要、稼働中モデルは巻き込まれない）。
+
+**エンジン別のログ出力実態 (2026-11-25 に本機の docker logs で実測)**:
+
+| エンジン | ログに速度が出るか | 実測した行 | api/vllm.py の取得経路 |
+|---|---|---|---|
+| **TensorFold native** | **出る** | `[tensorfold] done chatcmpl-x prompt=10560 cached=8192 tokens=8 ttft=2.179 decode=0.182 elapsed=2.361 tok/s=38.5` | `/metrics` 累計のみ（**ログ未解析**） |
+| **vLLM** | **出る** | `Avg prompt throughput: 819.1 tokens/s, Avg generation throughput: 0.1 tokens/s, Running: 0 reqs, Prefix cache hit rate: 0.0%`（1 秒窓の平均） | `/metrics` 差分＋秒カウンタ（**ログ未解析**） |
+| **SGLang** | **出る** | `Prefill batch, #new-token: 2048, #cached-token: 0, input throughput (token/s): 2404.64`（チャンク毎） | `/metrics` 差分＋秒カウンタ（**ログ未解析**） |
+| **TabbyAPI** | 出る | `#9427 chat/completions: 121 tokens generated at 33.6 T/s` / `prompt 84,482 tokens, none cached, 84,482 new in 88.7 s` | **ログ解析済み** (`_TABBY_START_RE` / `_TABBY_DONE_RE`) |
+| **Strata** | 出る | `[strata] done: 414 tokens in 5.5 s (75.3 tok/s)` | `/metrics/prometheus` + **ログ解析済み** (`_STRATA_DONE_RE`) |
+| **llama.cpp** | 出る | `prompt eval time = ... ms / N tokens (Y tokens per second)`、`total time = 5543.70 ms / 414 tokens` | `/metrics` ゲージ + **ログ解析済み** (`_llamacpp_log_metrics`) |
+| **Hibana** | **一切出ない** (`serving on http://0.0.0.0:8033` のみ) | – | `/metrics` 合計値から秒を組み立てる (`_hibana_metrics`) |
+
+→ TensorFold native のログ行は `/metrics` より正確な材料を全部持つ（`ttft` = prefill 秒、
+`decode` = decode 秒、`cached` でキャッシュ命中を除外できる）。`/metrics` 累計から算出した
+値と完全一致した（`prompt=10560 cached=8192 ttft=2.179` → (10560−8192)/2.179 = **1,087 T/s**
+対 API 実測 1,088 / `prompt=3214 ttft=2.783` → **1,155 T/s** 対 1,156.5 /
+`tokens=40 decode=0.768` → **52.1 T/s** 対 52.1）。ログ解析を追加すれば「直近 1 リクエストの
+実測速度」と「キャッシュ命中時の実速度」を出せる（**未実装**）。
+
+**残課題（未対応・記録のみ）**:
+
+- vLLM / SGLang の秒カウンタ系列名は実機未起動のため未確認。存在しなければ従来の差分/dt に
+  フォールバックする（`_tps_by_seconds()` が `None` を返す）。vLLM 実機で
+  `request_prefill_time_seconds_sum` の有無を確認したい。Hibana は同日に実機で系列を確定済み
+  （下記「Hibana … 秒カウンタが皆無な場合の組み立て」節）
+- front の `pickMetric()` が 0/null の間も最後の非ゼロ値を**無期限保持**する（原因 4）。
+  API 側が 0 を返さなくなったので実害は減ったが、**stale 表示に TTL は無い**。0/null が
+  続く時間で灰表示を解除する TTL（例 10 s）を front 側に置く価値あり
+- TensorFold native / vLLM / SGLang のログ解析（`ttft=` / `Avg prompt throughput` /
+  `input throughput (token/s)` を直接読む）は未実装
+
+## Hibana (flashnexthibana / port 8033) の prefill/decode: 秒カウンタが皆無な場合の組み立て (2026-11-25 / 本機 = WhitebearATOM1)
+
+**実測した /metrics 全系列**（HELP/TYPE 行の無い素の `name value` 形式）:
+`admitted / finished / cancelled / retractions / rejected / prefill_chunks /
+prefill_tokens / decode_steps / decode_tokens / steps / avg_step_ms / queued /
+prefilling / running / floor_holds / ttft_p50 / ttft_p95 / ttft_window_count /
+ttft_window_capacity / messages_server_tools_ignored`
+→ **秒カウンタが一切無い**。`_tps_by_seconds()` は分母を組めず `None` を返す。
+`prefill_tokens` / `decode_tokens` は **完了時に一括加算**（4,893 tok のプレフィル中は
+1,557 のまま → 完了と同時に 4,978）で、TensorFold と同じ構造。**ログにはリクエスト統計も
+TTFT も TPOT も 1 行も出ない**（`docker logs hibana-flashnext` は 83 行で
+`serving on http://0.0.0.0:8033` までが起動ログ）のでログ解析は使えない。ただしサーバー内部では
+TTFT も TPOT も計測済みで HTTP に露出している:
+TTFT は `/metrics` の `ttft_p50 / ttft_p95 / ttft_window_count`、TPOT 相当は `/get_server_info`
+の `spec_stats.round_ms`（+ `tokens_per_round`）。`/get_server_info` には他に `scheduler`
+（prefill_chunks / cache hits / ssd tier）と `ledger_gib` / `memory_gib` がある。`config` には
+`traces: null` / `traces_max_mib: 32768` / `trace_confidence: false` があり、トレース機構が
+存在する（出力先未設定。有効化すればリクエスト単位の統計が取れる可能性）。
+
+**`_hibana_metrics()` が合計値から秒を組み立てる**:
+
+- e2e 秒の総和 = `steps × avg_step_ms / 1000`（実測 17 × 477.3 ms = **8.11 s**、実 e2e 計 7.62 s）
+- ttft 秒の総和 = `ttft_p50 × ttft_window_count`（2.4118 × 3 = **7.24 s**、実測 6.94 s）
+- prefill = `prefill_tokens ÷ ttft 総和`
+  （`prefill_tokens` はキャッシュ命中を含まない: 4,893 tok 中 1,472 cached のとき +3,421）
+- decode は **`/get_server_info` の `spec_stats`** を使う: `round_ms` が decode ラウンド
+  （1 ステップ）平均 = **TPOT 相当**で、`rounds` は `decode_steps` と常に同値（実測 34/34）。
+  `decode = decode_tokens ÷ (rounds × round_ms / 1000)`（34 × 39.44 ms = 1.34 s で 172 tok →
+  **128 T/s**）。**`avg_step_ms` は prefill を含む e2e 平均なので TPOT に使えない**（実測
+  round_ms 39.4 ms / avg_step_ms 308.9 ms = **7.8 倍差**）。15 秒キャッシュで読む
+  （`_hibana_spec_stats()`）
+- ttft 総和は **p50 近似**なので、実 TTFT のばらつきが大きいと e2e 総和とほぼ等しくなり
+  分母が発散する（実測: 差 0.029 s で **4,444 T/s**）。**差が e2e 総和の 5% 未満なら不採用**
+  にし、直近有効値を 5 秒保持する（`_hibana_last`。Strata の `_strata_last_metrics` と同じ方針）。
+  `spec_stats` が取れないときのフォールバックが `decode_tokens ÷ (e2e 総和 − ttft 総和)`
+
+**検証 (2026-11-25 実測・flashnexthibana)**: 5 リクエスト（57 / 1,500 / 4,893 / 4,054 /
+1,533 tok）完了後、`prompt_tokens_per_s` **1,227.9**（実測 prefill 域 610〜2,245 T/s の中央）、
+`generation_tokens_per_s` は `spec_stats` 採用後 **128.3**（実測 curl 域 63〜123 T/s）。
+1 リクエスト追加後は prefill **1,031.4** / decode **162.6**（同一リクエストの実測 decode
+123.3 T/s に対し 1.3 倍。採用前は 40.0 で 0.32 倍の過小だった）。プレフィル中・アイドルともに
+0 に落ちず、複数クライアントで同じ値になる。
+`model_name` は起動直後 30 秒キャッシュで旧モデル名 (qwen38tfm8) を示すことがあり、
+`_MODEL_NAME_FAIL_TTL`（10 s）あかりで `RadixArk/Qwen3.8-Flash-Next-NVFP4` に更新される。
+
+**round_ms が体感より速い理由**: `round_ms` は GPU の推論ラウンド秒で、MTP 採用後は 1 ラウンドに
+`tokens_per_round` 5.06 tok 出る（39.44 ms で 5.06 tok = 128 T/s）。ユーザー体感の T/s は
+キュー待ちとサンプリングを含むため低めに出る。実測域と同じオーダーになり、TensorFold
+タイプの完了バーストにはならない。
+
+**既知の過小**: prefill の分母（p50 近似）は「1 リクエストの速度」ではなく全体の平均的比を
+出すため、キャッシュ命中で速いリクエストは過小になる。オーダー一致・0 落ちなし・
+クライアント間一致を優先した（TensorFold のような完了バースト過大は出ない）。
+
+## atom1 / atom2 / WSL の三構成共有と modelctl の適用範囲 (2026-11-25 / 本機 = WhitebearATOM1)
+
+DGXSparkUtil は atom1 / atom2 / WSL の三構成で共有される。`modelctl` 周りは **WSL 固有の
+ロジック**であり、atom1 で無効なのは正常:
+
+- `modelctl.available()` は `config.MODEL_CTL`（環境変数 `DGXUTIL_MODEL_CTL` か
+  `dgxspark.yaml` の `model_ctl`）が空 Path なので atom1 では **False**、`profiles()` は
+  `[]`、`/api/vllm/status` の `engine` は `{}`。`_modelctl_metrics()`（`modelctl.read_log_text`
+  経由のログ読み）は modelctl の `running_profile` 経由でのみ通る **WSL 専用経路**なので、
+  atom1 ではそもそも通らない
+- atom1 / atom2 のログ解析は **docker logs 経路**。`_tabbyapi_metrics()` は `log_text=None`
+  なら docker logs を読む（docstring 明記「従来動作 = atom1 / atom2」）。WSL はコンテナを
+  立てないため、呼び出し側 (`_modelctl_metrics`) がログファイル末尾を渡す
+- `_llamacpp_log_metrics()` は WSL の llamacpp モード専用。atom1 の llama.cpp
+  （`llama-qwen38-*` / `llama-muse-glimmer` コンテナ）は `/metrics` ゲージの
+  `_llamacpp_metrics()` を使う
+- Strata は atom1 にコンテナが存在しない（`docker ps -a` に strata なし）= WSL 専用モード
+- **Hibana も atom1 の docker コンテナ `hibana-flashnext`**。`docker logs hibana-flashnext` を
+  直接読める（2026-11-25 実測: **83 行で起動ログのみ** — `weights loaded in 38s, 53.0 GiB
+  allocated` → graph capture 群 → `warmup done` → `ssd tier: 9 stored prefixes` →
+  `serving on http://0.0.0.0:8033` で終わり、**リクエスト統計は 1 行も出ない**）。
+  `/opt/hibana` はコンテナ内パスなので本機シェルからは見えない
