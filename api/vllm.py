@@ -2655,6 +2655,16 @@ CLINE_MODEL_TABLE = {
     "flashnexthibana": {
         # Hibana の Flash-Next は vision tower を読み込まない（/get_server_info の
         # vision: false を実測）。thinking は常時 on で reasoning_content に分離される
+        # 最大出力トークン（2026-11-25 実測）: 出力単独の固定上限は無く、
+        # hibana/engine/executor.py:275 が `prompt + max_tokens > max_context` を弾くので
+        # **上限 = 262,144 - prompt_tokens**。最小プロンプト（54 tok）で max_tokens
+        # 262,090 受理 / 262,091 で 400 "prompt plus output budget exceeds context limit
+        # 262144" を実測。262,144 は config.json の max_position_embeddings（native）で
+        # launch/settings.py:221 の DEFAULT_CONTEXT が上限（YaRN 不可）。KV プール
+        # 1,157,096 tok（FP8）は 262,144 より大きく非律速。
+        # max_output_max 32768 は**実用上限**（技術的上限 262,090 の 1/8）。max_tokens は
+        # 思考 + 本文の合計で、2048 は 17/20・8192 で 20/20（compose/ja20_gate.py 実測）
+        # なので recommended は 8192 が下限。
         "images": False,
         "context_max": 262144,
         "max_output_recommended": 8192,
