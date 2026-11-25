@@ -2683,6 +2683,12 @@ CLINE_MODEL_TABLE = {
         # max_output_max 32768 は**実用上限**（技術的上限 262,090 の 1/8）。max_tokens は
         # 思考 + 本文の合計で、2048 は 17/20・8192 で 20/20（compose/ja20_gate.py 実測）
         # なので recommended は 8192 が下限。
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,
+    },
     # --- Qwen 3.8 27B hermes 専用（2026-11-26 追加）---------------------------
     # harness-hub/Qwen3.8-27B-hermes-adapted（LoRA r=32・alpha=64・q/k/v/o + gate/up/down）を
     # llama.cpp の --lora で実行時に適用するアダプタ。基底は Qwen/Qwen3.8-27B で本機と同系譜。
