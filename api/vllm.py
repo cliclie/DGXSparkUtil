@@ -2683,11 +2683,40 @@ CLINE_MODEL_TABLE = {
         # max_output_max 32768 は**実用上限**（技術的上限 262,090 の 1/8）。max_tokens は
         # 思考 + 本文の合計で、2048 は 17/20・8192 で 20/20（compose/ja20_gate.py 実測）
         # なので recommended は 8192 が下限。
-        "images": False,
-        "context_max": 262144,
+    # --- Qwen 3.8 27B hermes 専用（2026-11-26 追加）---------------------------
+    # harness-hub/Qwen3.8-27B-hermes-adapted（LoRA r=32・alpha=64・q/k/v/o + gate/up/down）を
+    # llama.cpp の --lora で実行時に適用するアダプタ。基底は Qwen/Qwen3.8-27B で本機と同系譜。
+    # アダプタは **thinking OFF** で訓練されているためサーバーは --reasoning off
+    # （このビルドでは --chat-template-kwargs '{"enable_thinking": false}' は deprecated 警告）。
+    # 実測: thinking ON のまま max_tokens 48 で 48 tok 全部が reasoning_content に入り
+    # content が空になった（2026-11-26）。
+    # LoRA の適用確認は `-lv 5` のログと logprobs 差分で行うこと。既定 verbosity 3 では
+    # llama_adapter_lora_init の行が 1 行も出ず、未適用と誤判定した（2026-11-26 の実測メモ）。
+    # context は YaRN 4 で 1,048,576（native 262,144）・単一 stream（--parallel 1）。
+    # max_output 推奨 8192 は作者評価が「短い出力」で最良（turn 数 40% 未満・生成トークン約 1/2）
+    # なのに合わせ、Cline のエージェント運用の実用値も同じ 8192。
+    "qwen38hermes": {
+        "images": True,  # 動的: --mmproj
+        "context_max": 1048576,
         "max_output_recommended": 8192,
         "max_output_max": 32768,
-        "temperature": 1.0,
+        "temperature": 0.7,
+    },
+    "qwen38hermesq4": {
+        # 同一 LoRA を UD-Q4_K_XL に載せた対照（追加ダウンロード 0）。設定は qwen38hermes と同じ。
+        "images": True,  # 動的: --mmproj
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.7,
+    },
+    "qwen38hermesq8": {
+        # 同一 LoRA を UD-Q8_K_XL に載せた品質 arm（作者評価と同じ Q8 級・29.30 GiB）。
+        "images": True,  # 動的: --mmproj
+        "context_max": 1048576,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.7,
     },
 }
 
