@@ -19,13 +19,15 @@
 # 下げるのは即時、上げるのは 10 秒継続。GB10 の熱時定数が約 100 秒あるので、
 # 対称な条件だと発振する。
 # 対象は THERMAL_CONTAINERS (空白区切りリスト) の LLM が稼働中の時だけ。既定は
-# vllm-nemotron120b と tabbyapi-ornith122b。2026-10-16 は ExLlama 系 (Qwen 4p05) が
+# tabbyapi-flashnext-4p05 / hibana-flashnext / llama-qwen38-27b-hermes
+# （2026-11-27 のモデル整理で残った 3 環境。llm/docs/model-retirement-20261127.md）。
+# 以下は追加時の実測根拠（対象は減っても教訓は残す）。2026-10-16 は ExLlama 系 (Qwen 4p05) が
 # 259K prefill で 88℃/71W と HIGH(90) に届かず圏外だったが、2026-10-28 に Ornith 122B の
 # 259,040 tok prefill で acpitz 97℃ を実測したため ExLlama 系も対象に含めた。
 # 2026-11-25: hibana-flashnext と tensorfold-qwen38-m4 / tensorfold-qwen38-m8 を追加。Hibana の
 # Flash-Next は prefill 1,100-3,743 T/s、TensorFold は YaRN 1M window を長時間 prefill するため
 # （262K window の 8 並列 8 × 9.09 GiB でも同様）、ExLlama 系の教訓 (acpitz 側が発熱する) を
-# そのまま踏む。未反映のあいだはこの 3 つは絞られない。
+# そのまま踏む。
 # 終了時は必ず -rgc する。低クロックに固定されたまま性能を失い続ける方が害が大きい。
 #
 # --- clock groups (2026-11-01 案A / THERMAL_GROUPS=1) ---------------------------
@@ -89,7 +91,7 @@ LOCK_CRIT="${THERMAL_LOCK_CRIT_MHZ:-1000}"
 # 発動対象を無くすが、${VAR:-default} だと空文字も既定リストへフォールバックして
 # 対象が残ってしまう (2026-10-30 に実測: containers=vllm-nemotron120b ... と起動ログ)。
 # 未設定 (atom1 / atom2 の既定) は従来どおり既定リストを使う。
-CONTAINERS="${THERMAL_CONTAINERS-vllm-nemotron120b tabbyapi-ornith122b hibana-flashnext tensorfold-qwen38-m4 tensorfold-qwen38-m8}"
+CONTAINERS="${THERMAL_CONTAINERS-tabbyapi-flashnext-4p05 hibana-flashnext llama-qwen38-27b-hermes}"
 [ -z "${THERMAL_CONTAINER:-}" ] || CONTAINERS="$THERMAL_CONTAINER"
 # 監視間隔: GB10 の温度上昇は 0.4℃/秒なので 2 秒で十分。R9700 は電力切替の応答が
 # 速いので 1 秒 (解放の 2 秒判定を 2 サンプルで見る)。

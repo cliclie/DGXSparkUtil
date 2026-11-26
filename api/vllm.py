@@ -2454,41 +2454,6 @@ def edit_params(profile: str, updates: dict[str, str]) -> dict:
 # ここで補完する。画像対応・温度は compose の command から動的取得できる場合は
 # それを優先し、取得できない場合のみこのテーブルを使う。
 CLINE_MODEL_TABLE = {
-    "nemotron": {
-        "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "muse": {
-        "images": True,  # 動的: --mmproj
-        "context_max": 131072,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 1.0,  # 動的: --temp
-    },
-    "qwen38": {
-        "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38bf16": {
-        "images": True,  # 動的: --limit-mm-per-prompt
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38nvfp4": {
-        "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
     # Strata strataI2（WSL modelctl 専用モード・2026-11-23）: Inkling-2-Mini SQ-20。
     # /health images: true（Inkling-2-Mini-Vision.strata 0.64GB を常備）。context は
     # config 262144（2026-11-23 に 32768→262144 へ再設定・recommended は params の
@@ -2501,48 +2466,6 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
-    "qwen38sglang": {
-        "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38sglangeagle": {
-        "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38sglangdflash": {
-        "images": False,
-        "context_max": 1000000,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38sglangdspark": {
-        "images": False,
-        "context_max": 1000000,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38flashnextexl3": {
-        "images": True,
-        "context_max": 524288,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38flashnextexl3_3p05": {
-        "images": True,
-        "context_max": 524288,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
     "qwen38flashnextexl3_4p05": {
         "images": True,  # vision: true（vision_k6.safetensors・6bit 量子化）
         "context_max": 1048576,  # YaRN factor 4.0（cache_size 1048576・Q8）
@@ -2550,75 +2473,12 @@ CLINE_MODEL_TABLE = {
         "max_output_max": 32768,
         "temperature": 0.6,
     },
-    "ornith122b": {
-        "images": False,  # config_ornith.yml vision: false（作者未検証のため初回は無効）
-        "context_max": 262144,  # ネイティブ（YaRN 未適用・cache_size 262144・Q8）
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,  # 作者推奨（base generation_config.json: temp 0.6 / top-k 20 / top-p 0.95）
-    },
     "mimo_flash": {
         "images": False,  # テキスト専用（Vision/Audio なし）
         "context_max": 262144,  # KV cache_size（1M Q8 は MemAvailable 不足のため 262K）
         "max_output_recommended": 8192,
         "max_output_max": 32768,
         "temperature": 0.6,
-    },
-    "mimo9b": {
-        "images": True,  # 動的: --limit-mm-per-prompt / --mm-processor-kwargs
-        "context_max": 1010000,  # YaRN factor 4.0（Qwen3.5-9B 公式カード推奨値）
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    # --- 2026-11-07 追加 (Qwen3-Coder-Next) / 2026-11-09 追加 (Ripple-65B Preview) ---
-    # 一覧・切替・監視・パラメータ表示は compose 動的パースで自動追従するが、
-    # TabbyAPI 系は command が "main.py --host --port" のみでコンテキストフラグが
-    # 無いため context_max が null になる (フロントの Cline 設定値が「null (最大)」)。
-    "qwen3codernext_exl3": {
-        "images": False,  # vision tower なし（config_qwencoder_exl3.yml: vision: false）
-        # /v1/model の max_seq_len / cache_size 1048576（Q8・exllamav3 側 rope 適用済み）
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 1.0,  # 作者推奨（sampler_overrides/qwen3_coder_next.yml override 1.0）
-    },
-    "qwen3codernext_nvfp4": {
-        "images": False,  # テキスト専用
-        # --max-model-len 1048576（YaRN factor 4.0 を config.json shadow で付与）
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 1.0,  # EXL3 経路と同一（Qwen3-Coder-Next 公式推奨）
-    },
-    "ripplea": {
-        "images": False,  # dense 65B・テキスト専用
-        "context_max": 262144,  # --context-length 262144（native 2097152 の運用値）
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.0,  # generation_config.json に既定値が無いため greedy（temp 1.0 系で日本語破綻の報告）
-    },
-    "ripplead": {
-        "images": False,
-        "context_max": 262144,  # --context-length 262144（DFlash2 draft 付き）
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.0,
-    },
-    "rippleexl3": {
-        "images": False,  # vision tower なし（config_ripple.yml: vision: false）
-        # config_ripple.yml の max_seq_len 262144（cache_size 2097152 は 8 スロット合計）
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.0,  # sampler_overrides/ripple.yml override 0.0
-    },
-    "rippleexl3d": {
-        "images": False,
-        "context_max": 262144,  # config_ripple_dflash.yml の max_seq_len 262144
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.0,
     },
     # --- WhitebearATOM2 (R9700 / VRAM 32GB) 用 -----------------
     "strata": {
@@ -2637,13 +2497,6 @@ CLINE_MODEL_TABLE = {
     },
     "qwen38sglangrocm": {
         "images": False,
-        "context_max": 262144,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.6,
-    },
-    "qwen38gguf": {
-        "images": True,  # 動的: --mmproj
         "context_max": 262144,
         "max_output_recommended": 8192,
         "max_output_max": 32768,
@@ -2673,31 +2526,6 @@ CLINE_MODEL_TABLE = {
         "max_output_recommended": 0,
         "max_output_max": 0,
         "temperature": 0.0,
-    },
-    "qwen38tfm4": {
-        # TensorFold native は Qwen3.8-27B でテキスト専用（/v1/models が pictures: false /
-        # vision: false を返す実測）。サーバー側が sampling を temperature 1.0 / top_k 20 /
-        # top_p 0.95 で起動し、thinking は --thinking-budget 4096 で絞る。
-        # context は YaRN 4 で 1,048,576（compose の TF_ROPE_YARN / TF_CONTEXT、2026-11-25 実測）。
-        # max_output は serve.sh の --max-tokens 16384 がサーバー側の上限
-        # 量子化は MLX **4bit**（15.0 GiB・TensorFold 公称 quality 88%・decode 51.75 T/s 実測）
-        "images": False,
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 16384,
-        "temperature": 1.0,
-    },
-    "qwen38tfm8": {
-        # qwen38tfm4 の MLX **8bit** 版（TensorFold/Qwen3.8-27B-MLX-8bit・~30 GiB）。
-        # 同一イメージ・同一 serve.sh・同一 YaRN 1M / parallel 1 / FP8 KV。ポートは 8034。
-        # 精度以外の sampling / thinking / context 設定は m4 と完全に揃えている。
-        # max_output_recommended 8192 は実測下限: max_tokens は思考+本文の合計で、2500 だと
-        # 短い依頼でも completion が全部 reasoning になり content が空になった（2026-11-25 実測）
-        "images": False,
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 16384,
-        "temperature": 1.0,
     },
     "flashnexthibana": {
         # Hibana の Flash-Next は vision tower を読み込まない（/get_server_info の
@@ -2731,22 +2559,6 @@ CLINE_MODEL_TABLE = {
     # max_output 推奨 8192 は作者評価が「短い出力」で最良（turn 数 40% 未満・生成トークン約 1/2）
     # なのに合わせ、Cline のエージェント運用の実用値も同じ 8192。
     "qwen38hermes": {
-        "images": True,  # 動的: --mmproj
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.7,
-    },
-    "qwen38hermesq4": {
-        # 同一 LoRA を UD-Q4_K_XL に載せた対照（追加ダウンロード 0）。設定は qwen38hermes と同じ。
-        "images": True,  # 動的: --mmproj
-        "context_max": 1048576,
-        "max_output_recommended": 8192,
-        "max_output_max": 32768,
-        "temperature": 0.7,
-    },
-    "qwen38hermesq8": {
-        # 同一 LoRA を UD-Q8_K_XL に載せた品質 arm（作者評価と同じ Q8 級・29.30 GiB）。
         "images": True,  # 動的: --mmproj
         "context_max": 1048576,
         "max_output_recommended": 8192,
