@@ -6188,9 +6188,12 @@ clef 分岐と同じ方針。cached_total は prompt_tokens_total より大き�
   - `temperature 0.7` は作者（harness-hub）の推奨。Qwen 系の既定 1.0 を採用しない
   - 8192 は作者評価が「短い出力」で最良（turn 数 40% 未満・生成トークン約 1/2）なのに合わせ、
     Cline のエージェント運用の実用値も同じ 8192
-- **反映の確認は稼働不要**。`GET /api/vllm/cline?profile=qwen38hermes` は table 由来で、
-  未起動でも `model_id: qwen3.8-27b-hermes` / `context_max: 1048576` /
-  `max_output_recommended: 8192` / `temperature: 0.7` / `supports_images: true` を返す（2026-11-26 実測）
+- **`/api/vllm/cline` は `profile` を受け取らない**（`api/main.py:117` が `get_cline_config()` を
+  引数なしで呼ぶ）。docstring どおり**稼働中モデルの設定を返す**だけなので、
+  `?profile=qwen38hermesq8` と聞いても `base_url` は稼働中の **8035** が返る（2026-11-26 実測）。
+  hermes 3 プロファイルの値は同一（`context_max 1048576` / `max_output_recommended 8192` /
+  `max_output_max 32768` / `temperature 0.7` / `images True`）なので実害はないが、
+  **未稼働の arm の設定をここから読むことはできない**（front のモデルタブの Cline 欄も同じ前提）
 - **llama.cpp の compose 経路は prefill / decode が常に None だった**。`get_status()` の
   llamacpp 分岐は `_llamacpp_metrics(pm, base)` だけで、`--metrics` なしだと `pm={}` →
   スループットはゲージ系列ごと欠落。ログ解析の `_llamacpp_log_metrics` は
@@ -6204,10 +6207,21 @@ clef 分岐と同じ方針。cached_total は prompt_tokens_total より大き�
   ② `_llamacpp_metrics` に `cumulative_fallback` 引数を追加し、compose 分岐だけ `True` を渡す。
   瞬时ゲージは**生成中しか立たず idle で 0** になるため（実測: 生成 3 秒後に 0.0）、
   累計 ÷ 累計秒へフォールバックする（clef / hipfire の方針と同じ。「割る量を dt にしない」方式）
-- **実測（`--metrics` 追加後・`qwen38hermes`）**: 累計 167 tok ÷ 6.44832 s = **25.90 T/s**
-  （`bench_speed.py` の 27 T/s と同水準）。prefill 累計は 61 tok ÷ 1.83631 s = 33.2 T/s だが、
-  これは**起動直後の小リクエストと warmup が混ざる**ので参考値（大きな 1 本の prefill 実測は
-  831〜834 T/s）。`kv_cache_usage_pct` は元から `/slots` 経路で出ていた
+- **実測（`--metrics` 追加後・`qwen38hermes`・`sudo systemctl restart dgx-spark-api` 後）**:
+  `active.metrics` が `generation_tokens_per_s` **26.56** / `prompt_tokens_per_s` **135.1** /
+  `spec_accept_rate_pct` **68.28** / `kv_cache_usage_pct` 0.028% を返すことを確認
+- **prefill の累計平均はリクエスト構成に依存する**。9,812 tok を 11.720 s で処理した 1 本の差分は
+  **837.2 T/s**（`bench_speed.py` の 831〜834 T/s と一致）で、その 1 本の後に累計は
+  135.1 → **717.0 T/s** へ収束した。小さなリクエストが主体のうちは実測より大幅に低く見える
+  （スロット準備・graph replay・MTP draft の定数が効くため）。decode 側は 8 tok の短い生成で
+  16.06 T/s、累計 25.89 T/s（`bench_speed` の 27 T/s と同水準）
+- **vLLM 方式の「キャッシュ命中を分子から引く」を llama.cpp に適用してはいけない**。
+  `_PREFILL_SUB_KEYS` は vLLM / TensorFold 用で、llama.cpp の `llamacpp:prompt_tokens_total` は
+  **命中トークンを数えない**（2026-11-26 実測: 9,812 tok 中 9,808 が命中で
+  `prompt_tokens_total` の差分は **4**、`prompt_tokens_cached_total` の差分が **9,808**）。
+  引き算をすると **−93,908 T/s** という負値になる。分母の `prompt_seconds_total` も実 prefill 秒のみ
+- 命中時の実効は非常に速い（9,812 tok が **0.104 s**。`usage.prompt_tokens_details.cached_tokens`
+  とも一致）。§「Hermes エージェント運用の発見」のキャッシュ全滅はここに乗らない
 - **おまけ: MTP の受理率が取れる**。`llamacpp:spec_decode_num_draft_tokens_total` /
   `llamacpp:spec_decode_num_accepted_tokens_total` を `spec_accept_rate_pct` として追加
   （実測 66.1%）。llama.cpp はログに accept rate を出さない（`--spec-draft-verbosity 0` のため）ので、

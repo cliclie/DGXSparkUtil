@@ -1132,6 +1132,12 @@ def _llamacpp_metrics(pm: dict, base: str, cumulative_fallback: bool = False) ->
     if "llamacpp:predicted_tokens_seconds" in pm:
         m["generation_tokens_per_s"] = pm["llamacpp:predicted_tokens_seconds"]
     if cumulative_fallback:
+        # llamacpp:prompt_tokens_total はキャッシュ命中を数えない（命中は
+        # prompt_tokens_cached_total に別建て。2026-11-26 実測: 9,812 tok 中 9,808 が命中で
+        # 差分は 4、cached の差分は 9,808）。vLLM 用の _PREFILL_SUB_KEYS を真似て
+        # 分子から命中を引くと負値になる（実測 -93,908 T/s）。
+        # prefill 累計は小リクエスト主体だと実測より低く出る（9,812 tok 1 本の差分は 837.2 T/s、
+        # 累計は 135.1 → 717.0 T/s へ収束）
         pt, st = pm.get("llamacpp:prompt_tokens_total"), pm.get("llamacpp:prompt_seconds_total")
         if pt and st and not m.get("prompt_tokens_per_s"):
             m["prompt_tokens_per_s"] = pt / st
