@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import socket
 import subprocess
 import time
@@ -174,8 +173,6 @@ for _k in ("ts_hb", "prompt_hb", "generation_hb",
 # 本文と組になるこの時刻を使う (2026-11-25 実測: status 組み立てが 1 s 弱ずれる)。
 _metrics_ts: float = 0.0
 
-# Strata の直近スループットキャッシュ（idle/unloaded で 5s 以内は前回値を返す）
-_strata_last_metrics: dict = {}
 # hipfire の /metrics はリクエスト単位の値を累計 histogram (sum/count) でしか出さないため、
 # 前回ポーリングとの差分を取る状態を保持する (_hipfire_server_metrics が使う)
 _hipfire_prev: dict = {}
@@ -468,234 +465,6 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
-# ---------------------------------------------------------------- Magnitude (magn)
-# Magnitude はホストインストールの deb (systemd user unit の headless serve)。コンテナは立たない。
-# 稼働判定は serve の API 応答 + magnitude CLI の Runtime 列 (モデルが VRAM にロード済み)。
-# /inference/v1/models はインストール済みモデルを常時列挙するため、これだけでは稼働判定にならない
-# (OS 起動直後、モデル未ロードでも応答する)。
-# ルート /health は serve のライフサイクル状態 (Ready/Starting 等) を返すだけで
-# モデルのロード状態は反映しない。/metrics も存在しない。
-
-def _magn_headers() -> list[str]:
-    if config.MAGN_API_KEY:
-        return ["-H", f"x-api-key: {config.MAGN_API_KEY}"]
-    return []
-
-
-def _magn_models_url(port: int) -> str:
-    return f"http://localhost:{port}/{config.MAGN_BASE_PATH}/models"
-
-
-# magnitude CLI は unix socket 越しの RPC で 0.2s 程度かかるため、短時間キャッシュする
-_MAGN_RUNTIME_TTL = 2.0
-_magn_runtime_cache: tuple[float, bool | None] = (0.0, None)
-
-
-def _magn_runtime_ready(model_id: str) -> bool | None:
-    """magnitude CLI で model_id のロード状態 (Runtime 列) を確認する。
-
-    Returns:
-        True  ... Runtime=Ready (VRAM にロード済み)
-        False ... Unloaded / Requested / Loading / Stopping / Failed など (未ロード)
-        None  ... 判定不能 (CLI 実行失敗・出力形式不明)
-
-    ModelResidency の _tag は Unloaded / Requested / Loading / Ready / Stopping /
-    Resident / Failed。CLI は "  Runtime       Ready" のように表示する。
-    switch_models.sh の check_health() と同じ判定を API 側でも行う。
-    """
-    global _magn_runtime_cache
-    now = time.time()
-    ts, cached = _magn_runtime_cache
-    if cached is not None and now - ts < _MAGN_RUNTIME_TTL:
-        return cached
-    out = _run(["magnitude", "models", "status", model_id], timeout=10)
-    m = re.search(r"Runtime\s+(\S+)", out) if out else None
-    ready: bool | None = None
-    if m:
-        ready = m.group(1) == "Ready"
-    _magn_runtime_cache = (now, ready)
-    return ready
-
-
-def _magn_active(port: int) -> bool:
-    """Magnitude headless serve の稼働判定 (API 応答 + モデルロード済み)。
-
-    api service は root の user session では cliclie の magn-headless.service が
-    見えないため systemctl --user の is-active は使わず、
-    serve 自身の API 応答 + magnitude CLI (unix socket) で判定する。
-    CLI が存在しない環境 (Magnitude 未導入) では従来の API 応答のみで判定する。
-    """
-    if not _http_get(_magn_models_url(port), 5, _magn_headers()):
-        return False
-    if shutil.which("magnitude") is None:
-        return True
-    return _magn_runtime_ready(config.MAGN_MODEL_ID) is True
-
-
-def _magn_journal(tail: int) -> list[str]:
-    """Magnitude headless serve の直近ログ (systemd journal)。
-    コンテナを立てないため docker logs は使えない。稼働判定と同じ systemd user unit を読む。
-    api service は cliclie で稼働するため systemctl --user / journalctl --user が直接使える。
-    """
-    out = _run(
-        [
-            "journalctl",
-            "--user",
-            "-u",
-            config.MAGN_SYSTEMD_UNIT,
-            "-n",
-            str(tail),
-            "--no-pager",
-        ],
-        timeout=10,
-    )
-    return out.splitlines()[-tail:]
-
-
-def _magn_uptime_str(unit: str) -> str | None:
-    """systemd user unit の ActiveEnterTimestamp から稼働時間文字列を算出する。
-    api service は cliclie で稼働するため systemctl --user が直接使える。
-    応答形式: ActiveState=active / ActiveEnterTimestamp=Tue 2026-10-06 11:44:40 JST
-    """
-    out = _run(
-        [
-            "systemctl",
-            "--user",
-            "show",
-            unit,
-            "-p",
-            "ActiveState",
-            "-p",
-            "ActiveEnterTimestamp",
-        ],
-        timeout=5,
-    )
-    if not out:
-        return None
-    active = ts = None
-    for ln in out.splitlines():
-        if ln.startswith("ActiveState="):
-            active = ln.split("=", 1)[1].strip()
-        elif ln.startswith("ActiveEnterTimestamp="):
-            ts = ln.split("=", 1)[1].strip()
-    if active != "active" or not ts:
-        return None
-    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", ts)
-    if not m:
-        return None
-    from datetime import datetime
-
-    try:
-        t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-    uptime = max(0.0, time.time() - t.timestamp())
-    return _fmt_elapsed(uptime)
-
-
-def _magn_usage_stats(model_id: str) -> dict | None:
-    """serving-usage.sqlite の usage 表から直近の完了リクエスト統計を読む (読み取り専用)。
-    Magnitude は /metrics が無いが、リクエスト毎の input/cached/output/generation_ms/first_token_ms を
-    この DB に保持する。KVCache・E2E・TTFT・入出力スループットの算出に使う。
-    """
-    import sqlite3
-
-    db = config.MAGN_USAGE_DB
-    if not db.is_file():
-        return None
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", timeout=1.5)
-        try:
-            row = con.execute(
-                "SELECT completed_at, input, cached, output, generation_ms, first_token_ms "
-                "FROM usage WHERE model=? AND complete=1 ORDER BY completed_at DESC LIMIT 1",
-                (model_id,),
-            ).fetchone()
-        finally:
-            con.close()
-    except Exception:
-        return None
-    if not row:
-        return None
-    completed_at, inp, cached, out, gen_ms, ft_ms = row
-    return {
-        "completed_at": completed_at,
-        "input": inp,
-        "cached": cached,
-        "output": out,
-        "gen_ms": gen_ms,
-        "ft_ms": ft_ms,
-    }
-
-
-
-
-def _magn_metrics(port: int, model_id: str) -> dict:
-    """Magnitude のメトリクス (/metrics 無し)。GPU 負荷で実行中を推定し、
-    serving-usage.sqlite の直近完了リクエストから KVCache・E2E・TTFT・入出力スループットを算出する。
-    - E2E = first_token_ms + generation_ms (秒)
-    - TTFT = first_token_ms (秒)
-    - 入力スループット = input / (first_token_ms/1000)  (プリフィル=初回トークンまでの時間)
-    - 出力スループット = output / (generation_ms/1000)
-    - KVCache 使用率 = (input + output) / context_length * 100
-    前回値保持は front 側で行うため、ここでは直近完了リクエストの算出値をそのまま返す。
-    """
-    gpu: dict = {}
-    try:
-        import metrics
-
-        gpu = metrics._read_gpu()
-    except Exception:
-        gpu = {}
-    load = gpu.get("gpu_load_pct")
-    running = 1 if load is not None and load > 10.0 else 0
-    m = {
-        "requests_running": running,
-        "requests_waiting": 0,
-        "kv_cache_usage_pct": None,
-        "e2e_latency_s": None,
-        "ttft_s": None,
-    }
-    stats = _magn_usage_stats(model_id)
-    if stats:
-        ft_s = stats["ft_ms"] / 1000.0
-        gen_s = stats["gen_ms"] / 1000.0
-        m["e2e_latency_s"] = ft_s + gen_s
-        m["ttft_s"] = ft_s
-        m["prompt_tokens_per_s"] = stats["input"] / ft_s if ft_s > 0 else None
-        m["generation_tokens_per_s"] = stats["output"] / gen_s if gen_s > 0 else None
-        ctx = _magn_context_length(port)
-        if ctx:
-            m["kv_cache_usage_pct"] = min(
-                100.0, (stats["input"] + stats["output"]) / ctx * 100.0
-            )
-    return m
-
-
-def _magn_context_length(port: int) -> int | None:
-    """Magnitude の /inference/v1/models から context_length を読む (Cline 設定補完用)。"""
-    txt = _http_get(_magn_models_url(port), 5, _magn_headers())
-    if not txt:
-        return None
-    m = re.search(r'"context_length"\s*:\s*(\d+)', txt)
-    return int(m.group(1)) if m else None
-
-
-def _strata_health_info(port: int) -> dict:
-    """Strata の /health (key 不要) から max_context / images を読む (Cline 設定補完用)。"""
-    txt = _http_get(f"http://localhost:{port}/health", 5)
-    if not txt:
-        return {}
-    out: dict = {}
-    m = re.search(r'"max_context"\s*:\s*(\d+)', txt)
-    if m:
-        out["max_context"] = int(m.group(1))
-    m = re.search(r'"images"\s*:\s*(true|false)', txt)
-    if m:
-        out["images"] = m.group(1) == "true"
-    return out
-
-
 def _hipfire_models_info(port: int) -> dict:
     """hipfire の /v1/models (key 不要) から n_ctx / images を読む (Cline 設定補完用)。
 
@@ -735,99 +504,6 @@ def _clef_models_info(port: int) -> dict:
     if re.search(r'"output_modalities"\s*:\s*\[[^\]]*"decisions"', txt):
         out["decisions"] = True
     return out
-
-
-def _strata_server_metrics(port: int) -> dict:
-    """Strata の /metrics (Bearer 必須・JSON。Prometheus 形式ではない) をマッピングする。
-
-    生成中は live の瞬時値 (tok_s / prefill_tok_s_mean)、リクエスト直後は完了済み
-    リクエストの実測値を short TTL キャッシュ (5s) で返す（llama.cpp の /metrics が
-    idle で 0 を返すのと同じ「直近値表示」体験）。アイドル継続・unloaded 時は 0。
-    - 出力スループット = live.tok_s → requests 直近完了の decode_tok_s
-    - 入力スループット = live.prefill_tok_s_mean → prompt_tokens ÷ (prompt_ms/1000)
-    - E2E = duration_s / TTFT = first_engine_token_s (直近完了リクエスト)
-    - KVCache 使用率 = (prompt+output) ÷ engine.context × 100 → idle/unloaded で 0
-    """
-    now = time.time()
-    m = {
-        "requests_running": None,
-        "requests_waiting": None,
-        "kv_cache_usage_pct": None,
-        "e2e_latency_s": None,
-        "ttft_s": None,
-        "prompt_tokens_per_s": None,
-        "generation_tokens_per_s": None,
-    }
-    headers = (
-        ["-H", f"Authorization: Bearer {config.STRATA_API_KEY}"]
-        if config.STRATA_API_KEY
-        else None
-    )
-    txt = _http_get(f"http://localhost:{port}/metrics", 5, headers)
-    if not txt:
-        return m
-    try:
-        d = json.loads(txt)
-    except ValueError:
-        return m
-    live = d.get("live") or {}
-    engine = d.get("engine") or {}
-    reqs = d.get("requests") or []
-    # クライアント切断で cancel されたリクエストは decode_tok_s 等が null のため、
-    # 直近の「完了」リクエスト（stop/length）を代表に選ぶ
-    last: dict = {}
-    for r in reqs:
-        if isinstance(r, dict) and r.get("finish") in ("stop", "length"):
-            last = r
-            break
-    if not last and reqs and isinstance(reqs[0], dict):
-        last = reqs[0]
-    m["requests_running"] = live.get("running")
-    m["requests_waiting"] = live.get("queued")
-    if isinstance(last.get("duration_s"), (int, float)):
-        m["e2e_latency_s"] = last["duration_s"]
-    if isinstance(last.get("first_engine_token_s"), (int, float)):
-        m["ttft_s"] = last["first_engine_token_s"]
-    gen = live.get("tok_s")
-    if not gen:
-        gen = last.get("decode_tok_s")
-    m["generation_tokens_per_s"] = gen
-    pre = live.get("prefill_tok_s_mean")
-    if not pre:
-        pt, pms = last.get("prompt_tokens"), last.get("prompt_ms")
-        if pt and pms:
-            pre = pt / (pms / 1000.0)
-    m["prompt_tokens_per_s"] = pre
-    ctx = engine.get("context") or engine.get("max_context")
-    if ctx and last.get("prompt_tokens") is not None:
-        used = (last.get("prompt_tokens") or 0) + (last.get("output_tokens") or 0)
-        m["kv_cache_usage_pct"] = min(100.0, used / float(ctx) * 100.0)
-    # Strata はアイドルが暫く続くとモデルを unload する（/health の loaded が false、
-    # live.state=unloaded）。稼働判定（front の stale 表示）が running>0 参照のため
-    # unloaded では running を 0 に正規化し、スループット・KV は 0 を返す
-    # （llama.cpp の idle 時 /metrics と同じ挙動）。直後 (5s 以内) は計測値を維持
-    if live.get("state") == "unloaded":
-        m["requests_running"] = 0
-    if not m["requests_running"]:
-        cached = _strata_last_metrics
-        if now - cached.get("ts", 0.0) <= 5.0:
-            for k in ("prompt_tokens_per_s", "generation_tokens_per_s",
-                      "kv_cache_usage_pct"):
-                m[k] = cached.get(k)
-        else:
-            m["prompt_tokens_per_s"] = 0.0
-            m["generation_tokens_per_s"] = 0.0
-            m["kv_cache_usage_pct"] = 0.0
-    else:
-        _strata_last_metrics.update(
-            {
-                "ts": now,
-                "prompt_tokens_per_s": m["prompt_tokens_per_s"],
-                "generation_tokens_per_s": m["generation_tokens_per_s"],
-                "kv_cache_usage_pct": m["kv_cache_usage_pct"],
-            }
-        )
-    return m
 
 
 def _hipfire_server_metrics(port: int) -> dict:
@@ -1905,12 +1581,7 @@ def _switching_info() -> dict | None:
     info = _load_profiles().get(_job["profile"])
     ready = False
     if info and info.get("port"):
-        # Magnitude は /health が serve のライフサイクル状態しか返さないため、
-        # モデルロード済み (Runtime=Ready) を含めて稼働完了を判定する
-        if _job["profile"] == "magn":
-            ready = _magn_active(info["port"])
-        else:
-            ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
+        ready = _http_ok(f"http://localhost:{info['port']}/health", timeout=3)
     return {"kind": _job["kind"], "profile": _job["profile"], "ready": ready}
 
 
@@ -1944,10 +1615,6 @@ def get_status() -> dict:
     # 早期 return より前に付与する)
     out["switching"] = _switching_info()
 
-    # Magnitude はホスト serve (コンテナは立たない)。稼働判定は API 応答 + モデルロード済み
-    if running_profile is None and "magn" in profiles and _magn_active(profiles["magn"]["port"]):
-        running_profile = "magn"
-
     # 最終稼働プロファイル (フロントのヘッダプルダウンのフォールバック選択用。再起動を跨ぐ)
     if running_profile is not None:
         config.save_last_active(running_profile)
@@ -1969,22 +1636,6 @@ def get_status() -> dict:
     }
     active.update(_container_state(info["container"]))
 
-    # Magnitude: /metrics は無い。/health は serve のライフサイクル状態のみでモデル未ロードでも
-    # Ready を返すため、健全性は /inference/v1/models (API key 必須) + Runtime=Ready で判定済み。
-    # サーブ中モデル名は MAGN_MODEL_ID。スループットは /metrics 無しで None
-    if running_profile == "magn":
-        active["api_url"] = f"{base}/{config.MAGN_BASE_PATH}"
-        active["health"] = bool(_http_get(_magn_models_url(port), 5, _magn_headers()))
-        active["model_name"] = config.MAGN_MODEL_ID
-        # 稼働時間: コンテナは立たないため systemd user unit の ActiveEnterTimestamp から算出
-        active["uptime_str"] = _magn_uptime_str(config.MAGN_SYSTEMD_UNIT)
-        # メトリクス: /metrics 無し → GPU 負荷から実行中を推定 + usage DB から KVCache・E2E・TTFT・スループット算出
-        active["metrics"] = _magn_metrics(port, config.MAGN_MODEL_ID)
-        # 直近ログ: docker logs 無し → systemd journal
-        active["logs"] = _magn_journal(30)
-        out["active"] = active
-        return out
-
     # API 健全性 (vLLM の /health は本文空・HTTP 200 が正常)
     # 長文推論中は ExLlamaV3 の HTTP ワーカーが塞がり /health が 3 秒で返らない。
     # TCP 接続だけを見て「プロセスは生きている＝混雑中 (busy)」を区別する。
@@ -1992,22 +1643,9 @@ def get_status() -> dict:
     active["api_listening"] = True if active["health"] else _tcp_open(port)
     active["busy"] = bool(active["api_listening"] and not active["health"])
 
-    # サーブ中モデル名（Strata は /v1/* に Bearer key 必須）。30 秒キャッシュで
-    # 混雑時は前値を維持する
-    models_headers = None
-    if running_profile == "strata" and config.STRATA_API_KEY:
-        models_headers = ["-H", f"Authorization: Bearer {config.STRATA_API_KEY}"]
-    active["model_name"] = _model_name(base, models_headers)
-
-    # Strata: /metrics は JSON（Bearer 必須・Prometheus 形式ではない）→
-    # live + requests からマッピングする（_strata_server_metrics 参照）
-    if running_profile == "strata":
-        _reset_token_state()
-        _reset_tabby_state()
-        active["metrics"] = _strata_server_metrics(port)
-        active["logs"] = _logs_tail(info["container"])
-        out["active"] = active
-        return out
+    # サーブ中モデル名。30 秒キャッシュで混雑時は前値を維持する
+    # （2026-11-27 のモデル整理で Bearer key 必須の Strata は削除。残存ラインは認証不要）
+    active["model_name"] = _model_name(base, None)
 
     # hipfire: /metrics は Prometheus 形式 (API key 不要)。瞬时スループットを持たないため
     # 累計 histogram (sum/count) の差分で直近平均を出す (_hipfire_server_metrics 参照)。
@@ -2146,18 +1784,7 @@ def get_log(profile: str, tail: int = 500) -> dict:
         if p.get("engine") in ("llamacpp-docker", "sglang-docker"):
             return {"profile": profile, "logs": _modelctl_docker_logs(profile, tail)}
         return {"profile": profile, "logs": modelctl.tail_log(p.get("log", ""), tail)}
-    if profile == "magn":
-        cmd = [
-            "journalctl",
-            "--user",
-            "-u",
-            config.MAGN_SYSTEMD_UNIT,
-            "-n",
-            str(tail),
-            "--no-pager",
-        ]
-    else:
-        cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
+    cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         text = r.stdout + r.stderr
@@ -2481,6 +2108,10 @@ CLINE_MODEL_TABLE = {
         "temperature": 0.6,
     },
     # --- WhitebearATOM2 (R9700 / VRAM 32GB) 用 -----------------
+    # atom2 の strata / qwen38radiance / qwen38sglangrocm / qwen38gguf は 2026-11-27 の
+    # モデル整理で compose から削除した。ただしこの 3 キーは他機（atom1 / WSL modelctl）の
+    # 同名プロファイル用に残っているため、共有の静的フォールバック表からは外さない
+    # （qwen38gguf は 2026-11-27 の a3573b4 で他機からも削除済み）。
     "strata": {
         "images": True,  # 動的: /health の images（table はフォールバック）
         "context_max": 131072,  # 動的: /health の max_context（IQ3_XXS 既定 128K）
@@ -2669,22 +2300,10 @@ def get_cline_config() -> dict:
     model_id = active.get("model_name") or profile
     hostname = socket.gethostname()
 
-    # Magnitude は base path が inference/v1 (vLLM/llama.cpp とは違う)で、
-    # 外部機器からのアクセスは API key 必須 (network.requireApiKey=true)。
-    # Host ヘッダ検証に .local を通すため ~/.magnitude/config.json の
-    # network.allowedHosts に whitebearatom2.local を登録する (README 参照)。
-    is_magn = profile == "magn"
-    if is_magn:
-        base_url = f"http://{hostname}.local:{port}/{config.MAGN_BASE_PATH}/"
-        api_key = config.MAGN_API_KEY
-    elif profile == "strata":
-        # Strata は /health のみ key 不要。/v1/* は Bearer 認証が必須のため
-        # compose/.env の STRATA_API_KEY をそのまま返す（前面でコピー可能）
-        base_url = f"http://{hostname}.local:{port}/v1/"
-        api_key = config.STRATA_API_KEY
-    else:
-        base_url = f"http://{hostname}.local:{port}/v1/"
-        api_key = "認証なし(任意の値でOK)"
+    # 残存ライン（hipfire / qwen3vl / clef）は base path が v1 で API key 不要
+    # （2026-11-27 のモデル整理で Magnitude（inference/v1 + API key）と Strata（Bearer key）は削除）
+    base_url = f"http://{hostname}.local:{port}/v1/"
+    api_key = "認証なし(任意の値でOK)"
 
     # 動的: コンテキストウィンドウ(推奨)
     ctx = _command_flag_value(service, ["--max-model-len", "--context-length", "--ctx-size"])
@@ -2717,21 +2336,7 @@ def get_cline_config() -> dict:
     context_max = table.get("context_max", context_recommended)
     if context_recommended is None:
         context_recommended = context_max
-    # Magnitude は compose の command にコンテキストフラグが無い → API の context_length を使う
-    if is_magn:
-        magn_ctx = _magn_context_length(port)
-        if magn_ctx is not None:
-            context_recommended = magn_ctx
-            context_max = magn_ctx
-    # Strata は compose の command が無く環境変数設定 → /health から動的取得
-    if profile == "strata":
-        hi = _strata_health_info(port)
-        if hi.get("max_context"):
-            context_recommended = hi["max_context"]
-            context_max = hi["max_context"]
-        if "images" in hi:
-            images = hi["images"]
-    # hipfire も compose の command が無く環境変数設定 → /v1/models から動的取得
+    # hipfire は compose の command が無く環境変数設定 → /v1/models から動的取得
     # （取れないときのみ CLINE_MODEL_TABLE の 262144 にフォールバックする）
     if profile == "hipfire":
         hi = _hipfire_models_info(port)

@@ -227,40 +227,8 @@ def info() -> dict:
     }
 
 
-# ---------------------------------------------------------------- Magnitude (magn)
-# Magnitude はホストインストールの deb (headless serve)。compose プロファイルではないが
-# docker-compose.yml にプレースホルダ service を置いて profiles 対応表に出す。
-# 稼働判定は serve の API 応答 (/inference/v1/models + API key) + magnitude CLI の
-# Runtime 列 (モデルが VRAM にロード済み = Ready)。/inference/v1/models は
-# インストール済みモデルを常時列挙するだけでロード状態を反映しない (OS 起動直後も応答する)。
-# /metrics は存在せず、/health は serve のライフサイクル状態のみを返す。
-
-def _read_compose_env() -> dict:
-    """compose_dir の .env を読む (MAGN_* 設定)。"""
-    env: dict[str, str] = {}
-    p = COMPOSE_DIR / ".env"
-    if p.is_file():
-        for ln in p.read_text().splitlines():
-            ln = ln.strip()
-            if ln and not ln.startswith("#") and "=" in ln:
-                k, v = ln.split("=", 1)
-                env[k.strip()] = v.strip()
-    return env
-
-MAGN_ENV = _read_compose_env()
-MAGN_PORT = int(MAGN_ENV.get("MAGN_PORT", "10100"))
-MAGN_BASE_PATH = MAGN_ENV.get("MAGN_BASE_PATH", "inference/v1")
-MAGN_API_KEY = MAGN_ENV.get("MAGN_API_KEY", "")
-MAGN_MODEL_ID = MAGN_ENV.get("MAGN_MODEL_ID", "qwen3.8-27b:gguf:q6")
-MAGN_SYSTEMD_UNIT = MAGN_ENV.get("MAGN_SYSTEMD_UNIT", "magn-headless.service")
-# Magnitude は /metrics が無いが、リクエスト統計 (~/.magnitude/serving-usage.sqlite の usage 表)
-# に input/cached/output/generation_ms/first_token_ms を保持する。KVCache・E2E・TTFT・スループットをここから算出する。
-MAGN_USAGE_DB = Path(
-    MAGN_ENV.get("MAGN_USAGE_DB", str(Path.home() / ".magnitude" / "serving-usage.sqlite"))
-).expanduser()
-
-# ---------------------------------------------------------------- Strata (strata)
-# Strata は compose サービス (port 8009・コンテナ内 8080)。/health のみ key 不要で
-# max_context / images を返す。/v1/* と /metrics・/slots は Bearer ${STRATA_API_KEY} 必須。
-
-STRATA_API_KEY = MAGN_ENV.get("STRATA_API_KEY", "")
+# ---------------------------------------------------------------- 削除したライン (2026-11-27)
+# atom2 の Magnitude (magn) / Strata (strata) ラインは 2026-11-27 のモデル整理で削除した。
+# 稼働ラインは hipfire / qwen3vl / clef の 3 つ (+ RAG embedding) で、いずれも API key を
+# 使わないため compose/.env を読む機構 (旧 _read_compose_env / MAGN_* / STRATA_API_KEY) は
+# 不要になった。再導入する場合は git タグ pre-model-cleanup-20261127 を参照すること。
