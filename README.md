@@ -94,6 +94,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-25 更新の WSL 反映: prefill/decode 正確性向上を本機 Whitebear2026-WSL へ反映（strataq3 稼働中）](#2026-11-25-更新の-wsl-反映-prefilldecode-正確性向上を本機-whitebear2026-wsl-へ反映strataq3-稼働中)
 - [Qwen3.8-27B hermes (qwen38hermes / port 8035) 反映と llama.cpp `--metrics` の prefill/decode (2026-11-26 / 本機 = WhitebearATOM1)](#qwen38-27b-hermes-qwen38hermes--port-8035--反映と-llama-cpp---metrics--の-prefilldecode-2026-11-26--本機--whitebearatom1)
 - [実装メモ(2026-11-27)](#実装メモ2026-11-27)
+- [2026-11-27 更新の WSL 反映: 3 環境収束（swift40 / strataQ3 / clef）に合わせた modelctl 経路の縮退](#2026-11-27-更新の-wsl-反映-3-環境収束swift40--strataq3--clefに合わせた-modelctl-経路の縮退)
 
 
 
@@ -507,7 +508,7 @@ GPU は **NVIDIA GB10** であり、CPU(Grace)とGPU(Blackwell)が **128GB の�
 - API の待ち受けポートはホストごとに `install_service.env` で決める
   (dgx-spark / atom2 = 8080、WSL2 = **8090**。Strata 系が 8080 を占有するため)
 - `modelctl` は docker を要求しない (TabbyAPI / ExLlamaV3 / Strata / llama.cpp は
-  ネイティブプロセス、bonsai / swiftqwen38 / mimo のみ docker。いずれも
+  ネイティブプロセス（2026-11-27 の WSL 側モード削除で docker でサーブするモードは残っていない）。いずれも
   `model-ctl.sh` が排他制御するため Web 側は再実装しない)
 
 ### フォルダ構成
@@ -2551,41 +2552,40 @@ atom1 (dgx-spark) / atom2 の `switch_models.sh` と同じ役割を `model-ctl.s
   (`start_new_session` だけでは不足だったのは実測で確認。compose 側は従来どおり
   セッション継承のまま = モデルが docker コンテナなので影響ない)
 
-### 管理対象モード (WSL2 の model-ctl.sh / 14 モード)
+### 管理対象モード (WSL2 の model-ctl.sh / 3 モード)
 
-RTX 5090 1 枚では `model-ctl.sh` が 14 モードを **VRAM 排他**で管理する
+RTX 5090 1 枚では `model-ctl.sh` が 3 モードを **VRAM 排他**で管理する
 (同時起動不可。Web から切替すると稼働中を自動停止してから起動する)。
 一覧は `bash api/wsl_modelctl_bridge.sh list` で取得できる（モデル名・導入状態は
 実機の状態が変わるので記載しない）。
 
 | モード | エンジン | API ポート | 備考 |
 |---|---|---|---|
-| `exl` | exllama | 8888 | ExLlamaV3 kit (serve_openai.py) |
-| `tabby` | tabbyapi | 5000 | TabbyAPI |
-| `swift40` / `swift35` | tabbyapi | 5001 / 5002 | 同一 dir、config 違い |
-| `qwen9` | tabbyapi | 5003 | 9B |
-| `bonsai` | llamacpp-docker | 8081 | 稼働判定は `docker inspect` |
-| `swiftqwen38` | sglang-docker | 8040 | 稼働判定は `docker inspect` |
-| `mimo` | sglang-docker | 8050 | 稼働判定は `docker inspect` |
-| `strata15` / `strataS4` / `strataU4` / `strataq3` / `strataC1` | strata | **8080** | 5 モードが port/process 共有 → 代表 1 件に集約 |
-| `llmjp` | llamacpp | 8060 | llama-server (`--metrics` 未指定) |
+| `swift40` | tabbyapi | 5001 | TabbyAPI + exllamav3（Swift EXL3 4.0bpw・内蔵 MTP） |
+| `strataq3` | strata | **8080** | Strata — Swift 1.5 IQ3_S。`/metrics/prometheus` が `llamacpp:` 系列 |
+| `clef` | llamacpp | 8092 | llama-server（decision 専用 `/v1/systemone`）→ `_clef_metrics` 経路 |
 
-- **API の待ち受けは 8090**：Strata 系が 8080 を占有するため本リポジトリの既定 8080 は
+> **2026-11-27**: 他 17 モード（`exl` `tabby` `swift35` `qwen9` `bonsai` `swiftqwen38` `mimo`
+> `llmjp` `maya` `strata15` `strataS4` `strataU4` `strataC1` `strataD4` `strataK4` `strataN4`
+> `strataI2`）は WSL 側で設定・エンジン・重み・Docker イメージまで全削除された。
+> 本リポジトリ側も `_mc_engine_of()` の 3 行化、`_maya_metrics()` / `_exllama_metrics()` /
+> `_MODELCTL_DOCKER_CONTAINERS` の削除、`CLINE_MODEL_TABLE` の strataI2 行削除で追従した
+> （詳細は末尾の実装メモ 2026-11-27。**compose 側 = atom1 / atom2 は無変更**）。
+
+- **API の待ち受けは 8090**：Strata が 8080 を占有するため本リポジトリの既定 8080 は
   使えない (`install_service.env` の `PORT=8090`)
 - 重み未導入のモードは `ready=false` で返り、フロントは**モデル名を灰色**にして
   選択・切替を不可とする（モデルタブ常設一覧とヘッダのモデル選択プルダウンが対象。
   プルダウン側の灰色は実装メモ 2026-10-27。`model-ctl.sh` 側はその場 DL を尋ねるが、
   ブリッジでは `_mc_mode_download` を上書きして走らせない）
 
-### エンジン種別ごとのメトリクス源 (ログ解析は初期実装)
+### エンジン種別ごとのメトリクス源
 
 | モード | engine | 主経路 | ログ解析 |
 |---|---|---|---|
-| `tabby` `swift40` `swift35` `qwen9` | tabbyapi | ログのみ (`/metrics` 無し) | 既存 `_tabbyapi_parse_logs` を**ファイル入力でも再利用** |
-| `strata15` `strataS4` `strataU4` `strataq3` `strataC1` | strata | `/metrics/prometheus` + `/slots` | `[strata] done:` / `thinking:` / `answering:` 行 |
-| `llmjp` | llamacpp | `/slots` (`--metrics` 未指定) | `print_timing` 行 |
-| `exl` | exllama | `/health` の累計カウンタ差分 | — |
-| `bonsai` `swiftqwen38` `mimo` | llamacpp-docker / sglang-docker | 既存の HTTP + `docker logs` をそのまま利用 | 同左 |
+| `swift40` | tabbyapi | ログのみ (`/metrics` 無し) | 既存 `_tabbyapi_parse_logs` を**ファイル入力でも再利用** |
+| `strataq3` | strata | `/metrics/prometheus` + `/slots` | `[strata] done:` / `thinking:` / `answering:` 行 |
+| `clef` | llamacpp | `/metrics`（`llamacpp:` 系列） | 不要（`_clef_metrics` が idle 時 prompt counter 平均で補完） |
 
 - **Strata は `serve/server.py` が `/metrics/prometheus` を llama.cpp と同名系列
   (`llamacpp:prompt_tokens_seconds` 他) で公開している**ため、既存 `_llamacpp_metrics` が
@@ -2596,10 +2596,12 @@ RTX 5090 1 枚では `model-ctl.sh` が 14 モードを **VRAM 排他**で管理
   `YYYY-MM-DD HH:MM:SS.mmm | LEVEL |`)。両形式を受理する
   `_TABBY_ENTRY_RE_ANY` を追加し、`_tabbyapi_metrics(base, container, log_text=None,
   headers=None)` に引数を**末尾追加** (省略時は従来どおり `docker logs`)
-- llama.cpp は `--metrics` 未有効のため `/slots` + ログの
-  `prompt eval time / eval time / total time` 行から prefill/decode・TTFT・E2E を算出
-- ExLlamaV3 kit は `/health` の `prompt_tokens_total` / `completion_tokens_total` を
-  `vllm:*_total` に寄せて既存 `_tps_of` のカウンタ差分機構を再利用
+- llama.cpp は **clef が `--metrics` 有効**なので `/metrics`（`llamacpp:` 系列）を
+  `_clef_metrics` で使う（旧 llmjp の `/slots` + ログ `prompt eval time` 解析は
+  2026-11-27 のモード削除で経路ごと除去した）
+- ExLlamaV3 kit の `/health` カウンタ差分（`_exllama_metrics`）、Maya の JSON `/metrics`
+  （`_maya_metrics`）、Docker 系モードの `docker logs`（`_modelctl_docker_logs`）も
+  2026-11-27 に削除した（WSL に該当モードが残っていない）
 - WSL の TabbyAPI は `/v1/models`・`/v1/model` に API キーが必要
   (`model-ctl.sh` の `_mc_mode_key` が正本)。ブリッジの `params` が返す
   `api_key` を curl ヘッダとして渡す (`headers=None` なら無認証 = 従来動作)
@@ -6344,3 +6346,46 @@ sudo systemctl daemon-reload && sudo systemctl restart dgx-spark-api
   `a3573b4` で 35 モードを削除しており `CLINE_MODEL_TABLE` の `qwen38gguf` で重複、
   README は atom1 側 3 節と同じ位置へ追記が重なった。いずれも**相手の内容を残したまま**
   解決している（`api/vllm.py` 1 箇所・`README.md` 2 箇所）
+
+
+## 2026-11-27 更新の WSL 反映: 3 環境収束（swift40 / strataQ3 / clef）に合わせた modelctl 経路の縮退
+
+**対象**: 本機 = Whitebear2026-WSL（`backend=modelctl`）。**atom1 / atom2 の compose 経路は無変更**。
+
+WSL 側 (`~/llm`) が 2026-11-27 に **3 環境へ収束**した（`swift40` 5001 / `strataQ3` 8080 /
+`clef` 8092）。他 17 モードは設定・エンジン・重み・Docker イメージまで削除され、
+WSL の空きは **620 → 703 GB** になった（削除範囲と復元は `~/llm/strata-kit/deleted-weights-20261127.txt`）。
+本リポジトリ側も同じ日に追従した。
+
+### 変更点
+
+- `api/wsl_modelctl_bridge.sh` の `_mc_engine_of()` を **3 行**に縮退
+  （`swift40`→tabbyapi / `strataq3`→strata / `clef`→llamacpp、他は `unknown`）。
+  `_MC_MODES` 自体が 3 件になったので、削除モードが bridge の一覧に出ることも無い。
+- `api/vllm.py`:
+  - `CLINE_MODEL_TABLE` の `strataI2` 行を削除（`swift40` / `strataq3` / `clef` は
+    `params` の `context_length` が優先なので表の追加は不要）。
+  - `_maya_metrics()`（約 90 行）と `_modelctl_metrics()` の `engine == "maya"` 分岐を削除。
+  - `_exllama_metrics()` と `engine == "exllama"` 分岐を削除。
+  - `_MODELCTL_DOCKER_CONTAINERS` と `_modelctl_docker_logs()`、および
+    `_get_status_modelctl()` / `get_log()` の `llamacpp-docker / sglang-docker` 分岐を削除
+    （WSL に docker サーブモードが残っていない）。
+  - `engine == "llamacpp"` 経路は **clef の `_clef_metrics()` 専用**になった
+    （llmjp 用に作った `_llamacpp_log_metrics()` は削除）。
+- `api/modelctl.py` はモード非依存（ブリッジの TSV を流すだけ）で**ロジック変更なし**。
+
+### 実測（`api/venv/bin/python` で `vllm.get_status()` を直接実行）
+
+| 項目 | 値 |
+|---|---|
+| `containers` | 3 件（`swift40` ready / `strataq3` running / `clef` ready） |
+| `active` | `strataq3` health=True、metrics 8 キー（prefill / decode / E2E / TTFT / KV / running / waiting / expert_cache_hit_pct） |
+| `get_cline_config()` | `swift-1.5-iq3_s` / context 262144 / reasoning 5 段階 |
+| `get_params("strataq3")` | 設定 JSON・モデル ID・ctx 262144 が揃う |
+| `get_log("strataq3", 20)` | 20 行（`logs/ctl-*.log` 経路） |
+
+`bash api/wsl_modelctl_bridge.sh list` は 3 行、`python -m py_compile vllm.py modelctl.py main.py` は OK。
+
+**未実施**: `systemctl restart dgx-spark-api` は sudo が対話認証を要求するため未実行。
+8090 の常駐プロセスは旧コードで動いているので、反映は
+`bash api/restart_service.sh`（port 8090 応答確認まで自動）を 1 回実行すること。
