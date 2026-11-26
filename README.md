@@ -6240,3 +6240,40 @@ clef 分岐と同じ方針。cached_total は prompt_tokens_total より大き�
   リクエストを挟んでも 99.7%）。対策はクライアント側でツール定義の固定
   （順序・集合・説明・capability ゲート由来の増減を止める）
 
+## 2026-11-27 の atom1 反映: 35 モード削除でプロファイル 3 件・`CLINE_MODEL_TABLE` 10 キー（本機 = WhitebearATOM1）
+
+**背景**: `~/llm` 側で 38 環境を 3 環境に整理した（`qwen38flashnextexl3_4p05` / `flashnexthibana` /
+`qwen38hermes`）。35 モードの service が `docker-compose.yml` から消え、重みとキャッシュを約 1.86T 削除した。
+削除台帳は `~/llm/docs/model-retirement-20261127.md`。
+
+**api 側の変更**（commit `a3573b4`）:
+
+| 対象 | 内容 |
+|---|---|
+| `api/vllm.py` | `CLINE_MODEL_TABLE` から 24 件を削除（10 キー残）。**プロファイル一覧は `_load_profiles()` が `~/llm/compose/docker-compose.yml` を直接読む自動導出**なので、service 削除だけでダッシュボードの一覧も 3 件になる（コード変更不要） |
+| `api/thermal_guard.sh` | 既定 `THERMAL_CONTAINERS` を `tabbyapi-flashnext-4p05 hibana-flashnext llama-qwen38-27b-hermes` に |
+
+**反映と実測**（`sudo systemctl restart dgx-spark-api` 実施済み・`active`）:
+
+```bash
+cd ~/DGXSparkUtil/api && ./venv/bin/python -c "import vllm as V; \
+  print(len(V._load_profiles()), sorted(V.CLINE_MODEL_TABLE))"
+# 3 ['clef','flashnexthibana','hipfire','mimo_flash','qwen38flashnextexl3_4p05',
+#    'qwen38hermes','qwen38radiance','qwen38sglangrocm','strata','strataI2']
+```
+
+- プロファイル 3 件 = `qwen38flashnextexl3_4p05`/8016・`flashnexthibana`/8033・`qwen38hermes`/8035
+- 残した 7 キーは**他機・WSL 用**（`strata` / `strataI2` / `mimo_flash` / `qwen38radiance` /
+  `qwen38sglangrocm` / `hipfire` / `clef`）。本機 compose に無い profile の table 行は
+  `/api/vllm/cline` を引いたとき無害なので削除していない
+
+**`thermal-guard` は再起動不要だった（調査）**: `/etc/systemd/system/thermal-guard.service.d/groups.conf` が
+`Environment=THERMAL_GROUPS=1` を注入しており、`thermal_guard.sh` は `GROUPS=1` 分岐（`:526`）では
+`CONTAINERS` を参照しない（温度ゾーンのみで判定）。`CONTAINERS` を docker 照合するのは `GROUPS!=1` の
+clock 分岐だけ。既定値を更新した意義は**スクリプト直実行時**と**monitor-only 運用に切ったとき**の整合。
+
+**教訓**
+
+- **compose が正本**の一覧は、service を消すだけで api 側の追従が済む。消し忘れるのは
+  `CLINE_MODEL_TABLE` と `thermal_guard.sh` 既定値の**手書きハードコード**（README 影響範囲表の 8・9 項どおり）
+- unit の `Environment=` はスクリプト既定より優先。`THERMAL_CONTAINERS` を空文字で注入すると対象ゼロになる
