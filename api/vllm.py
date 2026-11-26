@@ -1110,8 +1110,15 @@ def _llamacpp_slots_kv(base: str) -> float | None:
     return (total_tokens / total_ctx) * 100.0
 
 
-def _llamacpp_metrics(pm: dict, base: str) -> dict:
-    """llama.cpp の Prometheus 系列を vLLM と同じ構造にマッピング。"""
+def _llamacpp_metrics(pm: dict, base: str, cumulative_fallback: bool = False) -> dict:
+    """llama.cpp の Prometheus 系列を vLLM と同じ構造にマッピング。
+
+    cumulative_fallback=True (compose 経路の llama.cpp 用): 瞬时ゲージ
+    (prompt_tokens_seconds / predicted_tokens_seconds) は生成中しか立たず idle で 0 に
+    落ちるため、累計 counter 平均にフォールバックする (clef / hipfire と同じ方針)。
+    実測 (2026-11-26・qwen38hermes): llamacpp:tokens_predicted_total 40 ÷
+    tokens_predicted_seconds_total 1.77768 = 22.5 T/s で bench_speed の実測と同水準。
+    """
     m = {
         "requests_running": pm.get("llamacpp:requests_processing"),
         "requests_waiting": pm.get("llamacpp:requests_deferred"),
@@ -1124,6 +1131,20 @@ def _llamacpp_metrics(pm: dict, base: str) -> dict:
         m["prompt_tokens_per_s"] = pm["llamacpp:prompt_tokens_seconds"]
     if "llamacpp:predicted_tokens_seconds" in pm:
         m["generation_tokens_per_s"] = pm["llamacpp:predicted_tokens_seconds"]
+    if cumulative_fallback:
+        pt, st = pm.get("llamacpp:prompt_tokens_total"), pm.get("llamacpp:prompt_seconds_total")
+        if pt and st and not m.get("prompt_tokens_per_s"):
+            m["prompt_tokens_per_s"] = pt / st
+        gt = pm.get("llamacpp:tokens_predicted_total")
+        gs = pm.get("llamacpp:tokens_predicted_seconds_total")
+        if gt and gs and not m.get("generation_tokens_per_s"):
+            m["generation_tokens_per_s"] = gt / gs
+        # MTP / speculative の受理率。llama.cpp はログに accept rate を出さないが
+        # /metrics にはある (2026-11-26 実測: draft 45 / accepted 24 = 53.3%)。
+        dr = pm.get("llamacpp:spec_decode_num_draft_tokens_total")
+        ac = pm.get("llamacpp:spec_decode_num_accepted_tokens_total")
+        if dr:
+            m["spec_accept_rate_pct"] = (ac or 0.0) / dr * 100.0
     return m
 
 
@@ -2059,7 +2080,9 @@ def get_status() -> dict:
         if running_profile == "clef":
             active["metrics"] = _clef_metrics(pm, base)
         else:
-            active["metrics"] = _llamacpp_metrics(pm, base)
+            # compose 経路の llama.cpp は --metrics を付けた構成。瞬时ゲージは idle で 0 に
+            # 落ちるので累計 counter 平均にフォールバックする (2026-11-26・qwen38hermes)
+            active["metrics"] = _llamacpp_metrics(pm, base, cumulative_fallback=True)
     elif kind == "tensorfold":
         # TensorFold native (--metrics-open 時の /metrics)。系列マッピングは _tensorfold_metrics 参照
         # 注意: ここでは _reset_token_state() を呼ばない。呼ばれると prev (累計トークン/秒) が

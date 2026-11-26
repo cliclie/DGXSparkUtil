@@ -92,6 +92,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [2026-11-25 更新の atom2 反映: prefill/decode「割る量を dt にしない」方式と hipfire 検証で一致 (2026-11-25 / 本機 = WhitebearATOM2)](#2026-11-25-更新の-atom2-反映-prefilldecode割る量を-dt-にしない方式と-hipfire-検証で一致-2026-11-25--本機--whitebearatom2)
 - [flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)](#flashnexthibana-の最大出力トークン-出力単独の上限は無く-262144--prompt-2026-11-25--本機--whitebearatom1)
 - [2026-11-25 更新の WSL 反映: prefill/decode 正確性向上を本機 Whitebear2026-WSL へ反映（strataq3 稼働中）](#2026-11-25-更新の-wsl-反映-prefilldecode-正確性向上を本機-whitebear2026-wsl-へ反映strataq3-稼働中)
+- [Qwen3.8-27B hermes (qwen38hermes / port 8035) 反映と llama.cpp `--metrics` の prefill/decode (2026-11-26 / 本機 = WhitebearATOM1)](#qwen38-27b-hermes-qwen38hermes--port-8035--反映と-llama-cpp---metrics--の-prefilldecode-2026-11-26--本機--whitebearatom1)
 
 
 
@@ -6175,4 +6176,53 @@ clef 分岐と同じ方針。cached_total は prompt_tokens_total より大き�
   strata / llama.cpp / clef / hipfire / TabbyAPI は元から瞬时ゲージ・秒カウンタ・ログ実測 T/s
   方式のため対象外（5869 節の教訓と一致）。WSL 環境で直接効くのは maya / exllama /
   sglang-docker / vllm 系へ切替えた際の再発防止、という位置づけ。
+## Qwen3.8-27B hermes (qwen38hermes / port 8035) 反映と llama.cpp `--metrics` の prefill/decode (2026-11-26 / 本機 = WhitebearATOM1)
+
+- **追加したプロファイルは 3 個**（`api/vllm.py` の `CLINE_MODEL_TABLE`）:
+  `qwen38hermes`（iMatrix NVFP4 15.95 GiB + hermes LoRA F16 0.30 GiB）/ `qwen38hermesq4`（UD-Q4_K_XL）/
+  `qwen38hermesq8`（UD-Q8_K_XL）。3 つとも値は同一で
+  **`context_max 1048576` / `max_output_recommended 8192` / `max_output_max 32768` /
+  `temperature 0.7` / `images True`**
+  - 1,048,576 は YaRN（`--rope-scaling yarn --rope-scale 4.0 --yarn-orig-ctx 262144`）による拡張。
+    native は 262,144
+  - `temperature 0.7` は作者（harness-hub）の推奨。Qwen 系の既定 1.0 を採用しない
+  - 8192 は作者評価が「短い出力」で最良（turn 数 40% 未満・生成トークン約 1/2）なのに合わせ、
+    Cline のエージェント運用の実用値も同じ 8192
+- **反映の確認は稼働不要**。`GET /api/vllm/cline?profile=qwen38hermes` は table 由来で、
+  未起動でも `model_id: qwen3.8-27b-hermes` / `context_max: 1048576` /
+  `max_output_recommended: 8192` / `temperature: 0.7` / `supports_images: true` を返す（2026-11-26 実測）
+- **llama.cpp の compose 経路は prefill / decode が常に None だった**。`get_status()` の
+  llamacpp 分岐は `_llamacpp_metrics(pm, base)` だけで、`--metrics` なしだと `pm={}` →
+  スループットはゲージ系列ごと欠落。ログ解析の `_llamacpp_log_metrics` は
+  **modelctl 経路（`api/vllm.py:1700`）からしか呼ばれない**ため compose では使えない
+  （`/metrics` は起動時 `Start it with --metrics` で 501）
+- **対応は 2 段**。① `~/llm/compose/docker-compose.yml` の hermes 3 サービスに `--metrics` を追加
+  （`clef` と同じ構成）。公開されるのは
+  `llamacpp:prompt_tokens_seconds` / `llamacpp:predicted_tokens_seconds`（瞬时ゲージ）と
+  `llamacpp:prompt_tokens_total` / `prompt_seconds_total` /
+  `llamacpp:tokens_predicted_total` / `tokens_predicted_seconds_total`（累計）
+  ② `_llamacpp_metrics` に `cumulative_fallback` 引数を追加し、compose 分岐だけ `True` を渡す。
+  瞬时ゲージは**生成中しか立たず idle で 0** になるため（実測: 生成 3 秒後に 0.0）、
+  累計 ÷ 累計秒へフォールバックする（clef / hipfire の方針と同じ。「割る量を dt にしない」方式）
+- **実測（`--metrics` 追加後・`qwen38hermes`）**: 累計 167 tok ÷ 6.44832 s = **25.90 T/s**
+  （`bench_speed.py` の 27 T/s と同水準）。prefill 累計は 61 tok ÷ 1.83631 s = 33.2 T/s だが、
+  これは**起動直後の小リクエストと warmup が混ざる**ので参考値（大きな 1 本の prefill 実測は
+  831〜834 T/s）。`kv_cache_usage_pct` は元から `/slots` 経路で出ていた
+- **おまけ: MTP の受理率が取れる**。`llamacpp:spec_decode_num_draft_tokens_total` /
+  `llamacpp:spec_decode_num_accepted_tokens_total` を `spec_accept_rate_pct` として追加
+  （実測 66.1%）。llama.cpp はログに accept rate を出さない（`--spec-draft-verbosity 0` のため）ので、
+  `/metrics` が唯一の取得口。`--spec-draft-n-max` の A/B ゲートに使う
+- **反映に再起動が要る**（`CLINE_MODEL_TABLE` も `_llamacpp_metrics` も import 時に読む）:
+  `sudo systemctl restart dgx-spark-api`。**本機では sudo にパスワードが必要**で、
+  api プロセスは旧コードのまま（`/api/vllm/status` の `prompt_tokens_per_s` が 0.0 のままなら未反映）
+- **コンテナ側の反映には force-recreate が要る**。`switch_models.sh` は対象が稼働中なら
+  即スキップするため、`docker compose --profile qwen38hermes up -d --force-recreate qwen38_27b_hermes`
+  を明示する（2026-11-26 に実施・health `ok` を確認済み）
+- **Hermes エージェント運用の発見（サーバー側では直らない）**: 1 ターン約 14k tok の prefill が
+  **17〜19 s** かかる原因はモデルでなく **ツール定義の並び／集合がターン間で変わること**。
+  Qwen3.8 のチャットテンプレートは `# Tools` が**プロンプト先頭**なので、1 個目のブロックから
+  不一致になりプレフィックスキャッシュが全滅する。実プロンプトの再生では cached **99.7%**、
+  ツールの**並び替えだけ**で cached **0%**、ツール**追加**でも **0%**（12 件の無関係な大型補助
+  リクエストを挟んでも 99.7%）。対策はクライアント側でツール定義の固定
+  （順序・集合・説明・capability ゲート由来の増減を止める）
 
