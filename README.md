@@ -93,6 +93,7 @@ DGX Spark のモニタリングとdocker内のvLLMの切替を行う
 - [flashnexthibana の最大出力トークン: 出力単独の上限は無く 262,144 − prompt (2026-11-25 / 本機 = WhitebearATOM1)](#flashnexthibana-の最大出力トークン-出力単独の上限は無く-262144--prompt-2026-11-25--本機--whitebearatom1)
 - [2026-11-25 更新の WSL 反映: prefill/decode 正確性向上を本機 Whitebear2026-WSL へ反映（strataq3 稼働中）](#2026-11-25-更新の-wsl-反映-prefilldecode-正確性向上を本機-whitebear2026-wsl-へ反映strataq3-稼働中)
 - [Qwen3.8-27B hermes (qwen38hermes / port 8035) 反映と llama.cpp `--metrics` の prefill/decode (2026-11-26 / 本機 = WhitebearATOM1)](#qwen38-27b-hermes-qwen38hermes--port-8035--反映と-llama-cpp---metrics--の-prefilldecode-2026-11-26--本機--whitebearatom1)
+- [実装メモ(2026-11-27)](#実装メモ2026-11-27)
 
 
 
@@ -6277,3 +6278,59 @@ clock 分岐だけ。既定値を更新した意義は**スクリプト直実行
 - **compose が正本**の一覧は、service を消すだけで api 側の追従が済む。消し忘れるのは
   `CLINE_MODEL_TABLE` と `thermal_guard.sh` 既定値の**手書きハードコード**（README 影響範囲表の 8・9 項どおり）
 - unit の `Environment=` はスクリプト既定より優先。`THERMAL_CONTAINERS` を空文字で注入すると対象ゼロになる
+
+## 実装メモ(2026-11-27)
+
+atom2 のモデル整理（magn / strata / 27B 系 4 ライン削除）。
+
+`~/LLM` 側で qwen38radiance / qwen38sglangrocm / qwen38gguf / gptoss / strata / magn の
+6 ラインを削除した。atom2 の稼働ラインは **hipfire（port 8011）/ qwen3vl（8013）/
+clef（8014）+ RAG embedding（8010）** の 4 つに集約され、本リポジトリもその構成に合わせた。
+
+### 変更したファイル
+
+- `api/config.py`: Magnitude / Strata 設定（`_read_compose_env()`、`MAGN_ENV`、`MAGN_PORT`、
+  `MAGN_BASE_PATH`、`MAGN_API_KEY`、`MAGN_MODEL_ID`、`MAGN_SYSTEMD_UNIT`、`MAGN_USAGE_DB`、
+  `STRATA_API_KEY`）を削除。残存 4 ラインはいずれも API key を使わないため、compose/.env を
+  読む機構自体が不要になった。`COMPOSE_DIR` はプロファイル表の読み込みに使うので保持。
+- `api/vllm.py`: `_magn_*` 全 9 関数（headers / models_url / runtime_ready / active / journal /
+  uptime_str / usage_stats / metrics / context_length）、`_strata_health_info`、
+  `_strata_server_metrics`、`_strata_last_metrics` を削除。`get_status()` の magn 稼働フォールバック
+  と magn/strata の早期 return、`_switching_info()` の magn 判定、`get_logs()` の journalctl 分岐、
+  `get_cline_config()` の `is_magn` / strata 分岐、`CLINE_MODEL_TABLE` の atom2 用 4 エントリ
+  （strata / qwen38radiance / qwen38sglangrocm / qwen38gguf）を削除。
+  未使用になった `import shutil` を除去（2875 → 2448 行）。
+
+### 意図的に保持した部分
+
+- **`sglang:*` メトリクスマッパーと `wsl_modelctl_bridge.sh` の strata 系モード**
+  （`strata15` / `strataS4` / … / `strataI2`、`swiftqwen38` / `mimo` の `sglang-docker`）は
+  **WSL 環境（別ホスト）の modelctl バックエンド用**で、atom2 の qwen38sglangrocm / strata とは
+  無関係。削除すると WSL 側の監視表示が壊れるためそのまま残した
+  （`_strata_metrics` / `_STRATA_DONE_RE` / `_STRATA_PROGRESS_RE` も同理由で保持）。
+- `front/index.html`: プロファイル一覧とヘッダのプルダウンは `/api/vllm/status` の
+  `containers`（= `docker-compose.yml` の動的パース）に従うため変更不要だった。
+  内部にハードコードされていたプロファイル名は `clef` に関するコメント 1 处のみ（残すライン）。
+- `~/.dgxsparkutil/last_active.json`: 整理時点の値が `qwen3vl`（削除対象外）なのでそのまま。
+  削除済みプロファイルが残っていた場合は `get_status()` が稼働時に上書きする。
+
+### 反映手順と検証（2026-11-27 実測）
+
+```bash
+# compose からサービスを削除した時点で プロファイル表は自動追従する（mtime 検知）
+# code 側は再起動が必要（dgx-spark-api は /etc/systemd/system のシステム unit。--reload なし）
+sudo systemctl daemon-reload && sudo systemctl restart dgx-spark-api
+```
+
+- `GET /api/vllm/status` → `containers` が **hipfire / qwen3vl / clef の 3 件**のみ。
+  hipfire 起動時は `active.profile=hipfire`、`model_name=qwen3.8:27b-mq4-xts`、`health=true`、
+  `uptime_str`、`metrics`（e2e / ttft / prompt / generation / kv / requests_running / waiting の
+  7 キー）、`last_active=hipfire` を確認
+- `GET /api/vllm/cline?profile=hipfire` → 200、`base_url=http://whitebearatom2.local:8011/v1/`、
+  `api_key=認証なし(任意の値でOK)`、`context_max=262144`、`max_output_recommended=8192`、
+  `temperature=1.0`（magn 分岐削除後も hipfire の `/v1/models` 動的取得が動作）
+- `GET /api/platform`・`GET /api/rag/status` → 200
+- サービスログ（`journalctl -u dgx-spark-api`）に例外 0 件
+- `python3 -m py_compile` 全ファイル OK / `bash -n` 全スクリプト OK
+- `magn-headless.service` は `systemctl --user disable --now` → unit ファイル削除 →
+  `daemon-reload` で消滅（`~/.config/systemd/user/` に user unit は残っていない）
