@@ -581,75 +581,6 @@ def _hipfire_server_metrics(port: int) -> dict:
     return m
 
 
-def _maya_metrics(base: str, headers: list[str] | None) -> dict:
-    """Maya (Project Maya / GLM-5.3-Flash) の /metrics (Bearer 必須・JSON) をマッピングする。
-
-    Maya の /metrics は Prometheus 形式ではなく JSON (live / engine / requests / totals)。
-    生成中は live.tok_s と live.prefill_tok_s_mean の瞬時値、リクエスト直後は requests
-    の直近完了 (finish が stop/length) の decode_tok_s / prefill_tok_s を使う
-    （Strata の「直近値表示」と同じ体験）。Maya は全エンドポイントが Bearer 認証必須
-    （/metrics も /slots も 401）なので headers は必須。
-    - 出力スループット = live.tok_s → 直近完了の decode_tok_s → totals の累計平均
-    - 入力スループット = live.prefill_tok_s_mean → 直近完了の prefill_tok_s → 同上
-    - E2E = duration_s / TTFT = prompt_ms/1000 (Maya に TTFT 単独値は無い)
-    - KVCache 使用率 = (prompt+output) ÷ engine.max_context × 100 (Strata と同じ定義)
-    """
-    m = {
-        "requests_running": None,
-        "requests_waiting": None,
-        "kv_cache_usage_pct": None,
-        "e2e_latency_s": None,
-        "ttft_s": None,
-        "prompt_tokens_per_s": None,
-        "generation_tokens_per_s": None,
-    }
-    txt = _http_get(f"{base}/metrics", 5, headers)
-    if not txt:
-        return m
-    try:
-        d = json.loads(txt)
-    except ValueError:
-        return m
-    live = d.get("live") or {}
-    engine = d.get("engine") or {}
-    reqs = d.get("requests") or []  # 新しい順 (requests[0] が直近)
-    last: dict = {}
-    for r in reqs:
-        if isinstance(r, dict) and r.get("finish") in ("stop", "length"):
-            last = r
-            break
-    if not last and reqs and isinstance(reqs[0], dict):
-        last = reqs[0]
-    m["requests_running"] = live.get("active")
-    m["requests_waiting"] = live.get("queued")
-    if isinstance(last.get("duration_s"), (int, float)):
-        m["e2e_latency_s"] = last["duration_s"]
-    if isinstance(last.get("prompt_ms"), (int, float)):
-        m["ttft_s"] = last["prompt_ms"] / 1000.0
-    # 累計平均 (totals) を最終フォールバックにする (hipfire と同じ「idle でも 0 や - に
-    # 落ちない」方針)。prompt は実読込 token (prompt_tokens - reused) が正本で、
-    # Maya 自身の Prometheus 変換 (serve/server.py) と同じ数え方。
-    totals = d.get("totals") or {}
-    prompt_n = (totals.get("prompt_tokens") or 0) - (totals.get("reused") or 0)
-    prompt_s, decode_s = (totals.get("prompt_ms") or 0) / 1000.0, (totals.get("decode_ms") or 0) / 1000.0
-    cum_pre = prompt_n / prompt_s if prompt_n > 0 and prompt_s > 0 else None
-    cum_dec = (totals.get("output_tokens") or 0) / decode_s if decode_s > 0 else None
-    m["generation_tokens_per_s"] = live.get("tok_s") or last.get("decode_tok_s") or cum_dec
-    m["prompt_tokens_per_s"] = live.get("prefill_tok_s_mean") or last.get("prefill_tok_s") or cum_pre
-    # KVCache 使用率: 稼働中は live の prompt+generated、アイドルは 0 (Strata / hipfire と同じ)
-    ctx = engine.get("max_context") or engine.get("context")
-    if ctx and live.get("active"):
-        used = (live.get("prompt_tokens") or 0) + (live.get("generated") or 0)
-        if not used:
-            used = (last.get("prompt_tokens") or 0) + (last.get("output_tokens") or 0)
-        m["kv_cache_usage_pct"] = min(100.0, used / float(ctx) * 100.0)
-    elif not live.get("active"):
-        m["kv_cache_usage_pct"] = 0.0
-    return m
-
-
-# ---------------------------------------------------------------- 状態
-
 def _parse_vllm_metrics(text: str) -> dict:
     """vLLM の Prometheus 形式メトリクスを dict に変換する。
 
@@ -1240,10 +1171,9 @@ def _tabbyapi_metrics(
 # - Strata           : /metrics/prometheus が llama.cpp と同名系列 (llamacpp:*) を公開する
 #                      ため _llamacpp_metrics を流用。加えてログの "[strata] done:" 行から
 #                      直近リクエスト・expert cache hit 率・投機受理を補完する。
-# - llama.cpp (llmjp): --metrics 未指定。/slots + ログの print_timing 行から算出。
+# - llama.cpp (clef) : --metrics 有効。_clef_metrics が llamacpp: 系列をマッピングする
+#                      （decision モデル・生成統計は出ない）。
 # - TabbyAPI         : ログファイル末尾を _tabbyapi_metrics に渡す (既存パーサを流用)。
-# - ExLlamaV3 (exl)  : /health の累計カウンタの差分でスループットを算出。
-# - SGLang / llama.cpp (Docker 系モード): HTTP は既存経路、ログは docker logs を使う。
 
 _STRATA_DONE_RE = re.compile(
     r"\[strata\] done: ([\d,]+) tokens in ([\d.]+) s \(([\d.]+) tok/s\)"
@@ -1337,56 +1267,10 @@ def _llamacpp_log_metrics(base: str, log_text: str) -> dict:
     return m
 
 
-def _exllama_metrics(base: str) -> dict:
-    """ExLlamaV3 kit (serve_openai.py): /health の累計カウンタを差分算出する。
-
-    /health は prompt_tokens_total / completion_tokens_total を公開する
-    (live tok/s 表示用)。系列名を vLLM と同じ *_total に寄せて _tps_of を再利用する。
-    """
-    txt = _http_get(f"{base}/health", timeout=3)
-    if not txt:
-        return {}
-    try:
-        data = json.loads(txt)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    pm = {
-        "vllm:prompt_tokens_total": float(data.get("prompt_tokens_total", 0) or 0),
-        "vllm:generation_tokens_total": float(data.get("completion_tokens_total", 0) or 0),
-    }
-    now = time.time()
-    m = {
-        "requests_running": data.get("requests_running"),
-        "requests_waiting": data.get("requests_waiting"),
-        "kv_cache_usage_pct": None,
-        "e2e_latency_s": None,
-        "ttft_s": None,
-        "prompt_tokens_per_s": _tps_of("prompt", "vllm:prompt_tokens_total", pm, now),
-        "generation_tokens_per_s": _tps_of(
-            "generation", "vllm:generation_tokens_total", pm, now
-        ),
-    }
-    _prev_metrics["ts"] = now
-    _prev_metrics["prompt"] = pm["vllm:prompt_tokens_total"]
-    _prev_metrics["generation"] = pm["vllm:generation_tokens_total"]
-    return m
-
-
-# Docker でサーブする WSL モード (bonsai / swiftqwen38 / mimo) のコンテナ名。
-# model-ctl.sh が docker inspect で使う実体名と一致させる。
-_MODELCTL_DOCKER_CONTAINERS = {
-    "bonsai": "bonsai-llama-server",
-    "swiftqwen38": "swift-qwen38",
-    "mimo": "mimo-9b",
-}
-
-
 def _modelctl_headers(profile: str) -> list[str] | None:
     """WSL モードの API キー (model-ctl.sh の _mc_mode_key が正本) を curl 用引数にする。
 
-    鍵が無いモード (exl / bonsai) と、ログ読みのみのモードでは None = 従来どおり無認証。
+    鍵が無いモード (strata / clef) と、ログ読みのみのモードでは None = 従来どおり無認証。
     """
     key = (modelctl.params(profile).get("api_key") or "").strip()
     return ["-H", f"Authorization: Bearer {key}"] if key else None
@@ -1419,38 +1303,6 @@ def _modelctl_metrics(profile: str, info: dict, base: str) -> dict:
             pm = _parse_vllm_metrics(mt) if mt else {}
             return _clef_metrics(pm, base)
         return _llamacpp_log_metrics(base, modelctl.read_log_text(log_path, 400))
-    if engine == "exllama":
-        _reset_token_state()
-        _reset_tabby_state()
-        return _exllama_metrics(base)
-    if engine == "maya":
-        _reset_token_state()
-        _reset_tabby_state()
-        return _maya_metrics(base, _modelctl_headers(profile))
-    # llamacpp-docker / sglang-docker: HTTP は既存の /metrics 経路を流用
-    mt = _http_get(f"{base}/metrics", timeout=5)
-    pm = _parse_vllm_metrics(mt) if mt else {}
-    if any(k.startswith("sglang:") for k in pm):
-        _reset_tabby_state()
-        return _sglang_metrics(pm)
-    if any(k.startswith("llamacpp:") for k in pm):
-        _reset_token_state()
-        _reset_tabby_state()
-        return _llamacpp_metrics(pm, base)
-    if _is_llamacpp(base):
-        _reset_token_state()
-        _reset_tabby_state()
-        return _llamacpp_metrics({}, base)
-    _reset_token_state()
-    _reset_tabby_state()
-    return _sglang_get_load(base) or {}
-
-
-def _modelctl_docker_logs(profile: str, tail: int) -> list[str]:
-    """Docker 系モード (bonsai / swiftqwen38 / mimo) の直近ログ。"""
-    name = _MODELCTL_DOCKER_CONTAINERS.get(profile, profile)
-    out = _run(["docker", "logs", "--tail", str(tail), name], timeout=10)
-    return out.splitlines()[-tail:]
 
 
 def _get_status_modelctl() -> dict:
@@ -1529,10 +1381,7 @@ def _get_status_modelctl() -> dict:
             active["metrics"] = _modelctl_metrics(running_profile, info, base)
         except Exception:
             active["metrics"] = {}
-        if info.get("engine") in ("llamacpp-docker", "sglang-docker"):
-            active["logs"] = _modelctl_docker_logs(running_profile, 30)
-        else:
-            active["logs"] = modelctl.tail_log(info.get("log", ""), 30)
+        active["logs"] = modelctl.tail_log(info.get("log", ""), 30)
     else:
         active["logs"] = modelctl.tail_log(info.get("log", ""), 30)
 
@@ -1780,9 +1629,7 @@ def get_log(profile: str, tail: int = 500) -> dict:
         raise ValueError(f"不明なプロファイル: {profile}")
     p = profiles[profile]
     if _is_modelctl():
-        # WSL: 起動ログファイル (logs/ctl-*.log) を読む。Docker 系モードだけ docker logs。
-        if p.get("engine") in ("llamacpp-docker", "sglang-docker"):
-            return {"profile": profile, "logs": _modelctl_docker_logs(profile, tail)}
+        # WSL: 起動ログファイル (logs/ctl-*.log) を読む
         return {"profile": profile, "logs": modelctl.tail_log(p.get("log", ""), tail)}
     cmd = ["docker", "logs", "--tail", str(tail), p["container"]]
     try:
@@ -2081,14 +1928,79 @@ def edit_params(profile: str, updates: dict[str, str]) -> dict:
 # ここで補完する。画像対応・温度は compose の command から動的取得できる場合は
 # それを優先し、取得できない場合のみこのテーブルを使う。
 CLINE_MODEL_TABLE = {
-    # Strata strataI2（WSL modelctl 専用モード・2026-11-23）: Inkling-2-Mini SQ-20。
-    # /health images: true（Inkling-2-Mini-Vision.strata 0.64GB を常備）。context は
-    # config 262144（2026-11-23 に 32768→262144 へ再設定・recommended は params の
-    # context_length が優先）／ネイティブ上限 1M。
-    # 思考 effort は Strata 側 REASONING_EFFORTS=("none",)（HAS_THINKING=False）。
-    "strataI2": {
+    "nemotron": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "muse": {
+        "images": True,  # 動的: --mmproj
+        "context_max": 131072,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 1.0,  # 動的: --temp
+    },
+    "qwen38": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38bf16": {
+        "images": True,  # 動的: --limit-mm-per-prompt
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38nvfp4": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglang": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangeagle": {
+        "images": False,
+        "context_max": 262144,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangdflash": {
+        "images": False,
+        "context_max": 1000000,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38sglangdspark": {
+        "images": False,
+        "context_max": 1000000,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38flashnextexl3": {
         "images": True,
-        "context_max": 1048576,
+        "context_max": 524288,
+        "max_output_recommended": 8192,
+        "max_output_max": 32768,
+        "temperature": 0.6,
+    },
+    "qwen38flashnextexl3_3p05": {
+        "images": True,
+        "context_max": 524288,
         "max_output_recommended": 8192,
         "max_output_max": 32768,
         "temperature": 0.6,
@@ -2258,9 +2170,6 @@ def _cline_config_modelctl(active: dict) -> dict:
     reasoning_options = ["None", "Low", "Medium", "High", "XHigh"]
     if profile == "clef":
         decision_only = bool(_clef_models_info(port).get("decisions"))
-        reasoning_options = ["None"]
-    if profile == "strataI2":
-        # Inkling-2-Mini: Strata 側が REASONING_EFFORTS=("none",)（思考トグルなし）
         reasoning_options = ["None"]
     return {
         "api_provider": "OpenAI Compatible",
