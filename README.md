@@ -6297,12 +6297,18 @@ clef（8014）+ RAG embedding（8010）** の 4 つに集約され、本リポ�
   uptime_str / usage_stats / metrics / context_length）、`_strata_health_info`、
   `_strata_server_metrics`、`_strata_last_metrics` を削除。`get_status()` の magn 稼働フォールバック
   と magn/strata の早期 return、`_switching_info()` の magn 判定、`get_logs()` の journalctl 分岐、
-  `get_cline_config()` の `is_magn` / strata 分岐、`CLINE_MODEL_TABLE` の atom2 用 4 エントリ
-  （strata / qwen38radiance / qwen38sglangrocm / qwen38gguf）を削除。
-  未使用になった `import shutil` を除去（2875 → 2448 行）。
+  `get_cline_config()` の `is_magn` / strata 分岐を削除。未使用になった `import shutil` を除去
+  （行数は 整理前 2875 → atom1/WSL 側の 35 モード削除 `a3573b4` 経て 2779 → 本削除で **2384**）。
+  `CLINE_MODEL_TABLE` は atom2 専用の `qwen38gguf` を削除（他機側も 2026-11-27 の `a3573b4` で
+  同名キーを除去済み）。`strata` / `qwen38radiance` / `qwen38sglangrocm` の 3 キーは他機の
+  同名プロファイル用に残っているため**保持**し、コメントで経緯を明記した
 
 ### 意図的に保持した部分
 
+- **`CLINE_MODEL_TABLE` の `strata` / `qwen38radiance` / `qwen38sglangrocm`** — この表は
+  atom1 / atom2 / WSL の三構成が共有する静的フォールバックで、他機に同名プロファイルが
+  まだ残っている。atom2 の compose から消えても表のキーは無害（front は一覧に出た
+  プロファイルに対してしか引かない）ため、他機の作業を踏みしないよう保持した
 - **`sglang:*` メトリクスマッパーと `wsl_modelctl_bridge.sh` の strata 系モード**
   （`strata15` / `strataS4` / … / `strataI2`、`swiftqwen38` / `mimo` の `sglang-docker`）は
   **WSL 環境（別ホスト）の modelctl バックエンド用**で、atom2 の qwen38sglangrocm / strata とは
@@ -6334,3 +6340,7 @@ sudo systemctl daemon-reload && sudo systemctl restart dgx-spark-api
 - `python3 -m py_compile` 全ファイル OK / `bash -n` 全スクリプト OK
 - `magn-headless.service` は `systemctl --user disable --now` → unit ファイル削除 →
   `daemon-reload` で消滅（`~/.config/systemd/user/` に user unit は残っていない）
+- **他機との統合**: push 前に origin/main へ rebase した。atom1 / WSL 側も 2026-11-27 の
+  `a3573b4` で 35 モードを削除しており `CLINE_MODEL_TABLE` の `qwen38gguf` で重複、
+  README は atom1 側 3 節と同じ位置へ追記が重なった。いずれも**相手の内容を残したまま**
+  解決している（`api/vllm.py` 1 箇所・`README.md` 2 箇所）
